@@ -25,8 +25,9 @@
 #      fm-harness.sh secondmate-model / secondmate-effort. A bare harness-only
 #      line (today's format) yields empty model/effort - full backward-compat.
 #      fm-spawn.sh populates MODEL/EFFORT from those tokens for a --secondmate
-#      spawn only when the caller passed no explicit --model/--effort, so the pin
-#      is durable across every respawn and an explicit per-spawn flag still wins.
+#      spawn only when the harness also resolves from that file, so the pin is
+#      durable across every respawn while explicit per-spawn harness/model/effort
+#      flags still win.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -572,6 +573,57 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token() {
   pass "C6 spawn: an explicit --effort overrides config/secondmate-harness's effort token; the file's model token still applies"
 }
 
+test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
+  local w sm meta launchlog launch
+  w="$TMP_ROOT/spawn-explicit-harness-no-tokens"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness codex >/dev/null 2>&1
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit-harness-no-tokens: meta harness not codex"
+  [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
+  [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
+    "explicit-harness-no-tokens: launch did not use codex"
+  assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
+  assert_not_contains "$launch" "model_reasoning_effort" \
+    "explicit-harness-no-tokens: launch must not carry a codex effort flag"
+  pass "C7 spawn: an explicit --harness starts with clean model/effort defaults"
+}
+
+test_spawn_explicit_harness_uses_explicit_profile_axes() {
+  local w sm meta launchlog launch
+  w="$TMP_ROOT/spawn-explicit-harness-explicit-axes"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness codex --model gpt-5.5 --effort xhigh >/dev/null 2>&1
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit-harness-explicit-axes: meta harness not codex"
+  [ "$(meta_field "$meta" model)" = gpt-5.5 ] || fail "explicit-harness-explicit-axes: meta model did not use explicit value"
+  [ "$(meta_field "$meta" effort)" = xhigh ] || fail "explicit-harness-explicit-axes: meta effort did not use explicit value"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "--model 'gpt-5.5'" \
+    "explicit-harness-explicit-axes: launch did not use the explicit --model"
+  assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" \
+    "explicit-harness-explicit-axes: launch did not use the explicit --effort"
+  assert_not_contains "$launch" "--model 'opus'" \
+    "explicit-harness-explicit-axes: launch leaked the file's model token"
+  assert_not_contains "$launch" "model_reasoning_effort=\"high\"" \
+    "explicit-harness-explicit-axes: launch leaked the file's effort token"
+  pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
+}
+
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
@@ -619,7 +671,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   launch=$(cat "$launchlog")
   assert_not_contains "$launch" "--model" "crew-unaffected: crew launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "crew-unaffected: crew launch must not carry an --effort flag"
-  pass "C7 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"
+  pass "C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"
 }
 
 # ===========================================================================
@@ -975,6 +1027,8 @@ test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
 test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
+test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
+test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
