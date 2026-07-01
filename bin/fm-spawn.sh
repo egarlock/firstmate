@@ -19,6 +19,13 @@
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
+#   config/secondmate-harness may also carry an optional model and effort as extra
+#   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
+#   --secondmate spawn, when the caller did not pass an explicit --model/--effort,
+#   those tokens (fm-harness.sh secondmate-model / secondmate-effort) populate
+#   MODEL/EFFORT, so a secondmate can be pinned to a concrete model/effort durably
+#   in the SAME file - re-resolved on every respawn exactly like the harness axis.
+#   An explicit --model/--effort still wins over the file's tokens.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
 #   into the secondmate home's config/, so the secondmate's OWN crewmates,
 #   dispatch profiles, and backlog backend inherit the primary's settings
@@ -110,6 +117,30 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+# config/secondmate-harness may carry optional model/effort tokens alongside the
+# harness ("<harness> [<model>] [<effort>]"). When this is a --secondmate spawn
+# and the caller did not pass an explicit --model/--effort, populate MODEL/EFFORT
+# from those tokens now, before HARNESS/LAUNCH resolution and meta recording below
+# read them. Resolving here on every spawn (not just once) is what makes the pin
+# DURABLE across every respawn (recovery, /updatefirstmate, restart), exactly like
+# the harness axis itself. Precedence: an explicit --model/--effort flag (already
+# recorded above) wins over the file's tokens.
+if [ "$KIND" = secondmate ]; then
+  if [ "$MODEL_SET" -eq 0 ]; then
+    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+    [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
+  fi
+  if [ "$EFFORT_SET" -eq 0 ]; then
+    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+    if [ -n "$SM_EFFORT" ]; then
+      case "$SM_EFFORT" in
+        low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
+        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+      esac
+    fi
+  fi
+fi
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
