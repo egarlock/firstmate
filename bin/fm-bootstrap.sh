@@ -61,6 +61,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-harness-policy.sh
+. "$SCRIPT_DIR/fm-harness-policy.sh"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
@@ -302,6 +304,25 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Build the verified-adapter allowlist and per-adapter accepted-effort matrix
+# as JSON from the single policy source (bin/fm-harness-policy.sh), so the
+# crew-dispatch validation below never duplicates them. Adapter and effort
+# names are bare [a-z]+ words, so hand-assembled JSON is safe.
+policy_adapters_json() {
+  local a out=
+  for a in $FM_VERIFIED_ADAPTERS; do out="$out,\"$a\""; done
+  printf '[%s]' "${out#,}"
+}
+policy_efforts_json() {
+  local a e inner out=
+  for a in $FM_VERIFIED_ADAPTERS; do
+    inner=
+    for e in $(fm_harness_efforts "$a"); do inner="$inner,\"$e\""; done
+    out="$out,\"$a\":[${inner#,}]"
+  done
+  printf '{%s}' "${out#,}"
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -314,15 +335,12 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","grok"] | index($h);
+  err=$(jq -r --argjson verified "$(policy_adapters_json)" --argjson efforts "$(policy_efforts_json)" '
+    def verified($h): $verified | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
-      elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif ($h == "codex" or $h == "grok" or $h == "pi") then (["low","medium","high","xhigh"] | index($e))
-      elif $h == "opencode" then false
-      else true
+      else (($efforts[$h] // []) | index($e)) != null
       end;
     def bad_efforts:
       ([(.rules // [])[]? | select((.use? | type) == "object") | {h: .use.harness, e: .use.effort}]
