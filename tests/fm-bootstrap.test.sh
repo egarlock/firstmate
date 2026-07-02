@@ -178,6 +178,9 @@ test_crew_dispatch_validation() {
   n=0
   while IFS='^' read -r label body mode expect; do
     [ -n "$label" ] || continue
+    # A literal @@ in the expect column stands for a newline (multi-line expects,
+    # e.g. the active-rules block, cannot ride a one-row-per-case table otherwise).
+    expect=${expect//@@/$'\n'}
     n=$((n + 1))
     case_dir="$TMP_ROOT/dispatch-$n"
     mkdir -p "$case_dir/home/config"
@@ -199,6 +202,8 @@ unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harn
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
+supported copilot max effort is accepted^{"rules":[{"when":"github work","use":{"harness":"copilot","effort":"max"}}]}^exact^CREW_DISPATCH: active config/crew-dispatch.json@@  rule: github work -> copilot/default/max
+unsupported copilot none effort is flagged^{"rules":[{"when":"github work","use":{"harness":"copilot","effort":"none"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: copilot:none
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }

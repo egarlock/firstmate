@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and copilot.
 user-invocable: false
 ---
 
@@ -27,7 +27,7 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the policy axes (allowlist entry, accepted efforts, flag syntax, process-name matching) in `bin/fm-harness-policy.sh` - the single source `fm-spawn.sh`, `fm-bootstrap.sh`, `fm-harness.sh`, and `fm-lock.sh` all read - plus the mechanics in `fm-spawn` (launch template, turn-end hook), any env marker in `fm-harness.sh`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
 
 ## Detection
 
@@ -55,9 +55,11 @@ The supported launch-profile flags below were verified locally on 2026-06-30 wit
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| copilot | `--model <model>` (`auto` lets Copilot pick) | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on GitHub Copilot CLI 1.0.68 (2026-07-02). `--effort` is an alias of `--reasoning-effort`; the parser enumerates none/low/medium/high/xhigh/max. `none` is outside firstmate's effort vocabulary and is never passed. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
+The accepted-effort sets and flag syntax in this table are executable policy in `bin/fm-harness-policy.sh`; this table is the human mirror.
 
 ## no-mistakes skill invocation
 
@@ -69,6 +71,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending; `fm_tmux_submit_core`'s retried Enter (used by `fm-send`) lands it.
+- copilot: `/<skill>` (same form as claude). `/<name>` opens copilot's slash-autocomplete popup (verified with `/exit`), so a too-fast Enter hits the popup; `fm-send`'s retried Enter lands it.
 
 ## claude (VERIFIED)
 
@@ -176,4 +179,35 @@ Its `Stop` command fires only when the current workspace holds a `.fm-grok-turne
 The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals the worktree.
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
 `fm-teardown` removes the worktree pointer before returning a pooled worktree.
+Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).
+
+## copilot (VERIFIED 2026-07-02, GitHub Copilot CLI 1.0.68)
+
+GitHub Copilot CLI (`copilot`), a TUI coding agent from GitHub.
+Launch with `copilot --allow-all -i "$(cat <brief>)"`: `-i/--interactive <prompt>` starts interactive mode and auto-executes the prompt.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc cancel` (the cancel hint in the working footer, e.g. `◉ Working · 275 B esc cancel`, shown iff a turn is running). Idle footer is `/ commands · ? help · → next tab`; idle composer is a bare `❯`. The ASCII `esc cancel` is the busy regex (avoids the locale fragility of the footer's Unicode `◉`/`·` glyphs, and a bare `Working` would false-positive on ordinary pane text). |
+| Exit command | `/exit` (a slash command). The exit banner prints `Resume copilot --resume=<session-id>`. |
+| Interrupt | single `Escape` (the footer's `esc cancel` hint). |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`), same form as claude. Opens a slash-autocomplete popup, so a too-fast Enter hits the popup; `fm-send`'s retried Enter lands it. |
+| Autonomy | `--allow-all` (= `--allow-all-tools --allow-all-paths --allow-all-urls`); verified to run shell commands, reads, and edits with zero confirmation. `COPILOT_ALLOW_ALL=true` is the env equivalent of `--allow-all-tools`. |
+| Env marker | `COPILOT_CLI=1`, set for child/tool processes (alongside `COPILOT_AGENT_SESSION_ID`, `COPILOT_CLI_BINARY_VERSION`, `COPILOT_PROJECT_DIR`). copilot does NOT set `CLAUDECODE`, so the marker is unambiguous. |
+| Resume | `copilot --continue` (most recent session), `copilot --resume=<session-id>`, or `copilot --session-id <id>` (id printed on exit). |
+| Model | `--model <model>` (default resolves to Claude Sonnet 5; `--model auto` lets Copilot pick). |
+| Effort | `--effort <low\|medium\|high\|xhigh\|max>` (alias `--reasoning-effort`; the CLI also accepts `none`, which firstmate never passes). |
+
+Trust dialog: on the first run in a not-yet-trusted folder, copilot shows "Confirm folder trust" (`1. Yes` / `2. Yes, and remember this folder for future sessions` / `3. No (Esc)`), default on option 1.
+After every spawn, peek the pane within about 20 seconds; if the dialog is showing, accept it with `bin/fm-send.sh <window> --key Enter` (option 1 - per-session trust, the right scope for a disposable worktree) and verify the brief started processing.
+
+No composer ghost text: copilot's idle composer is a bare `❯`, already classified empty by the generic composer reader, so no `FM_COMPOSER_IDLE_RE` override is needed.
+
+Turn-end hook: copilot fires an `agentStop` hook at every turn boundary (empirically confirmed: it fires after each interactive turn, not only at session end; the claude-compatible `Stop` event name is an alias firing at the same boundary).
+The recognized hook event names on 1.0.68 are `sessionStart`, `sessionEnd`, `userPromptSubmitted`, `preToolUse`, `postToolUse`, `agentStop`, `Stop`, `notification`, and `errorOccurred`; unknown names are ignored with a debug log line.
+Hooks are `*.json` files under `${COPILOT_HOME:-$HOME/.copilot}/hooks/` (schema `{"version":1,"hooks":{"<event>":[{"type":"command","bash":"<cmd>","timeoutSec":N}]}}`) - global, always loaded, no per-folder trust gate.
+So `fm-spawn` installs ONE firstmate-owned global hook, `~/.copilot/hooks/fm-turn-end.json`, plus the companion `fm-turn-end.sh`, guarded as a no-op for every non-firstmate copilot session - exactly grok's pattern: the `agentStop` command fires only when the current workspace holds a `.fm-copilot-turnend` token pointer that matches the firstmate-owned registry under `~/.copilot/hooks/fm-turn-end.d/`.
+`fm-spawn` writes that per-task pointer (`<worktree>/.fm-copilot-turnend`, gitignored via git info/exclude) and a matching registry entry naming this task's `state/<id>.turn-ended`.
+The hook resolves the workspace from `COPILOT_PROJECT_DIR` (verified set for hook commands, which also run with the workspace as cwd - `$PWD` is the fallback).
+`fm-teardown` removes the worktree pointer and registry token.
 Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).

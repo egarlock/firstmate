@@ -14,8 +14,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
-# Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# Known harness command names, derived from the verified-adapter allowlist in
+# bin/fm-harness-policy.sh (the single policy source; a newly verified adapter
+# is recognized here without another edit).
+# shellcheck source=bin/fm-harness-policy.sh
+. "$SCRIPT_DIR/fm-harness-policy.sh"
+HARNESS_RE=$(fm_harness_process_re)
 
 harness_pid() {
   local pid=$$ comm args

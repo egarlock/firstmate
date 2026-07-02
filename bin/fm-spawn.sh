@@ -23,7 +23,8 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare verified adapter name (the allowlist in
+#   bin/fm-harness-policy.sh)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -64,6 +65,9 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# copilot mirrors that: a firstmate-owned global hook under
+# ${COPILOT_HOME:-$HOME/.copilot}/hooks plus a gitignored .fm-copilot-turnend
+# worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -83,6 +87,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-harness-policy.sh
+. "$SCRIPT_DIR/fm-harness-policy.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -193,23 +199,25 @@ ARG3=
 FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
-  case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
-      ARG3=${POS[1]:-}
-      ;;
-    *' '*)
-      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-        FIRSTMATE_HOME=${POS[1]}
+  sm_arg=${POS[1]:-}
+  if [ -z "$sm_arg" ] || fm_harness_is_verified "$sm_arg"; then
+    ARG3=$sm_arg
+  else
+    case "$sm_arg" in
+      *' '*)
+        if [ "${#POS[@]}" -gt 2 ] || [ -d "$sm_arg" ]; then
+          FIRSTMATE_HOME=$sm_arg
+          ARG3=${POS[2]:-}
+        else
+          ARG3=$sm_arg
+        fi
+        ;;
+      *)
+        FIRSTMATE_HOME=$sm_arg
         ARG3=${POS[2]:-}
-      else
-        ARG3=${POS[1]}
-      fi
-      ;;
-    *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
-      ;;
-  esac
+        ;;
+    esac
+  fi
 else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
@@ -255,6 +263,15 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # copilot (GitHub Copilot CLI): -i starts interactive mode and auto-executes
+    # the prompt (the supervised-crewmate launch shape). --allow-all is full
+    # autonomy (= --allow-all-tools --allow-all-paths --allow-all-urls; verified
+    # 1.0.68 to run shell/read/edit with zero confirmation), the targeted
+    # equivalent of claude's --dangerously-skip-permissions. copilot's turn-end
+    # signal does NOT ride the launch command - it is an agentStop-event hook
+    # installed below (global hook + per-task pointer, mirroring grok), so the
+    # template is identical for ship/scout/secondmate.
+    copilot) printf '%s' 'copilot --allow-all __MODELFLAG____EFFORTFLAG__-i "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -338,53 +355,12 @@ shell_quote() {
   printf "'"
 }
 
-model_flag_for_harness() {
-  local harness=$1 model=$2
-  [ -n "$model" ] && [ "$model" != default ] || return 0
-  case "$harness" in
-    claude|codex|opencode|pi|grok)
-      printf -- '--model %s ' "$(shell_quote "$model")"
-      ;;
-  esac
-}
-
-effort_flag_for_harness() {
-  local harness=$1 effort=$2
-  [ -n "$effort" ] && [ "$effort" != default ] || return 0
-  case "$harness" in
-    claude)
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-      esac
-      ;;
-    grok)
-      # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob, and --reasoning-effort rejects max, so pass
-      # only its accepted shared vocabulary subset.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    pi)
-      # pi accepts --thinking low|medium|high|xhigh. It warns and ignores max, so
-      # omit max rather than passing a flag the installed CLI will reject as invalid.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-  esac
-}
+# Model/effort flag construction is policy, single-sourced in
+# bin/fm-harness-policy.sh (fm_harness_model_flag / fm_harness_effort_flag):
+# the verified accepted-effort sets and per-adapter flag syntax live there, so
+# adding an adapter never edits this script's flag maps. Both emit nothing for
+# an unset/default axis or an effort outside the adapter's accepted set; the
+# requested effort= is still recorded in meta below for traceability.
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -758,6 +734,54 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    copilot*)
+      # copilot fires an agentStop hook at every turn boundary (verified, GitHub
+      # Copilot CLI 1.0.68: it fires after each interactive turn, not only at
+      # session end; the claude-compatible "Stop" event name is an alias that
+      # fires at the same boundary). Hooks are loaded from *.json files under
+      # ${COPILOT_HOME:-$HOME/.copilot}/hooks - always trusted, no per-folder
+      # trust gate - so, exactly like grok, the turn-end hook lives OUTSIDE the
+      # worktree as a single firstmate-owned global hook that is a guarded no-op
+      # for every non-firstmate copilot session: it fires only when the current
+      # workspace holds a .fm-copilot-turnend token pointer that matches the
+      # firstmate-owned hook registry. Hook commands run with the workspace as
+      # cwd and COPILOT_PROJECT_DIR set to it (verified), which is the guard's
+      # workspace source. Only firstmate-owned files are written; copilot's own
+      # managed config is never touched.
+      COPILOT_HOOKS_DIR="${COPILOT_HOME:-$HOME/.copilot}/hooks"
+      COPILOT_AUTH_DIR="$COPILOT_HOOKS_DIR/fm-turn-end.d"
+      mkdir -p "$COPILOT_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$COPILOT_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.copilot-turnend-token"
+      sq_copilot_auth_dir=$(shell_quote "$COPILOT_AUTH_DIR")
+      cat > "$COPILOT_HOOKS_DIR/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+auth_dir=$sq_copilot_auth_dir
+workspace=\${COPILOT_PROJECT_DIR:-\$PWD}
+[ -n "\$workspace" ] || exit 0
+p="\$workspace/.fm-copilot-turnend"
+[ -f "\$p" ] || exit 0
+first=
+IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
+case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
+case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
+t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
+case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
+touch "\$t" 2>/dev/null || true
+exit 0
+EOF
+      chmod +x "$COPILOT_HOOKS_DIR/fm-turn-end.sh"
+      hook_command=$(json_escape "bash $(shell_quote "$COPILOT_HOOKS_DIR/fm-turn-end.sh")")
+      printf '{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"%s","timeoutSec":10}]}}\n' "$hook_command" > "$COPILOT_HOOKS_DIR/fm-turn-end.json"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-copilot-turnend"
+      exclude_path '.fm-copilot-turnend'
+      ;;
   esac
 fi
 
@@ -807,8 +831,8 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+MODELFLAG=$(fm_harness_model_flag "$HARNESS" "$MODEL")
+EFFORTFLAG=$(fm_harness_effort_flag "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
