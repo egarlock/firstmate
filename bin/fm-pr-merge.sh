@@ -87,4 +87,8 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]}" "$@"
+# ${merge_args[@]+"..."} guards the empty-array case: when the caller passed an
+# explicit merge method, merge_args stays empty, and a bare "${merge_args[@]}"
+# under `set -u` is an "unbound variable" error on bash < 4.4 (stock /bin/bash on
+# macOS is 3.2). "$@" is a special parameter and is always safe empty.
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"

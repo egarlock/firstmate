@@ -41,6 +41,48 @@ jobs:
             "$test_script"
           done
 
+  macos-bash32:
+    name: macOS stock bash 3.2
+    # The captain's macOS runs stock /bin/bash 3.2.57, but the jobs above use
+    # ubuntu-latest (bash 5). Every bash-3.2-specific break shipped undetected for
+    # exactly that reason: a heredoc inside `$(...)` whose apostrophe crashes the
+    # pre-POSIX scanner, an empty array under `set -u`, and a locale-dependent
+    # `[a-z]` range that matches uppercase. This leg exercises the toolbelt and the
+    # full behavior suite under the real stock bash 3.2 so that class fails CI.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Assert stock /bin/bash is 3.2
+        run: |
+          set -eu
+          /bin/bash --version | head -1
+          major=$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')
+          [ "$major" = 3 ] || { echo "::error::expected stock /bin/bash major version 3 (macOS 3.2), got $major"; exit 1; }
+      - name: Syntax-check every script under bash 3.2
+        run: |
+          set -eu
+          for script in bin/*.sh bin/backends/*.sh tests/*.sh; do
+            /bin/bash -n "$script"
+          done
+      - name: Ensure tmux is available for the e2e tests
+        run: |
+          set -eu
+          command -v tmux >/dev/null || brew install tmux
+          tmux -V
+      - name: Run behavior tests under stock bash 3.2
+        run: |
+          set -eu
+          # Put /bin first so each test's `#!/usr/bin/env bash` and every script it
+          # spawns resolve to the stock 3.2 interpreter, exercising the same bash the
+          # captain's macOS machine runs. Other tools (git, tmux) stay on PATH after.
+          export PATH="/bin:$PATH"
+          for test_script in tests/*.test.sh; do
+            "$test_script"
+          done
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest

@@ -48,6 +48,17 @@ for a in "$@"; do
   esac
 done
 ID=${POS[0]}
+# Task ids are LLM-generated and flow into filesystem paths (and downstream into
+# tmux targets, branch names, and regexes via fm-spawn), so reject anything but a
+# strict slug: [a-z0-9][a-z0-9-]* (lowercase alnum start, then lowercase alnum or hyphen).
+# The class is enumerated literally, not [a-z0-9-]: under bash 3.2 with a UTF-8
+# locale (stock /bin/bash on macOS) a `[a-z]` range matches uppercase via collation,
+# so a range-based check leaks ids like "Bad-Id". Enumeration is locale-independent.
+case "$ID" in
+  ''|-*|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*)
+    echo "error: invalid task id '$ID' - must match [a-z0-9][a-z0-9-]* (lowercase letters, digits, hyphens; no leading hyphen)" >&2
+    exit 1 ;;
+esac
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
@@ -175,19 +186,25 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
+    # read -r -d '' (not $(cat <<EOF)): a heredoc inside command substitution trips
+    # bash 3.2's pre-POSIX scanner, which quote-pairs an apostrophe in the body
+    # across the substitution and dies with "unexpected EOF looking for matching '".
+    # This assignment-heredoc form is apostrophe-safe, still interpolates, and
+    # read returns non-zero at EOF so `|| true` keeps it clean under `set -e`.
+    read -r -d '' DOD <<EOF || true
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
-)
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD=$(cat <<EOF
+    # read -r -d '' assignment-heredoc, not $(cat <<EOF): apostrophe-safe under
+    # bash 3.2 (see the direct-PR block above for why).
+    read -r -d '' DOD <<EOF || true
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -195,13 +212,15 @@ Keep your branch a clean fast-forward onto the current default branch - if \`mai
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 Firstmate then reviews your branch diff, the captain approves, and firstmate merges it into local \`main\`.
 EOF
-)
     ;;
   *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
+    # read -r -d '' assignment-heredoc, not $(cat <<EOF): this body contains an
+    # apostrophe ("no-mistakes' own guidance") that trips bash 3.2's scanner when
+    # the heredoc sits inside command substitution (see the direct-PR block above).
+    read -r -d '' DOD <<EOF || true
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
@@ -218,7 +237,6 @@ Two firstmate-specific rules layer on top of that guidance:
 
 After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
-)
     ;;
 esac
 
