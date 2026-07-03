@@ -186,14 +186,27 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"} --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"}; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
   exit "$rc"
 fi
 ID=${POS[0]}
+# Task ids are LLM-generated and flow into filesystem paths, tmux/backend targets,
+# git branch names, and regexes (incl. a deleting grep in fm-home-seed.sh), so a
+# single metacharacter is an injection vector. Require a strict slug:
+# [a-z0-9][a-z0-9-]* (lowercase alnum start, then lowercase alnum or hyphen).
+# The character class is enumerated literally rather than written [a-z0-9-]: under
+# bash 3.2 with a UTF-8 locale (stock /bin/bash on macOS), a `[a-z]` range matches
+# uppercase letters via locale collation, so a range-based check would let ids like
+# "Bad-Id" through. Explicit enumeration is locale- and bash-version-independent.
+case "$ID" in
+  ''|-*|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*)
+    echo "error: invalid task id '$ID' - must match [a-z0-9][a-z0-9-]* (lowercase letters, digits, hyphens; no leading hyphen)" >&2
+    exit 1 ;;
+esac
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
