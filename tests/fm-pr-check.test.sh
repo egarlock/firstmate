@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Tests for bin/fm-pr-check.sh's PR-URL validation.
+#
+# fm-pr-check.sh generates state/<id>.check.sh, a script the watcher later
+# EXECUTES, by interpolating the PR URL into it. That URL originates in
+# crewmate-authored status text ("done: PR <url> checks green"), so an
+# unvalidated URL is a command-injection vector: anything able to write a status
+# line could run code in firstmate's context. The script must validate the URL to
+# the exact https://github.com/<owner>/<repo>/pull/<n> shape - mirroring
+# fm-pr-merge.sh's parser - before recording it or writing the check shim.
+#
+# Matrix:
+#   (a) a well-formed PR URL is accepted, records pr=, and arms the check shim
+#   (b) a URL carrying a shell command-substitution is REJECTED before any write
+#   (c) a non-GitHub URL is REJECTED before any write
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_git_identity fmtest fmtest@example.invalid
+
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+TMP_ROOT=$(fm_test_tmproot fm-pr-check-tests)
+
+# Build a sandbox with a task meta and a fakebin whose gh mock would answer a
+# pr_head lookup. A fresh watcher beacon keeps fm-guard quiet.
+make_case() {
+  local name=$1 case_dir fakebin
+  case_dir="$TMP_ROOT/$name"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  touch "$case_dir/state/.last-watcher-beat"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  mkdir -p "$case_dir/wt"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *headRefOid*) printf '%s\n' 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' ; exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  printf '%s\n' "$case_dir"
+}
+
+run_pr_check() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" "$@"
+}
+
+test_wellformed_url_accepted() {
+  local case_dir rc
+  case_dir=$(make_case wellformed)
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "wellformed: fm-pr-check should accept a valid PR URL"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "wellformed: pr= was not recorded"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "wellformed: check shim was not armed"
+  pass "fm-pr-check accepts a well-formed PR URL and arms the merge poll"
+}
+
+test_injection_url_rejected_before_any_write() {
+  local case_dir rc canary
+  case_dir=$(make_case injection)
+  canary="$case_dir/pwned"
+
+  set +e
+  # shellcheck disable=SC2016  # Literal command substitution probes URL parsing safety.
+  run_pr_check "$case_dir" task-x1 "https://github.com/x/x/pull/1\$(touch $canary)" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "injection: fm-pr-check should reject a URL carrying a shell command"
+  assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
+    "injection: refusal did not explain the expected URL shape"
+  assert_absent "$canary" \
+    "injection: the malicious command executed - the generated check shim ran attacker code"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "injection: a check shim was armed for a malicious URL"
+  # shellcheck disable=SC2016  # Literal command substitution must not reach meta.
+  assert_no_grep 'touch' "$case_dir/state/task-x1.meta" \
+    "injection: malicious URL was recorded into meta"
+  pass "fm-pr-check rejects a command-injection PR URL before recording or arming anything"
+}
+
+test_non_github_url_rejected() {
+  local case_dir rc
+  case_dir=$(make_case non-github)
+
+  set +e
+  run_pr_check "$case_dir" task-x1 'https://gitlab.com/example/repo/-/merge_requests/1' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "non-github: fm-pr-check should reject a non-GitHub PR URL"
+  assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
+    "non-github: refusal did not explain the expected URL shape"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "non-github: a check shim was armed for a non-GitHub URL"
+  pass "fm-pr-check rejects a non-GitHub PR URL before arming the merge poll"
+}
+
+test_wellformed_url_accepted
+test_injection_url_rejected_before_any_write
+test_non_github_url_rejected
