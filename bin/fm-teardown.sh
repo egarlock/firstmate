@@ -73,6 +73,44 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
+# Bounded network run. The landed-work check reaches out to GitHub (gh/gh-axi)
+# and fetches refs; a hung remote must never foreground-block teardown, which the
+# supervision doctrine forbids. Prefer timeout/gtimeout, then a perl watchdog
+# (same fallback chain as bin/fm-crew-state.sh), and only run unbounded when no
+# timeout mechanism exists at all - never silently skip the call, since the
+# landed check depends on its result. On timeout the wrapped command exits
+# non-zero, so callers fall through to the fail-safe content check / refusal.
+NET_TIMEOUT=${FM_TEARDOWN_NET_TIMEOUT:-30}
+case "$NET_TIMEOUT" in ''|*[!0-9]*) NET_TIMEOUT=30 ;; esac
+if command -v timeout >/dev/null 2>&1; then NET_TIMEOUT_CMD=timeout
+elif command -v gtimeout >/dev/null 2>&1; then NET_TIMEOUT_CMD=gtimeout
+elif command -v perl >/dev/null 2>&1; then NET_TIMEOUT_CMD=perl
+else NET_TIMEOUT_CMD=none
+fi
+fm_net() {  # <cmd> <args...> — run a single network command time-bounded, preserving stdout + exit code
+  case "$NET_TIMEOUT_CMD" in
+    timeout)  timeout "$NET_TIMEOUT" "$@" ;;
+    gtimeout) gtimeout "$NET_TIMEOUT" "$@" ;;
+    perl)     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NET_TIMEOUT" "$@" ;;
+    *)        "$@" ;;
+  esac
+}
+
+# The content-in-default landed check relies on `git merge-tree --write-tree`,
+# which git gained in 2.38. On older git the merge-tree call would fail silently
+# and teardown would false-refuse landed work with no explanation; probe once so
+# the operator gets a clear diagnostic instead.
+git_supports_merge_tree_write_tree() {
+  local v major minor
+  v=$(git --version 2>/dev/null | sed -n 's/^git version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+  [ -n "$v" ] || return 1
+  major=${v%%.*}
+  minor=${v#*.}
+  [ "$major" -gt 2 ] && return 0
+  [ "$major" -eq 2 ] && [ "$minor" -ge 38 ] && return 0
+  return 1
+}
+
 default_branch() {
   local ref branch
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -116,7 +154,7 @@ remove_copilot_turnend_auth() {
 pr_number_from_branch() {
   local branch=$1 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
+  out=$( cd "$WT" && fm_net gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
   [ -n "$n" ] || return 1
   printf '%s' "$n"
@@ -144,7 +182,7 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  fm_net git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -193,7 +231,7 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+  view=$(cd "$WT" && fm_net gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
@@ -217,9 +255,13 @@ pr_is_merged() {
 # so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
+  if ! git_supports_merge_tree_write_tree; then
+    echo "error: content-in-default landed check needs git >= 2.38 for 'git merge-tree --write-tree' (got: $(git --version 2>/dev/null)); upgrade git or verify the merge manually before teardown." >&2
+    return 1
+  fi
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    fm_net git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
@@ -603,15 +645,19 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   else
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
     dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-copilot-turnend$)' | head -1 || true)
-    # Reachability test: is HEAD reachable from ANY remote-tracking branch? Empty
-    # means the work is already pushed (a fork is a remote too, so upstream-
-    # contribution PRs pushed to a fork pass here). Non-empty does NOT prove the work
-    # is unlanded: a squash or rebase merge rewrites the branch into a new commit on
-    # the default branch, and a repo that auto-deletes the head branch on merge also
-    # drops its remote-tracking ref - so a merged-and-deleted branch trips this test
-    # while being fully landed. We therefore treat reachability as a fast accept, not
-    # the sole verdict, and fall through to a landed-work check before refusing.
-    unpushed=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null | head -5 || true)
+    # Reachability test: is HEAD reachable from ANY publishing remote-tracking
+    # branch? Empty means the work is already pushed (a fork is a remote too, so
+    # upstream-contribution PRs pushed to a fork pass here). Non-empty does NOT prove
+    # the work is unlanded: a squash or rebase merge rewrites the branch into a new
+    # commit on the default branch, and a repo that auto-deletes the head branch on
+    # merge also drops its remote-tracking ref - so a merged-and-deleted branch trips
+    # this test while being fully landed. We therefore treat reachability as a fast
+    # accept, not the sole verdict, and fall through to a landed-work check before
+    # refusing. The local no-mistakes gate remote (refs/remotes/no-mistakes/*) is
+    # EXCLUDED: a branch pushed there during a *failed* validation run is on a
+    # remote-tracking ref but has not landed anywhere authoritative, so counting it
+    # would wrongly fast-accept unlanded work.
+    unpushed=$(git -C "$WT" log --oneline HEAD --not --exclude=no-mistakes/'*' --remotes -- 2>/dev/null | head -5 || true)
     if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
       # local-only ships have no remote in the common case, so the "on a remote"
       # test above is expected to be non-empty. The work is safe once it is merged

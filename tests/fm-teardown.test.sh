@@ -154,6 +154,18 @@ add_fork_with_pushed_branch() {
   git -C "$case_dir/project" fetch -q fork
 }
 
+# Register a bare repo as the local `no-mistakes` gate remote and push the task
+# branch to it, then fetch into the project so refs/remotes/no-mistakes/fm/task-x1
+# is visible from the worktree. This simulates a branch pushed to the gate during a
+# validation run that did NOT land (no merged PR, nothing on origin). Args: case_dir
+add_no_mistakes_remote_with_pushed_branch() {
+  local case_dir=$1
+  git init -q --bare "$case_dir/no-mistakes.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/no-mistakes.git"
+  git -C "$case_dir/wt" push -q no-mistakes fm/task-x1
+  git -C "$case_dir/project" fetch -q no-mistakes
+}
+
 # Commit a real file change on the worktree's task branch (unlike wt_commit, which
 # makes an empty commit). A non-empty tree is what the content-in-default check
 # inspects. Args: case_dir file content [message]
@@ -655,6 +667,27 @@ test_gh_error_and_content_absent_refuses() {
   pass "gh lookup error with content not in default refuses (fail-safe)"
 }
 
+test_no_mistakes_gate_remote_only_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-gate-remote-only)
+  write_meta "$case_dir" no-mistakes ship
+  # Real content pushed ONLY to the local no-mistakes gate remote (as during a
+  # failed validation run): no merged PR (default gh-axi mock), nothing on origin,
+  # content never landed on origin/main. The gate remote must NOT count as landed;
+  # before the fix the plain `--not --remotes` reachability test fast-accepted it.
+  wt_commit_file "$case_dir" feature.txt hello "gate-pushed but unlanded work"
+  add_no_mistakes_remote_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-gate-remote-only: teardown should refuse work only on the no-mistakes gate remote"
+  grep -q REFUSED "$case_dir/stderr" || fail "nm-gate-remote-only: no REFUSED line in stderr"
+  pass "no-mistakes gate remote alone does not count as landed (failed-run push is refused)"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -678,6 +711,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_gate_remote_only_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
