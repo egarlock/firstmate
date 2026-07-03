@@ -39,6 +39,25 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+test_daemon_fails_fast_on_spaced_state() {
+  local dir spaced out pid rc
+  dir=$(make_supercase daemon-spaced-state); out="$dir/daemon.out"
+  # classify_signal re-parses the space-delimited "signal: <file>..." reason by
+  # word splitting, so a whitespace-bearing state path would silently break
+  # captain-verb detection. The daemon must refuse to start with a clear message.
+  spaced="$dir/state dir"
+  mkdir -p "$spaced"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$spaced" FM_ROOT_OVERRIDE="$dir" \
+    bash "$DAEMON" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 30
+  rc=$?
+  expect_code 1 "$rc" "daemon should fail fast (exit 1) on a whitespace-bearing state path (guard missing?)"
+  grep -Fi "whitespace" "$out" >/dev/null || fail "daemon did not print a clear whitespace message: $(cat "$out")"
+  grep -F "$spaced" "$out" >/dev/null || fail "daemon did not echo the offending path: $(cat "$out")"
+  pass "the supervise daemon fails fast with a clear message on a whitespace-bearing state path"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -744,6 +763,7 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
 }
 
 test_daemon_state_root_uses_fm_home
+test_daemon_fails_fast_on_spaced_state
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate

@@ -280,6 +280,9 @@ discover_supervisor_target() {
 
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  # $reason is the space-delimited status-path list from a "signal:" wake. The
+  # startup fm_assert_state_space_safe guard guarantees STATE (hence every path)
+  # is whitespace-free, so this word split recovers exactly the per-file entries.
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
@@ -741,6 +744,11 @@ fm_super_main() {
   local STATE
   STATE="$(_state_root)"
   mkdir -p "$STATE"
+
+  # Refuse to run with a whitespace-bearing state path: classify_signal re-parses
+  # the space-delimited "signal: <file>..." reason by word splitting, so a spaced
+  # STATE would silently break captain-verb detection (fm-classify-lib.sh).
+  fm_assert_state_space_safe "$STATE" || exit 1
 
   # Source the portable lock helpers (works on macOS where flock is absent).
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
