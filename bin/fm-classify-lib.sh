@@ -29,6 +29,31 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# Fail-fast guard against a whitespace-bearing state/home path. The supervision
+# signal wake format is "signal: <status-file> <status-file>...", a
+# SPACE-DELIMITED list of paths, and the away-mode daemon re-parses it by word
+# splitting (classify_signal's `for f in $reason`). Because STATE is embedded in
+# every one of those paths, an FM_HOME/STATE containing whitespace (e.g.
+# "/Users/John Smith/...") would make the list ambiguous and silently break
+# captain-verb detection - a needs-decision:/blocked:/failed:/done: could be
+# split into fragments that match no status file and never wake firstmate. That
+# is a silent safety failure on safety-critical orchestration infra, so both the
+# always-on watcher and the away-mode daemon refuse to run with a clear message
+# rather than degrade silently. Returns 1 and prints guidance to stderr when the
+# path holds any whitespace; the caller exits on a non-zero return.
+fm_assert_state_space_safe() {  # <state-dir>
+  local state=$1
+  case "$state" in
+    *[[:space:]]*)
+      printf 'fatal: firstmate state path contains whitespace: %s\n' "$state" >&2
+      printf '       the supervision signal path is space-delimited and cannot safely\n' >&2
+      printf '       encode spaced paths; move FM_HOME to a path without spaces and retry.\n' >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses

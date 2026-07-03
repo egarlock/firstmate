@@ -583,6 +583,107 @@ test_afk_present_reverts_watcher_to_one_shot() {
   pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
 }
 
+# --- signal path space-safety: fail-fast on a whitespace-bearing state path -----
+
+test_state_space_guard_classifier() {
+  local err
+  # A clean path is accepted.
+  fm_assert_state_space_safe "/tmp/firstmate/state" 2>/dev/null \
+    || fail "space guard rejected a whitespace-free path"
+  # A spaced path is refused, with a clear message that echoes the offending path.
+  err=$(fm_assert_state_space_safe "/Users/John Smith/fm/state" 2>&1) \
+    && fail "space guard accepted a path containing a space"
+  assert_contains "$err" "whitespace" "space guard message should mention whitespace"
+  assert_contains "$err" "/Users/John Smith/fm/state" "space guard message should echo the offending path"
+  # A tab counts as whitespace too.
+  fm_assert_state_space_safe "$(printf 'a\tb')" 2>/dev/null \
+    && fail "space guard accepted a tab-bearing path"
+  pass "fm_assert_state_space_safe accepts clean paths and refuses whitespace with a clear message"
+}
+
+test_watcher_fails_fast_on_spaced_state() {
+  local dir spaced out pid rc
+  dir=$(make_case watcher-spaced-state); out="$dir/watch.out"
+  # The signal wake format "signal: <file>..." is space-delimited, so the watcher
+  # cannot safely operate under a state path containing whitespace. It must refuse
+  # with a clear message instead of silently breaking captain-verb detection.
+  spaced="$dir/state dir"
+  mkdir -p "$spaced"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$spaced" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 30
+  rc=$?
+  expect_code 1 "$rc" "watcher should fail fast (exit 1) on a whitespace-bearing state path (guard missing?)"
+  grep -Fi "whitespace" "$out" >/dev/null || fail "watcher did not print a clear whitespace message: $(cat "$out")"
+  grep -F "$spaced" "$out" >/dev/null || fail "watcher did not echo the offending path: $(cat "$out")"
+  [ ! -e "$spaced/.watch.lock" ] || fail "watcher acquired its lock despite failing fast on a spaced path"
+  [ ! -s "$spaced/.wake-queue" ] || fail "watcher enqueued a wake despite failing fast on a spaced path"
+  pass "the watcher fails fast with a clear message on a whitespace-bearing state path"
+}
+
+# --- corrupt counter files degrade gracefully instead of killing the watcher ----
+# .heartbeat-streak and .count-* are fed straight into arithmetic; under set -u a
+# non-numeric value would abort on an "unbound variable" and silently kill the
+# watcher. These mirror the .stale-since-* corrupt-timer hardening above.
+
+test_corrupt_heartbeat_streak_survives() {
+  local dir state fakebin out pid
+  dir=$(make_case corrupt-heartbeat-streak); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # A garbled counter (e.g. a stray word from a truncated write) that the pre-fix
+  # `1 << streak` arithmetic would have died on.
+  printf 'File\n' > "$state/.heartbeat-streak"
+  # A quiet fleet with a fast heartbeat so the no-change heartbeat path (which
+  # reads and rewrites the streak) runs promptly.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher died on a corrupt .heartbeat-streak instead of degrading gracefully: $(cat "$out")"
+  fi
+  # The corrupt value was treated as 0 and rewritten numerically while absorbing.
+  wait_numeric_file "$state/.heartbeat-streak" 30 \
+    || { reap "$pid"; fail "corrupt .heartbeat-streak was not repaired to a numeric value"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "corrupt-streak watcher printed a wake reason (should absorb): $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt-streak watcher enqueued a durable wake"; }
+  reap "$pid"
+  pass "a corrupt .heartbeat-streak degrades to 0 instead of killing the watcher under set -u"
+}
+
+test_corrupt_count_survives() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case corrupt-count); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-corrupt-count"
+  printf 'idle pane content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/corrupt-count.meta"
+  # A non-terminal working: status with a primed .seen-* so the signal scan stays quiet.
+  printf 'working: compiling\n' > "$state/corrupt-count.status"
+  sig=$(seen_sig "$state/corrupt-count.status"); printf '%s' "$sig" > "$state/.seen-corrupt-count_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle pane content")
+  # Prime the stale-hash so the pane counts as already idle, and CORRUPT the counter
+  # the pre-fix `$(( $(cat cf) + 1 ))` would have died on.
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf 'garbage\n' > "$state/.count-$key"
+  # Provably working so the non-terminal stale is absorbed and the watcher keeps
+  # blocking (rather than surfacing and exiting), letting wait_live observe survival.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher died on a corrupt .count-* instead of degrading gracefully: $(cat "$out")"
+  fi
+  wait_numeric_file "$state/.count-$key" 30 \
+    || { reap "$pid"; fail "corrupt .count-* was not repaired to a numeric value"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt-count watcher enqueued a durable wake while absorbing"; }
+  reap "$pid"
+  pass "a corrupt .count-* counter degrades to 0 instead of killing the watcher under set -u"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -603,3 +704,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
+test_state_space_guard_classifier
+test_watcher_fails_fast_on_spaced_state
+test_corrupt_heartbeat_streak_survives
+test_corrupt_count_survives
