@@ -47,6 +47,11 @@ mkdir -p "$STATE"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 
+# Refuse to run with a whitespace-bearing state path: the signal wake format is a
+# space-delimited path list, so a spaced STATE would silently break captain-verb
+# detection. Fail fast with a clear message instead (fm-classify-lib.sh).
+fm_assert_state_space_safe "$STATE" || exit 1
+
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
@@ -92,6 +97,22 @@ else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
   stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
 fi
+
+# Read a non-negative integer counter file (.heartbeat-streak, .count-*),
+# degrading to 0 for a missing, empty, or NON-NUMERIC value. These counters are
+# fed straight into arithmetic ($(( x + 1 )), 1 << streak); under `set -u` a
+# corrupt value (a stray word from a truncated/garbled write, or filesystem
+# damage) would abort the arithmetic on an "unbound variable" and silently kill
+# the watcher mid-cycle. Sanitizing on read makes a corrupt counter reset to 0
+# instead. Mirrors the .stale-since-* corrupt-timer hardening below.
+read_counter() {  # <file>
+  local v
+  v=$(cat "$1" 2>/dev/null || true)
+  case "$v" in
+    ''|*[!0-9]*) printf '0' ;;
+    *)           printf '%s' "$v" ;;
+  esac
+}
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
@@ -227,7 +248,7 @@ recorded_windows() {
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
 wake() {
   case "$1" in
-    heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
+    heartbeat*) echo $(( $(read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
   echo "$1"
@@ -395,7 +416,9 @@ EOF
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
-    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+    # shellcheck disable=SC2086  # $files is a space-separated status-path list; the
+    # startup fm_assert_state_space_safe guard guarantees STATE (and thus every path)
+    # is whitespace-free, so word-splitting recovers exactly the per-file arguments.
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
@@ -439,7 +462,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
-      n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
+      n=$(( $(read_counter "$cf") + 1 ))
       echo "$n" > "$cf"
       # Busy match: a backend's native semantic state when available (herdr),
       # else the last 6 non-blank lines only (the TUI footer area, where every
@@ -522,7 +545,7 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
-  streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
+  streak=$(read_counter "$STATE/.heartbeat-streak")
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
@@ -546,7 +569,7 @@ EOF
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
-      echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
+      echo $(( $(read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
