@@ -120,18 +120,17 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
-PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
+PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`, then records `landed=<sha>` (the merged PR head, or `pr-<n>` when no head is available) once the merge succeeds; `bin/fm-merge-local.sh` records `landed=<sha>` (the merged default-branch tip) on the approved local fast-forward merge.
+That `landed=` line is the authoritative "this work reached its destination" verdict teardown consults.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
 `bin/fm-pr-check.sh` validates the PR URL to that same exact shape before recording it or writing the watcher-executed `state/<id>.check.sh`, mirroring `fm-pr-merge.sh`'s parser: the URL originates in crewmate-authored status text, so an unvalidated URL interpolated into that executed shim would be a command-injection vector.
-Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
-Landed work is accepted when `HEAD` is reachable from any publishing remote-tracking branch, when a merged PR's GitHub head contains the current local work, or when the worktree content is already present in the freshly fetched default branch.
-The local no-mistakes gate remote (`refs/remotes/no-mistakes/*`) is excluded from that reachability walk, so a branch pushed there during a failed validation run is not treated as landed.
-The GitHub and fetch calls in the landed check are time-bounded (`FM_TEARDOWN_NET_TIMEOUT`, default 30s), so a hung remote can never foreground-block teardown; on timeout the call fails and the caller falls through to the fail-safe content check or refusal.
-The content-in-default check needs `git merge-tree --write-tree` (git >= 2.38); on older git teardown prints a clear diagnostic and refuses rather than silently false-refusing.
-PR-head containment covers an exact PR head match, a local `HEAD` that is an ancestor of the PR head, or unpushed local patches whose patch IDs appear in the PR head after no-mistakes replayed the branch.
-GitHub lookup errors fall back to the content check and still refuse if that check is inconclusive.
-If no `pr=` was ever recorded, teardown can still discover a merged PR by matching the worktree branch name and fetching `refs/pull/<n>/head` when the head branch was deleted.
-Those PR-head and content checks let a squash-merged PR whose head branch was deleted tear down cleanly without using `--force`; `local-only` work instead tears down after the approved local default-branch merge or after the branch is pushed to any remote.
+Teardown is fail-closed for ship worktrees: the landed-work oracle is a dirty gate followed by three allow-conditions checked in order.
+A dirty worktree (uncommitted changes) always refuses; then teardown allows on any one of a recorded `landed=<sha>` in `state/<id>.meta` (the merge already happened, recorded by `bin/fm-pr-merge.sh` / `bin/fm-merge-local.sh`), `HEAD` reachable from any publishing remote-tracking branch (a fork counts), or the branch's content already present in the freshly fetched default branch; it refuses only when none of the three holds.
+Recording the verdict at merge time is what makes teardown robust to a no-mistakes run that advanced origin past the local worktree HEAD, and it replaces the fragile PR-head-ancestor and patch-id-replay heuristics that were dropped (the direct remote-reachability allow-condition is retained).
+The local no-mistakes gate remote (`refs/remotes/no-mistakes/*`) is excluded from the reachability walk, so a branch pushed there during a failed validation run is not treated as landed.
+The recorded verdict and the reachability walk are cheap and local, so only the content fallback fetches; that fetch is time-bounded (`FM_TEARDOWN_NET_TIMEOUT`, default 30s), so a hung remote can never foreground-block teardown, and on timeout the content check fails inconclusive and teardown refuses.
+The content-in-default check needs `git merge-tree --write-tree` (git >= 2.38); on older git teardown prints a clear diagnostic and refuses rather than silently false-refusing, and it also covers the no-remote `local-only` case by comparing against `refs/heads/<default>` when there is no origin.
+Genuinely unlanded work (no recorded `landed=`, not reachable from any publishing remote, and content not in the default branch) and dirty worktrees still refuse; an inconclusive content check refuses rather than silently allowing.
 
 ## Optional X mode
 

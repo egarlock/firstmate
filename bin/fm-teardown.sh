@@ -86,13 +86,14 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
-# Bounded network run. The landed-work check reaches out to GitHub (gh/gh-axi)
-# and fetches refs; a hung remote must never foreground-block teardown, which the
-# supervision doctrine forbids. Prefer timeout/gtimeout, then a perl watchdog
-# (same fallback chain as bin/fm-crew-state.sh), and only run unbounded when no
-# timeout mechanism exists at all - never silently skip the call, since the
-# landed check depends on its result. On timeout the wrapped command exits
-# non-zero, so callers fall through to the fail-safe content check / refusal.
+# Bounded network run. The only network reach left in the landed-work check is the
+# content fallback's git fetch of the default branch; a hung remote must never
+# foreground-block teardown, which the supervision doctrine forbids. Prefer
+# timeout/gtimeout, then a perl watchdog (same fallback chain as
+# bin/fm-crew-state.sh), and only run unbounded when no timeout mechanism exists at
+# all - never silently skip the call, since the content check depends on its result.
+# On timeout the wrapped command exits non-zero, so the content check is inconclusive
+# and teardown refuses rather than false-allowing.
 NET_TIMEOUT=${FM_TEARDOWN_NET_TIMEOUT:-30}
 case "$NET_TIMEOUT" in ''|*[!0-9]*) NET_TIMEOUT=30 ;; esac
 if command -v timeout >/dev/null 2>&1; then NET_TIMEOUT_CMD=timeout
