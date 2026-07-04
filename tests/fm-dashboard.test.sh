@@ -31,6 +31,7 @@ case "$1" in
   fix-login-k3) echo "state: working · source: run-step · validating (running)" ;;
   add-cache-p9) echo "state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: captain decision)" ;;
   audit-db-z1)  echo "state: done · source: run-step · checks green: PR ready for review" ;;
+  ship-green-n5) echo "state: done · source: run-step · checks green: PR ready for review" ;;
   wedged-x2)    echo "state: blocked · source: status-log · stuck on migration" ;;
   *)            echo "state: unknown · source: none · no metadata" ;;
 esac
@@ -77,6 +78,18 @@ model=default
 effort=default
 pr=https://github.com/acme/api/pull/42
 EOF
+  cat > "$home/state/ship-green-n5.meta" <<EOF
+window=firstmate:fm-ship-green-n5
+worktree=/x/wt/ship-green-n5
+project=/home/projects/api
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+model=default
+effort=default
+pr=https://github.com/acme/api/pull/57
+EOF
   cat > "$home/state/wedged-x2.meta" <<EOF
 window=firstmate:fm-wedged-x2
 worktree=/x/wt/wedged-x2
@@ -90,6 +103,7 @@ EOF
   echo "working: implementing login fix" >> "$home/state/fix-login-k3.status"
   printf 'working: started\nneeds-decision: two lint findings need a call\n' >> "$home/state/add-cache-p9.status"
   echo "done: PR https://github.com/acme/api/pull/42 checks green" >> "$home/state/audit-db-z1.status"
+  echo "done: PR https://github.com/acme/api/pull/57 checks green" >> "$home/state/ship-green-n5.status"
   echo "blocked: migration tool missing" >> "$home/state/wedged-x2.status"
 
   cat > "$home/data/backlog.md" <<'EOF'
@@ -113,6 +127,11 @@ run_dash() {  # <home> <crew-state-cmd> [args...]
 # Print only the "Needs attention" <section> of an HTML file.
 attention_section() {  # <html-file>
   awk '/Needs attention/{f=1} f{print} f&&/<\/section>/{exit}' "$1"
+}
+
+# Print the task-row line for a given id (emit_task_row prints one <tr> per line).
+task_row() {  # <html-file> <id>
+  grep "c-id[^>]*>.*$2<" "$1" | head -1
 }
 
 # ---------------------------------------------------------------------------
@@ -141,12 +160,18 @@ run_dash "$BUSY" "$FAKE_CS" --out "$HTML" --no-open >/dev/null
 
 body=$(cat "$HTML")
 assert_not_contains "$body" "No active work" "busy fleet does not show empty state"
-for id in fix-login-k3 add-cache-p9 audit-db-z1 wedged-x2; do
+for id in fix-login-k3 add-cache-p9 audit-db-z1 ship-green-n5 wedged-x2; do
   assert_contains "$body" "$id" "busy fleet includes task $id"
 done
 # Backlog rendered.
 assert_contains "$body" "new-navbar-q4" "busy fleet renders the Queued backlog item"
 assert_contains "$body" "https://github.com/acme/webapp/pull/12" "backlog Done link rendered"
+# The URL appears once as a clickable anchor, not also inline in the raw text.
+back_row=$(grep 'old-task-a1' "$HTML" | head -1)
+back_text=${back_row%%<div class=\"pr\"*}
+assert_not_contains "$back_text" "https://github.com/acme/webapp/pull/12" \
+  "backlog inline text drops the URL now rendered as a clickable link"
+assert_contains "$back_text" "earlier fix" "backlog inline text keeps the item description"
 # Project grouping labels present.
 assert_contains "$body" ">webapp<" "project grouping label webapp present"
 assert_contains "$body" ">api<" "project grouping label api present"
@@ -157,14 +182,25 @@ att=$(attention_section "$HTML")
 assert_contains "$att" "Needs attention" "attention band header present"
 assert_contains "$att" "add-cache-p9" "parked task surfaced in attention band"
 assert_contains "$att" "wedged-x2" "blocked task surfaced in attention band"
-assert_contains "$att" "audit-db-z1" "PR-ready task surfaced in attention band"
+assert_contains "$att" "audit-db-z1" "PR-open task surfaced in attention band"
+assert_contains "$att" "ship-green-n5" "PR-ready task surfaced in attention band"
 assert_not_contains "$att" "fix-login-k3" "plain working task NOT surfaced in attention band"
 pass "(c) attention band surfaces only actionable work"
 
-# (d) PR awaiting merge.
-assert_contains "$body" "PR ready" "PR-ready pill present"
+# (d) PR awaiting merge. Mode-aware pill: no-mistakes -> "PR ready" (recorded at
+# checks-green), any other mode (direct-PR here) -> "PR open" (recorded at PR-open).
+audit_row=$(task_row "$HTML" audit-db-z1)
+green_row=$(task_row "$HTML" ship-green-n5)
+assert_contains "$green_row" '<span class="pill s-merge">PR ready</span>' \
+  "no-mistakes PR pill reads 'PR ready'"
+assert_not_contains "$green_row" '<span class="pill s-merge">PR open</span>' \
+  "no-mistakes PR pill is not 'PR open'"
+assert_contains "$audit_row" '<span class="pill s-merge">PR open</span>' \
+  "direct-PR PR pill reads 'PR open'"
+assert_not_contains "$audit_row" '<span class="pill s-merge">PR ready</span>' \
+  "direct-PR PR pill is not 'PR ready'"
 assert_contains "$body" "https://github.com/acme/api/pull/42" "PR link present and clickable"
-pass "(d) PR awaiting merge is flagged with a link"
+pass "(d) PR awaiting merge is flagged with a mode-aware pill and link"
 
 # (e) meta attribute chips.
 assert_contains "$body" "codex" "harness chip rendered"

@@ -211,7 +211,13 @@ EOF
   printf '<tr class="task %s">' "$sclass"
   printf '<td class="c-id"><span class="dot"></span>%s</td>' "$(esc "$id")"
   printf '<td><span class="pill %s">%s</span>' "$sclass" "$(esc "$state")"
-  [ "$ready_merge" = 1 ] && printf ' <span class="pill s-merge">PR ready</span>'
+  if [ "$ready_merge" = 1 ]; then
+    if [ "$mode" = no-mistakes ]; then
+      printf ' <span class="pill s-merge">PR ready</span>'
+    else
+      printf ' <span class="pill s-merge">PR open</span>'
+    fi
+  fi
   printf '</td>'
   # Detail / latest status.
   printf '<td class="c-detail">'
@@ -265,6 +271,10 @@ emit_backlog_row() {  # <raw item line>
   # Pull the first URL out for a clickable link.
   link=$(printf '%s' "$item" | grep -oE 'https?://[^ )]+' | head -1 || true)
   text=$item
+  if [ -n "$link" ]; then
+    text=${item//"$link"/}
+    text=$(printf '%s' "$text" | sed -e 's/[[:space:]]*-[[:space:]]*$//' -e 's/[[:space:]]\{2,\}/ /g' -e 's/[[:space:]]*$//')
+  fi
   printf '<tr><td class="c-back">%s' "$(esc "$text")"
   if [ -n "$link" ]; then
     printf '<div class="pr"><a href="%s">%s</a></div>' "$(esc "$link")" "$(esc "$link")"
