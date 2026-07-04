@@ -122,6 +122,36 @@ record_holder() {  # stamp the session-stable harness identity into a freshly he
   [ "$(lock_pid)" = "$pid" ]
 }
 
+# Atomically reclaim a LIVE-but-impostor lock (a reused/recycled pid or a
+# non-harness process holding it). fm_lock_try_acquire's own steal is guarded by
+# a `.steal` sub-lock and re-verification, but it engages ONLY for a DEAD holder;
+# it bails at its pid-alive check for a live impostor. So we run the SAME dance
+# ourselves: take the `.steal` mutex, and only under it re-classify the holder -
+# removing and recreating the lock solely while it is STILL an impostor. Two
+# concurrent sessions therefore cannot both delete-and-claim: the mutex
+# serializes them, and the loser re-classifies the just-recorded winner as a live
+# match and backs off instead of deleting it. Returns 0 iff we now hold the lock
+# with our identity recorded; 1 if we backed off (someone else legitimately holds
+# it, it changed under us, or the recreate lost a race).
+reclaim_live_impostor() {
+  local steal="$LOCK.steal" steal_owner held rc=1
+  fm_lock_try_acquire "$steal" || return 1
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
+  held=$(lock_pid)
+  # Re-verify under the mutex. If the holder is no longer an impostor - another
+  # session reclaimed and its live identity now matches, or it is mid-record and
+  # fresh - do NOT remove it. Only a still-impostor holder is reclaimable.
+  if [ "$(classify_holder "$held")" = impostor ]; then
+    fm_lock_remove_path "$LOCK" 2>/dev/null || true
+    # Pass our own steal owner so our held `.steal` does not block the claim.
+    if fm_lock_try_create "$LOCK" "$steal_owner" && record_holder "$me"; then
+      rc=0
+    fi
+  fi
+  fm_lock_release "$steal"
+  return "$rc"
+}
+
 if [ "${1:-}" = "status" ]; then
   if [ -e "$LOCK" ] && [ ! -d "$LOCK" ] && [ ! -L "$LOCK" ]; then
     old=$(cat "$LOCK" 2>/dev/null || true)
@@ -176,7 +206,13 @@ while [ "$tries" -lt 120 ]; do
       sleep 0.1
       ;;
     impostor)
-      fm_lock_remove_path "$LOCK" 2>/dev/null || true
+      if reclaim_live_impostor; then
+        echo "lock acquired: harness pid $me"
+        exit 0
+      fi
+      # Backed off (another session reclaimed first, or a lost recreate race);
+      # loop and re-classify - it is now most likely a live holder to refuse.
+      sleep 0.1
       ;;
   esac
   tries=$((tries + 1))

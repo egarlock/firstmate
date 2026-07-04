@@ -105,7 +105,7 @@ SH
     sleep 0.1
     i=$((i + 1))
   done
-  winners=$(grep -c '^lock acquired: harness pid' "$results" 2>/dev/null || echo 0)
+  winners=$(grep -c '^lock acquired: harness pid' "$results" 2>/dev/null || true)
   for pid in $pids; do
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -113,6 +113,61 @@ SH
   [ "$(awk 'NF' "$results" | wc -l | tr -d ' ')" -ge "$n" ] || fail "not all acquirers reported: $(cat "$results")"
   [ "$winners" -eq 1 ] || fail "expected exactly one atomic winner, got $winners: $(cat "$results")"
   pass "concurrent fm-lock acquirers yield exactly one atomic winner"
+}
+
+test_atomic_single_winner_vs_live_impostor() {
+  # The hard case the plain fresh-lock concurrency test misses: the lock is
+  # already held by a LIVE impostor (a reused/recycled pid whose recorded identity
+  # no longer matches). fm_lock_try_acquire's atomic steal covers only DEAD
+  # holders, so the identity-based reclaim must itself be atomic - two concurrent
+  # sessions must NOT both delete-and-claim. Exactly one winner.
+  local dir state fakebin results sim lock impostor n i pids pid winners
+  dir="$TMP_ROOT/impostor-concurrency"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  results="$dir/results"
+  sim="$dir/harness-sim.sh"
+  lock="$state/.lock"
+  mkdir -p "$state" "$fakebin"
+  write_delegating_ps "$fakebin"
+  : > "$results"
+  # A live process holds the lock, but the recorded identity is a since-gone
+  # process: a live impostor that pid-liveness alone would wrongly honor.
+  sleep 300 &
+  impostor=$!
+  mkdir "$lock"
+  printf '%s\n' "$impostor" > "$lock/pid"
+  printf '%s\n' "identity of a since-exited process" > "$lock/pid-identity"
+  cat > "$sim" <<'SH'
+#!/usr/bin/env bash
+"$FMLOCK" >> "$RESULTS" 2>&1
+sleep 10
+SH
+  chmod +x "$sim"
+  n=20
+  pids=
+  i=1
+  while [ "$i" -le "$n" ]; do
+    FMLOCK="$FMLOCK" RESULTS="$results" PATH="$fakebin:$PATH" FM_HOME="$dir" "$sim" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt 200 ]; do
+    [ "$(awk 'NF' "$results" | wc -l | tr -d ' ')" -ge "$n" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  winners=$(grep -c '^lock acquired: harness pid' "$results" 2>/dev/null || true)
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  kill "$impostor" 2>/dev/null || true
+  wait "$impostor" 2>/dev/null || true
+  [ "$(awk 'NF' "$results" | wc -l | tr -d ' ')" -ge "$n" ] || fail "not all acquirers reported: $(cat "$results")"
+  [ "$winners" -eq 1 ] || fail "expected exactly one winner reclaiming a live-impostor lock, got $winners: $(cat "$results")"
+  pass "concurrent acquirers vs a live-impostor lock yield exactly one atomic winner"
 }
 
 test_live_holder_refuses() {
@@ -239,6 +294,7 @@ test_status_verifies_identity() {
 }
 
 test_atomic_single_winner_under_concurrency
+test_atomic_single_winner_vs_live_impostor
 test_live_holder_refuses
 test_reused_pid_holder_is_reclaimed
 test_dead_holder_is_reclaimed
