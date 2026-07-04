@@ -66,6 +66,12 @@ Secondmate project lists may include `no-mistakes` and `direct-PR` projects only
 `local-only` projects stay with the main firstmate.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
+Project clones are cheap by default.
+Each project is cloned from the same origin the active home's `projects/<name>` clone tracks, but when it is safe the seed borrows that local clone's object store with `git clone --reference <local-clone> --dissociate`, so seeding a large repo (e.g. a big iOS app) into a per-domain home skips re-fetching objects that already exist locally while still producing a standalone clone with no lingering dependency on the source objects.
+This is the payoff that makes per-domain secondmate homes affordable on large repos.
+It is safe-by-default: `FM_SECONDMATE_CLONE_REFERENCE=off` forces a plain clone, a missing/invalid local source or one on a different filesystem than the destination falls back to a plain clone, and any reference-clone failure removes the partial destination and retries a plain clone, so the reference path never leaves a half-clone behind.
+Set `FM_SECONDMATE_CLONE_TRACE=<file>` to record the strategy chosen per project (`reference`/`plain`) when auditing clone cost.
+
 ## Backlog handoff
 
 When a secondmate is created for a domain, existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
