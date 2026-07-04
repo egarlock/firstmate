@@ -1748,7 +1748,7 @@ test_home_seed_cheap_reference_clone_used_when_available() {
     || fail "cheap reference clone seed failed"
   printf '%s\n' "$out" | grep -F "home=$(cd "$subhome" && pwd -P)" >/dev/null \
     || fail "cheap reference clone seed did not report the subhome"
-  grep '^reference' "$trace" >/dev/null \
+  grep -E '^reference	' "$trace" >/dev/null \
     || fail "seed did not borrow objects from the local clone when available"
   [ -d "$subhome/projects/alpha/.git" ] || fail "cheap reference clone did not produce a project clone"
   [ ! -f "$subhome/projects/alpha/.git/objects/info/alternates" ] \
@@ -1814,7 +1814,7 @@ EOF
     "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta >/dev/null 2>"$err"; then
     fail "seed succeeded even though the second project clone failed under reference borrowing"
   fi
-  grep '^reference' "$trace" >/dev/null \
+  grep -E '^reference	' "$trace" >/dev/null \
     || fail "seed did not borrow objects for the first project before the failure"
   [ ! -e "$subhome/projects/alpha" ] || fail "failed reference-clone seed left the first project behind"
   [ ! -e "$subhome" ] || fail "failed reference-clone seed left the newly created subhome behind"

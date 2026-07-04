@@ -964,6 +964,7 @@ seed_home() {
   else
     requested_abs=$(resolved_path "$requested_home")
     refuse_active_home_path "$requested_abs" || return 1
+    validate_home_assignment "$id" "$requested_abs" || return 1
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
     SEED_HOME="$requested_abs"
     home=$(ensure_home "$requested_abs")
