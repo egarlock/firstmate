@@ -1727,6 +1727,103 @@ EOF
   pass "fm-backlog-handoff creates absent sections and refuses unsafe homes"
 }
 
+test_home_seed_cheap_reference_clone_used_when_available() {
+  # When an identical local clone already exists under the active home's
+  # projects/<name>, seeding borrows its objects with a dissociated reference
+  # clone instead of a full re-fetch. The result is still a standalone clone
+  # (no lingering borrowed-object dependency) that tracks the source origin.
+  local home subhome trace out actual expected
+  home="$TMP_ROOT/cheap-ref-home"
+  subhome="$TMP_ROOT/cheap-ref-subhome"
+  trace="$TMP_ROOT/cheap-ref.trace"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/cheap-ref-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for cheap reference clone test"
+  : > "$trace"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CLONE_TRACE="$trace" \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha) \
+    || fail "cheap reference clone seed failed"
+  printf '%s\n' "$out" | grep -F "home=$(cd "$subhome" && pwd -P)" >/dev/null \
+    || fail "cheap reference clone seed did not report the subhome"
+  grep -E '^reference	' "$trace" >/dev/null \
+    || fail "seed did not borrow objects from the local clone when available"
+  [ -d "$subhome/projects/alpha/.git" ] || fail "cheap reference clone did not produce a project clone"
+  [ ! -f "$subhome/projects/alpha/.git/objects/info/alternates" ] \
+    || fail "cheap reference clone left a borrowed-object dependency behind"
+  expected=$(git -C "$home/projects/alpha" remote get-url origin)
+  actual=$(git -C "$subhome/projects/alpha" remote get-url origin)
+  [ "$actual" = "$expected" ] || fail "cheap reference clone did not track the source origin"
+  pass "home seeding borrows local objects with a dissociated reference clone when safe"
+}
+
+test_home_seed_cheap_clone_falls_back_to_plain_when_disabled() {
+  # FM_SECONDMATE_CLONE_REFERENCE=off forces the plain clone path; the result is
+  # identical - a standalone clone tracking the source origin.
+  local home subhome trace out actual expected
+  home="$TMP_ROOT/cheap-off-home"
+  subhome="$TMP_ROOT/cheap-off-subhome"
+  trace="$TMP_ROOT/cheap-off.trace"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/cheap-off-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for cheap clone fallback test"
+  : > "$trace"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CLONE_TRACE="$trace" FM_SECONDMATE_CLONE_REFERENCE=off \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha) \
+    || fail "plain-clone seed failed when reference borrowing disabled"
+  grep '^plain' "$trace" >/dev/null \
+    || fail "seed did not fall back to a plain clone when reference borrowing was disabled"
+  if grep '^reference' "$trace" >/dev/null; then
+    fail "seed borrowed objects despite reference borrowing being disabled"
+  fi
+  [ -d "$subhome/projects/alpha/.git" ] || fail "plain-clone fallback did not produce a project clone"
+  expected=$(git -C "$home/projects/alpha" remote get-url origin)
+  actual=$(git -C "$subhome/projects/alpha" remote get-url origin)
+  [ "$actual" = "$expected" ] || fail "plain-clone fallback did not track the source origin"
+  pass "home seeding falls back to a plain clone when reference borrowing is disabled"
+}
+
+test_home_seed_reference_clone_rolls_back_on_failure() {
+  # A seeding failure after a reference-borrowed clone still rolls back cleanly:
+  # the borrowed first clone, the newly created home, and the registry route are
+  # all undone, exactly as a plain-clone failure would be.
+  local home subhome trace err missing_remote
+  home="$TMP_ROOT/cheap-rollback-home"
+  subhome="$TMP_ROOT/cheap-rollback-subhome"
+  trace="$TMP_ROOT/cheap-rollback.trace"
+  err="$TMP_ROOT/cheap-rollback.err"
+  missing_remote="$TMP_ROOT/remotes/cheap-rollback-missing.git"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_init_commit "$home/projects/beta"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/cheap-rollback-alpha.git"
+  git -C "$home/projects/beta" remote add origin "file://$missing_remote"
+  cat > "$home/data/projects.md" <<EOF
+- alpha [direct-PR] - alpha project (added 2026-06-22)
+- beta [direct-PR] - beta project (added 2026-06-22)
+EOF
+  : > "$trace"
+
+  if FM_HOME="$home" FM_SECONDMATE_CLONE_TRACE="$trace" \
+    FM_SECONDMATE_CHARTER='cheap rollback scope' FM_SECONDMATE_SCOPE='cheap rollback scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta >/dev/null 2>"$err"; then
+    fail "seed succeeded even though the second project clone failed under reference borrowing"
+  fi
+  grep -E '^reference	' "$trace" >/dev/null \
+    || fail "seed did not borrow objects for the first project before the failure"
+  [ ! -e "$subhome/projects/alpha" ] || fail "failed reference-clone seed left the first project behind"
+  [ ! -e "$subhome" ] || fail "failed reference-clone seed left the newly created subhome behind"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- design ' "$home/data/secondmates.md" >/dev/null; then
+    fail "failed reference-clone seed left a registry route"
+  fi
+  pass "home seeding rolls back a reference-borrowed seed when a later clone fails"
+}
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -1738,6 +1835,9 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone
+test_home_seed_cheap_reference_clone_used_when_available
+test_home_seed_cheap_clone_falls_back_to_plain_when_disabled
+test_home_seed_reference_clone_rolls_back_on_failure
 test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields

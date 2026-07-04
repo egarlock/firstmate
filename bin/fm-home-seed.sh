@@ -24,6 +24,13 @@
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
 #       data/secondmates.md.
+#
+# Cheap project clones (FM_SECONDMATE_CLONE_REFERENCE): each routed project is
+# cloned from the same origin the active home's projects/<name> clone tracks.
+# When it is safe, the seed borrows that local clone's object store with
+# "git clone --reference ... --dissociate", so seeding a large repo into a
+# per-domain home skips re-fetching objects that already exist locally while
+# still producing a standalone clone. See clone_project_repo below.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +48,82 @@ usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> <project>..." >&2
   echo "       fm-home-seed.sh validate" >&2
 }
+
+# --- path resolution --------------------------------------------------------
+#
+# resolved_path is the single path resolver for the script. Existing components
+# are canonicalized through the shell (`cd -P`, the same idiom the rest of the
+# fleet scripts use); the not-yet-existing tail is resolved lexically so a home
+# or clone target can be safety-checked *before* it is created - e.g. rejecting
+# a nested home under the active firstmate home without first mkdir-ing it. That
+# pre-creation requirement is why this resolver, unlike the plain `cd -P`
+# helpers elsewhere, must handle paths whose leaf does not exist yet.
+
+resolved_path() {
+  local path=$1 probe tail prefix parent base component out old_ifs
+  case "$path" in
+    /*) probe=$path ;;
+    *) probe="$(pwd -P)/$path" ;;
+  esac
+  # Drop trailing slashes, keeping a bare "/".
+  while [ "$probe" != "/" ] && [ "${probe%/}" != "$probe" ]; do
+    probe=${probe%/}
+  done
+  # Fast path: the whole target exists - let the shell canonicalize it (this
+  # resolves symlinks and any "."/".." through the real filesystem).
+  if [ -e "$probe" ]; then
+    if [ -d "$probe" ]; then
+      cd "$probe" && pwd -P
+    else
+      parent=$(dirname "$probe")
+      base=$(basename "$probe")
+      cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base"
+    fi
+    return
+  fi
+  # Otherwise peel off the missing tail until an existing ancestor is found,
+  # canonicalize that ancestor, then re-attach the tail lexically.
+  tail=
+  while [ ! -e "$probe" ] && [ "$probe" != "/" ]; do
+    tail="$(basename "$probe")${tail:+/$tail}"
+    probe=$(dirname "$probe")
+  done
+  if [ -d "$probe" ]; then
+    prefix=$(cd "$probe" && pwd -P)
+  elif [ -e "$probe" ]; then
+    parent=$(dirname "$probe")
+    base=$(basename "$probe")
+    prefix=$(cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base")
+  else
+    prefix=/
+  fi
+  out=${prefix%/}
+  [ -n "$out" ] || out=/
+  old_ifs=$IFS
+  IFS=/
+  for component in $tail; do
+    case "$component" in
+      ''|.) ;;
+      ..)
+        if [ "$out" != "/" ]; then
+          out=${out%/*}
+          [ -n "$out" ] || out=/
+        fi
+        ;;
+      *)
+        if [ "$out" = "/" ]; then
+          out="/$component"
+        else
+          out="$out/$component"
+        fi
+        ;;
+    esac
+  done
+  IFS=$old_ifs
+  printf '%s\n' "$out"
+}
+
+# --- registry parsing -------------------------------------------------------
 
 registry_home_for_line() {
   sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
@@ -96,70 +179,6 @@ validate_registry_home_text() {
       return 1
       ;;
   esac
-}
-
-normalize_joined_path() {
-  local prefix=$1 tail=$2 component out old_ifs
-  out=${prefix%/}
-  [ -n "$out" ] || out=/
-  old_ifs=$IFS
-  IFS=/
-  for component in $tail; do
-    case "$component" in
-      ''|.) ;;
-      ..)
-        if [ "$out" != "/" ]; then
-          out=${out%/*}
-          [ -n "$out" ] || out=/
-        fi
-        ;;
-      *)
-        if [ "$out" = "/" ]; then
-          out="/$component"
-        else
-          out="$out/$component"
-        fi
-        ;;
-    esac
-  done
-  IFS=$old_ifs
-  printf '%s\n' "$out"
-}
-
-canonical_path_for_check() {
-  local path=$1 probe tail prefix parent base
-  case "$path" in
-    /*) probe=$path ;;
-    *) probe="$(pwd -P)/$path" ;;
-  esac
-  while [ "$probe" != "/" ] && [ "${probe%/}" != "$probe" ]; do
-    probe=${probe%/}
-  done
-  if [ -e "$probe" ]; then
-    if [ -d "$probe" ]; then
-      cd "$probe" && pwd -P
-    else
-      parent=$(dirname "$probe")
-      base=$(basename "$probe")
-      cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base"
-    fi
-    return
-  fi
-  tail=
-  while [ ! -e "$probe" ] && [ "$probe" != "/" ]; do
-    tail="$(basename "$probe")${tail:+/$tail}"
-    probe=$(dirname "$probe")
-  done
-  if [ -d "$probe" ]; then
-    prefix=$(cd "$probe" && pwd -P)
-  elif [ -e "$probe" ]; then
-    parent=$(dirname "$probe")
-    base=$(basename "$probe")
-    prefix=$(cd "$parent" && printf '%s/%s\n' "$(pwd -P)" "$base")
-  else
-    prefix=/
-  fi
-  normalize_joined_path "$prefix" "$tail"
 }
 
 registry_home_conflict_for_assignment() {
@@ -284,21 +303,7 @@ validate_registry() {
   return 0
 }
 
-join_projects() {
-  local out="" project
-  for project in "$@"; do
-    out="${out}${out:+, }$project"
-  done
-  printf '%s\n' "$out"
-}
-
-abs_path_for_new() {
-  canonical_path_for_check "$1"
-}
-
-resolved_path() {
-  canonical_path_for_check "$1"
-}
+# --- home path safety -------------------------------------------------------
 
 refuse_active_home_path() {
   local home=$1 abs_home abs_active_home abs_root
@@ -416,6 +421,8 @@ validate_project_destination() {
   printf '%s\n' "$abs_dst"
 }
 
+# --- origin url helpers -----------------------------------------------------
+
 normalize_origin_url() {
   local repo=$1 url=$2 prefix
   case "$url" in
@@ -434,7 +441,7 @@ normalize_origin_url() {
       esac
       ;;
   esac
-  ( cd "$repo" && canonical_path_for_check "$url" )
+  ( cd "$repo" && resolved_path "$url" )
 }
 
 source_origin_url() {
@@ -451,6 +458,8 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
+# --- home creation ----------------------------------------------------------
+
 acquire_treehouse_home() {
   local id=$1 home
   # Durably lease a firstmate worktree from the pool. The lease persists with no
@@ -466,31 +475,19 @@ acquire_treehouse_home() {
 }
 
 ensure_home() {
-  local id=$1 requested=$2 home
-  if [ "$requested" = "-" ]; then
-    home=$(acquire_treehouse_home "$id")
-    verify_firstmate_home "$home"
-    return
-  fi
-
-  home=$(abs_path_for_new "$requested")
-  refuse_active_home_path "$home" || return 1
+  # Given an already-resolved absolute home path, ensure the directory exists,
+  # cloning a fresh firstmate home from FM_ROOT when it is absent, then echo its
+  # canonical path. The caller has already refused unsafe home paths before this
+  # runs (so no unsafe directory is ever created), and validate_home performs the
+  # comprehensive firstmate-home validation afterward.
+  local home=$1
   if [ -e "$home" ]; then
     [ -d "$home" ] || { echo "error: $home exists and is not a directory" >&2; return 1; }
   else
     mkdir -p "$(dirname "$home")"
     git clone --quiet "$FM_ROOT" "$home"
   fi
-  verify_firstmate_home "$home"
-}
-
-verify_firstmate_home() {
-  local home=$1
-  refuse_active_home_path "$home" || return 1
-  [ -f "$home/AGENTS.md" ] || { echo "error: $home is not a firstmate home (missing AGENTS.md)" >&2; return 1; }
-  [ -d "$home/bin" ] || { echo "error: $home is not a firstmate home (missing bin/)" >&2; return 1; }
-  validate_operational_dirs "$home" || return 1
-  printf '%s\n' "$(cd "$home" && pwd -P)"
+  cd "$home" && pwd -P
 }
 
 validate_home_assignment() {
@@ -520,6 +517,102 @@ EOF
   return 1
 }
 
+# validate_home is the single home-validation pass: firstmate structure, path
+# safety, registry assignment, operational-dir containment, and leaf-file safety,
+# each checked exactly once against the established home.
+validate_home() {
+  local id=$1 home=$2
+  # Path and registry safety first: a home path that is unsafe or that conflicts
+  # with an existing registry route is rejected before it is even treated as a
+  # firstmate home (a directory that merely contains a registered home is not a
+  # firstmate home, but the overlap is the error worth reporting).
+  refuse_active_home_path "$home" || return 1
+  validate_registry_home_text "$home" || return 1
+  validate_home_assignment "$id" "$home" || return 1
+  [ -f "$home/AGENTS.md" ] || { echo "error: $home is not a firstmate home (missing AGENTS.md)" >&2; return 1; }
+  [ -d "$home/bin" ] || { echo "error: $home is not a firstmate home (missing bin/)" >&2; return 1; }
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  validate_operational_dirs "$home" || return 1
+  validate_seed_leaf_files "$home" || return 1
+}
+
+# --- project cloning --------------------------------------------------------
+#
+# Secondmate homes clone each routed project from the SAME origin the active
+# home's projects/<name> clone points at, so the seeded clone tracks the real
+# remote. Re-fetching a large repo (e.g. a big iOS app) over the network for
+# every per-domain home is wasteful when an identical object store already
+# exists locally under projects/<name>. When it is safe, borrow that local
+# clone's objects with `git clone --reference`, then `--dissociate` so the
+# seeded clone is a standalone repo with no lingering dependency on the source
+# object store. This keeps seeding network-cheap without coupling the secondmate
+# home to the primary home's clone.
+#
+# It is safe-by-default and self-healing:
+#   * FM_SECONDMATE_CLONE_REFERENCE=off forces a plain clone.
+#   * A missing/invalid local source, or a source on a different filesystem than
+#     the destination (where a borrowed object store is riskier), falls back to a
+#     plain clone.
+#   * Any reference-clone failure removes the partial destination and retries a
+#     plain clone, so the reference path can never leave a half-clone behind.
+
+clone_reference_disabled() {
+  case "${FM_SECONDMATE_CLONE_REFERENCE:-auto}" in
+    0|off|no|false|OFF|No|False|NO|FALSE) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+clone_trace() {
+  # Optional observability: record the chosen clone strategy per project when
+  # FM_SECONDMATE_CLONE_TRACE names a writable file. A no-op otherwise, so it
+  # costs nothing in normal operation.
+  [ -n "${FM_SECONDMATE_CLONE_TRACE:-}" ] || return 0
+  printf '%s\n' "$*" >> "$FM_SECONDMATE_CLONE_TRACE" 2>/dev/null || true
+}
+
+fs_device_id() {
+  # Portable device-id read: GNU coreutils stat first, then BSD/macOS stat.
+  stat -c '%d' "$1" 2>/dev/null || stat -f '%d' "$1" 2>/dev/null
+}
+
+same_filesystem() {
+  local a=$1 b=$2 dev_a dev_b
+  dev_a=$(fs_device_id "$a") || return 1
+  dev_b=$(fs_device_id "$b") || return 1
+  [ -n "$dev_a" ] && [ "$dev_b" = "$dev_a" ]
+}
+
+reference_clone_is_safe() {
+  # <src> is the local source clone; <dst_parent> the existing parent directory
+  # of the clone destination. Borrowing objects is safe only when the source is a
+  # real git repository on the same filesystem as the destination.
+  local src=$1 dst_parent=$2
+  clone_reference_disabled && return 1
+  [ -n "$src" ] && [ -d "$src" ] || return 1
+  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  same_filesystem "$src" "$dst_parent" || return 1
+}
+
+clone_project_repo() {
+  # Clone <url> into <dst>, borrowing objects from the local <src> clone when
+  # that is safe, and always falling back to a plain clone otherwise.
+  local url=$1 dst=$2 src=$3 dst_parent
+  dst_parent=$(dirname "$dst")
+  if reference_clone_is_safe "$src" "$dst_parent"; then
+    if git clone --quiet --reference "$src" --dissociate "$url" "$dst"; then
+      clone_trace "reference	$src	$dst"
+      return 0
+    fi
+    # The reference clone failed; drop any partial checkout and fall back so the
+    # seed is never left with a half-materialized destination.
+    rm -rf -- "$dst" 2>/dev/null || true
+    clone_trace "reference-failed	$src	$dst"
+  fi
+  git clone --quiet "$url" "$dst"
+  clone_trace "plain	$dst"
+}
+
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
   src="$PROJECTS/$project"
@@ -545,7 +638,7 @@ EOF
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
-  git clone --quiet "$url" "$dst"
+  clone_project_repo "$url" "$dst" "$src"
 }
 
 validate_seed_project() {
@@ -564,6 +657,16 @@ EOF
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }
 
+# --- transaction / rollback machine -----------------------------------------
+#
+# Seeding a home mutates several places (a leased or freshly cloned home, project
+# clones inside it, the home's leaf files, and the parent registry). The ledger
+# below records exactly what this seed created or overwrote; seed_rollback, armed
+# as an EXIT trap by seed_txn_begin, undoes precisely those changes if the seed
+# does not reach seed_txn_commit. Every removal is guarded by seed_rollback_target
+# so a rollback can never delete the active home, the firstmate repo, or anything
+# outside the home being seeded.
+
 SEED_ROLLBACK_ACTIVE=0
 SEED_COMMITTED=0
 SEED_HOME=
@@ -579,6 +682,40 @@ SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
+
+seed_txn_begin() {
+  # Arm the transaction: reset the ledger, create the rollback backup area, and
+  # install the EXIT trap so any early return unwinds this seed's changes.
+  local id=$1
+  SEED_ROLLBACK_ACTIVE=1
+  SEED_COMMITTED=0
+  SEED_HOME=
+  SEED_HOME_ACQUIRED=0
+  SEED_HOME_CREATED=0
+  SEED_HOME_BACKED_UP=0
+  SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
+  SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
+  : > "$SEED_CREATED_PROJECTS_FILE"
+  SEED_PARENT_REG_EXISTED=0
+  SEED_PARENT_BRIEF="$DATA/$id/brief.md"
+  SEED_PARENT_BRIEF_CREATED=0
+  SEED_PARENT_BRIEF_DIR_CREATED=0
+  SEED_SUB_REG_EXISTED=0
+  SEED_CHARTER_EXISTED=0
+  SEED_MARKER_EXISTED=0
+  trap seed_rollback EXIT
+  if [ -f "$REG" ]; then
+    SEED_PARENT_REG_EXISTED=1
+    cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
+  fi
+}
+
+seed_txn_commit() {
+  # Mark the seed durable: disarm the rollback trap and drop the backup area.
+  SEED_COMMITTED=1
+  trap - EXIT
+  rm -rf -- "$SEED_BACKUP_DIR"
+}
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -710,6 +847,16 @@ seed_rollback() {
   fi
 }
 
+# --- registry writing / project registry ------------------------------------
+
+join_projects() {
+  local out="" project
+  for project in "$@"; do
+    out="${out}${out:+, }$project"
+  done
+  printf '%s\n' "$out"
+}
+
 registry_line_for_project() {
   local project=$1 line
   [ -f "$DATA/projects.md" ] || return 1
@@ -792,6 +939,8 @@ write_registry() {
   mv "$tmp" "$REG"
 }
 
+# --- main seed flow ---------------------------------------------------------
+
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
   shift 2
@@ -803,48 +952,30 @@ seed_home() {
     validate_seed_project "$project"
   done
 
-  SEED_ROLLBACK_ACTIVE=1
-  SEED_COMMITTED=0
-  SEED_HOME=
-  SEED_HOME_ACQUIRED=0
-  SEED_HOME_CREATED=0
-  SEED_HOME_ACQUIRED=0
-  SEED_HOME_BACKED_UP=0
-  SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
-  SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
-  : > "$SEED_CREATED_PROJECTS_FILE"
-  SEED_PARENT_REG_EXISTED=0
-  SEED_PARENT_BRIEF="$DATA/$id/brief.md"
-  SEED_PARENT_BRIEF_CREATED=0
-  SEED_PARENT_BRIEF_DIR_CREATED=0
-  SEED_SUB_REG_EXISTED=0
-  SEED_CHARTER_EXISTED=0
-  SEED_MARKER_EXISTED=0
-  trap seed_rollback EXIT
-  if [ -f "$REG" ]; then
-    SEED_PARENT_REG_EXISTED=1
-    cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
-  fi
+  seed_txn_begin "$id"
 
+  # Establish the secondmate home directory. For a leased ("-") home the path is
+  # only known after acquisition; for an explicit home, refuse unsafe targets
+  # BEFORE creating anything so a rejected home never leaves a directory behind.
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
     home=$(acquire_treehouse_home "$id")
     SEED_HOME="$home"
-    home=$(verify_firstmate_home "$home")
   else
-    requested_abs=$(abs_path_for_new "$requested_home")
+    requested_abs=$(resolved_path "$requested_home")
     refuse_active_home_path "$requested_abs" || return 1
     validate_home_assignment "$id" "$requested_abs" || return 1
-    SEED_HOME="$requested_abs"
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
-    home=$(ensure_home "$id" "$requested_abs")
+    SEED_HOME="$requested_abs"
+    home=$(ensure_home "$requested_abs")
   fi
+  home=$(cd "$home" && pwd -P)
   SEED_HOME="$home"
-  validate_registry_home_text "$home" || return 1
-  validate_home_assignment "$id" "$home"
-  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
-  validate_operational_dirs "$home" || return 1
-  validate_seed_leaf_files "$home" || return 1
+
+  # Single home-validation pass over the established home.
+  validate_home "$id" "$home" || return 1
+
+  # Back up the leaf files this seed may overwrite so rollback can restore them.
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"
@@ -859,6 +990,8 @@ seed_home() {
   fi
   SEED_HOME_BACKED_UP=1
 
+  # Resolve the charter brief (generating one from inline charter text if none
+  # exists yet) and refuse an unfilled or empty charter.
   if [ ! -f "$SEED_PARENT_BRIEF" ]; then
     [ -n "${FM_SECONDMATE_CHARTER:-}" ] || {
       echo "error: no filled secondmate charter brief at $SEED_PARENT_BRIEF; set FM_SECONDMATE_CHARTER or scaffold one and replace {TASK}" >&2
@@ -883,6 +1016,8 @@ seed_home() {
     return 1
   }
 
+  # Clone each routed project, record which clones this seed created (for
+  # rollback), register them, and initialize newly cloned no-mistakes projects.
   for project in "$@"; do
     project_dst=$(validate_project_destination "$home" "$project") || return 1
     [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
@@ -904,9 +1039,7 @@ seed_home() {
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
-  SEED_COMMITTED=1
-  trap - EXIT
-  rm -rf -- "$SEED_BACKUP_DIR"
+  seed_txn_commit
   printf 'home=%s\n' "$home"
 }
 
