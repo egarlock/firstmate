@@ -79,6 +79,10 @@ tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only comp
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, and crew-dispatch reporting tests
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
+tests/fm-copilot-harness.test.sh          # copilot adapter spawn hook (agentStop registry token + worktree pointer), token guard, teardown cleanup, and session-lock detection tests
+tests/fm-copilot-version.test.sh          # copilot spawn-time version gate: fm_version_ge ordering, fm_harness_version_parts extraction, fm_copilot_compatible accept/reject, and fm-spawn abort with a clear message before any worktree side effects
+tests/fm-copilot-pane-fixture.test.sh     # copilot busy/idle pane fixtures fed through fm_pane_is_busy and the consolidated FM_TMUX_BUSY_REGEX_DEFAULT, locking the working/idle footer signature against TUI drift
+tests/fm-hook-sweep.test.sh               # orphaned grok/copilot turn-end registry token sweep (bin/fm-hook-sweep.sh): removes tokens whose task meta/worktree pointer is gone or superseded while sparing live, in-flight empty, and other-home tokens, with the age guard
 tests/fm-adapter-consistency.test.sh      # verified-adapter list consistency: every doc that enumerates adapters names the full FM_VERIFIED_ADAPTERS set, so adapter-list drift fails CI
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, dry-run preview, and .env-presence activation tests
