@@ -633,7 +633,13 @@ bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
 bin/fm-wake-drain.sh       # drain queued wake records at turn start; asserts guard after draining
 bin/fm-crew-state.sh <id>  # one-line current-state read; reconciles matching run-step, pane, and status log
+bin/fm-dashboard.sh        # read-only HTML fleet view (state/*.meta + fm-crew-state + backlog) opened via lavish-axi
 ```
+
+For an at-a-glance picture of the whole fleet instead of peeking panes one at a time, run `bin/fm-dashboard.sh`.
+It is a read-only convenience view, never part of the wake loop: it joins every in-flight task's `state/<id>.meta` with `bin/fm-crew-state.sh` and the latest `state/<id>.status` line, groups by project, surfaces parked/blocked/needs-decision/PR-awaiting-merge work in a "needs attention" band at the top, and appends the `data/backlog.md` sections.
+It emits one self-contained inline-CSS HTML page and hands it to lavish-axi; `--stdout` prints the HTML without opening it and `--no-open` writes the file without launching lavish.
+It writes nothing under `state/`, `data/`, or `projects/` (the HTML lands in the gitignored `.lavish/`), so it is safe to run anytime, including with an empty fleet (it shows an idle empty state).
 
 On wake, in order of cheapness:
 
