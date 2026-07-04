@@ -4,26 +4,26 @@
 # state, refresh/prune the project's clone for PR-based ship tasks, then print a backlog-refresh
 # reminder.
 # REFUSES if the worktree holds work that has not LANDED, because treehouse return
-# hard-resets the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge on the captain's approval) as a fallback
-# for the common case where there is no remote at all.
+# hard-resets the worktree and kills its processes. The landed-work oracle is three
+# checks, in order:
+#   (a) a dirty worktree (uncommitted changes) is never landed -> always REFUSE,
+#       because the reset would discard those changes;
+#   (b) a recorded landed=<sha> in state/<id>.meta -> ALLOW. This is the
+#       authoritative verdict written at merge time by bin/fm-pr-merge.sh and
+#       bin/fm-merge-local.sh: the merge already happened, so teardown does not
+#       re-derive it. This is what makes teardown robust to a no-mistakes run that
+#       advanced origin past the local worktree HEAD.
+#   (c) with no landed= recorded, the single fallback: is the branch's content
+#       already present in the up-to-date default branch? After any merge (squash,
+#       rebase, ff, or a local-only fast-forward) the change is in the default
+#       branch regardless of whether the branch's own commits survived, so this one
+#       check covers the pre-record case without the old PR-head/patch-id/remote-
+#       reachability heuristics. content_in_default fetches the default branch fresh
+#       and refuses when inconclusive, so genuinely unlanded work still REFUSES.
+# Uncommitted changes are never landed. The local-only path needs no special case:
+# bin/fm-merge-local.sh records landed= on the approved local merge, and the (c)
+# content check also recognizes a purely local default branch (refs/heads/<default>)
+# when there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.
@@ -137,104 +137,6 @@ remove_copilot_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
-# Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
-pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && fm_net gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
-  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-ensure_commit_object() {
-  local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  fm_net git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
-}
-
-patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
-}
-
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
-  done <<EOF
-$unpushed
-EOF
-}
-
-# Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
-pr_is_merged() {
-  local branch=$1 target view state head current
-  if [ -n "$PR_URL" ]; then
-    target=$PR_URL
-  else
-    target=$(pr_number_from_branch "$branch") || return 1
-  fi
-  [ -n "$target" ] || return 1
-  view=$(cd "$WT" && fm_net gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
-  [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
-}
-
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -262,17 +164,6 @@ content_in_default() {
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
-}
-
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
-work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
 }
 
 backlog_refresh_reminder() {
@@ -621,54 +512,33 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   else
+    # The landed-work oracle, in three checks (see the header comment):
+    #   (a) dirty worktree            -> always REFUSE (the reset would discard it)
+    #   (b) landed=<sha> in meta      -> ALLOW (the merge already happened)
+    #   (c) else content in default   -> ALLOW, else REFUSE (single fallback)
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
     dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-copilot-turnend$)' | head -1 || true)
-    # Reachability test: is HEAD reachable from ANY publishing remote-tracking
-    # branch? Empty means the work is already pushed (a fork is a remote too, so
-    # upstream-contribution PRs pushed to a fork pass here). Non-empty does NOT prove
-    # the work is unlanded: a squash or rebase merge rewrites the branch into a new
-    # commit on the default branch, and a repo that auto-deletes the head branch on
-    # merge also drops its remote-tracking ref - so a merged-and-deleted branch trips
-    # this test while being fully landed. We therefore treat reachability as a fast
-    # accept, not the sole verdict, and fall through to a landed-work check before
-    # refusing. The local no-mistakes gate remote (refs/remotes/no-mistakes/*) is
-    # EXCLUDED: a branch pushed there during a *failed* validation run is on a
-    # remote-tracking ref but has not landed anywhere authoritative, so counting it
-    # would wrongly fast-accept unlanded work.
-    unpushed=$(git -C "$WT" log --oneline HEAD --not --exclude=no-mistakes/'*' --remotes -- 2>/dev/null | head -5 || true)
-    if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-      # local-only ships have no remote in the common case, so the "on a remote"
-      # test above is expected to be non-empty. The work is safe once it is merged
-      # into the local default branch (firstmate does that merge on the captain's
-      # approval). Refuse until then.
-      DEFAULT=$(fm_default_branch "$PROJ") || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; exit 1; }
-      unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null | head -5 || true)
-      if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-        echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-        [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-        [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-        echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
-        exit 1
-      fi
-    elif [ -n "$dirty" ]; then
-      # Uncommitted changes are never landed and the reset would discard them; always
-      # refuse, regardless of whether the committed work itself has landed.
+    if [ -n "$dirty" ]; then
+      # (a) Uncommitted changes are never landed and the reset would discard them;
+      # always refuse, regardless of whether the committed work itself has landed.
       echo "REFUSED: worktree $WT has uncommitted changes." >&2
       echo "uncommitted changes present" >&2
       echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
       exit 1
-    elif [ -n "$unpushed" ]; then
-      # Commits not reachable from any remote. Before refusing, recognize LANDED work:
-      # a merged PR whose head contains the current local work, or content already in
-      # the up-to-date default branch. On a gh lookup error work_is_landed falls back
-      # to the content check, and if that is also inconclusive it returns false - so
-      # we never silently allow teardown of possibly-unlanded work; only genuinely
-      # unlanded work is refused.
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      if ! work_is_landed "$branch"; then
-        echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-        printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-        echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+    fi
+    LANDED=$(grep '^landed=' "$META" | tail -1 | cut -d= -f2- || true)
+    if [ -z "$LANDED" ]; then
+      # (c) No merge was recorded (older tasks merged before landed= existed, or a
+      # merge that bypassed fm-pr-merge/fm-merge-local). Fall back to the one reliable
+      # content check: after any merge - squash, rebase, ff, or a local-only fast-
+      # forward - the branch's change is present in the up-to-date default branch,
+      # regardless of whether the branch's own commits survived. content_in_default
+      # fetches the default branch fresh and refuses when inconclusive, so genuinely
+      # unlanded work still refuses rather than being silently discarded.
+      if ! content_in_default; then
+        echo "REFUSED: worktree $WT has work that has not landed." >&2
+        echo "No merge was recorded (landed=) and the branch's content is not in the default branch." >&2
+        echo "Land its PR (bin/fm-pr-merge.sh), merge it locally (bin/fm-merge-local.sh after the captain approves), push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
         exit 1
       fi
     fi
