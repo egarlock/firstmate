@@ -180,6 +180,7 @@ FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NET_TIMEOUT=30    # seconds allowed per GitHub/fetch call in fm-teardown.sh's landed-work check; on timeout the call fails into the fail-safe content check
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by provably-working watcher triage
+FM_DASHBOARD_CREW_STATE_CMD=bin/fm-crew-state.sh   # test override for the current-state reader fm-dashboard.sh joins into each fleet row
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
