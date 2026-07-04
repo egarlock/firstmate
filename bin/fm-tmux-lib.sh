@@ -41,6 +41,14 @@
 # is running - verified GitHub Copilot CLI 1.0.68).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|esc cancel'
 
+# fm_tmux_pane_exists: 0 iff <target> resolves to a live tmux pane. ONE definition
+# of the `tmux display-message -p -t <target> '#{pane_id}'` liveness probe that the
+# away-mode daemon and fm-crew-state each open-coded. Errors and non-pane targets
+# fail closed (return non-zero).
+fm_tmux_pane_exists() {  # <target>
+  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
+}
+
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,
 # normal-intensity text, the text a human actually typed. Dim/faint runs are

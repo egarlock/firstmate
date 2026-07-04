@@ -70,7 +70,10 @@ BASE_REF=$(resolve_base_ref) \
 # that fm-spawn.sh sources (added after this test's sibling list was last touched);
 # it is a sibling, not a refactored entry point, so it must be symlinked in the old
 # bin/ too or the extracted-from-BASE_REF fm-spawn.sh aborts under set -eu.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-harness-policy.sh fm-crew-state.sh fm-backend.sh"
+# fm-env-lib.sh / fm-git-lib.sh / fm-path-lib.sh are the shared helper libs that
+# the current siblings (fm-ff-lib.sh, fm-tangle-lib.sh, fm-crew-state.sh, ...) now
+# source; they must be symlinked in too or those siblings abort when sourced.
+OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-harness-policy.sh fm-crew-state.sh fm-backend.sh fm-env-lib.sh fm-git-lib.sh fm-path-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
