@@ -51,6 +51,9 @@ Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` pro
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses in-flight items or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
+Project clones are cheap by default: when it is safe, seeding borrows the active home's local `projects/<name>` object store with `git clone --reference <local-clone> --dissociate`, producing a standalone clone while skipping a full network re-fetch.
+Set `FM_SECONDMATE_CLONE_REFERENCE=off` to force plain clones; a missing/invalid local source or one on a different filesystem falls back to a plain clone, and any reference-clone failure removes the partial destination and retries a plain clone.
+Set `FM_SECONDMATE_CLONE_TRACE=<file>` to record the strategy chosen per project (`reference`/`plain`) when auditing clone cost.
 
 ## FM_HOME
 
