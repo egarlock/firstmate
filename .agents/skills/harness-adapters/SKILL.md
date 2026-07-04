@@ -211,3 +211,14 @@ So `fm-spawn` installs ONE firstmate-owned global hook, `~/.copilot/hooks/fm-tur
 The hook resolves the workspace from `COPILOT_PROJECT_DIR` (verified set for hook commands, which also run with the workspace as cwd - `$PWD` is the fallback).
 `fm-teardown` removes the worktree pointer and registry token.
 Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detection for them).
+
+Spawn-time version gate: `fm-spawn` probes `copilot --version` before a copilot launch and refuses to spawn when it is older than the verified-good 1.0.68 (or absent), with a clear "copilot CLI is incompatible (need >= 1.0.68 ...)" message instead of a later opaque hook/flag failure.
+The minimum and the probe live in `bin/fm-harness-policy.sh` (`fm_copilot_compatible`, `FM_COPILOT_MIN_*`), the single source the launch reads; `FM_SPAWN_SKIP_VERSION_CHECK=1` bypasses it for edge cases.
+The same gate shape (a `--version` probe against a pinned minimum) is how bootstrap gates treehouse and no-mistakes.
+
+Orphan-token sweep: a copilot or grok task that dies WITHOUT teardown (crash, killed pane, discarded worktree) leaves its `hooks/fm-turn-end.d/<token>` registry entry behind, since teardown is what removes it.
+`bin/fm-hook-sweep.sh` (run best-effort by bootstrap) clears such orphans: a token names its own owning home via its content path, so the sweep is home-agnostic - it removes only tokens whose task record (`state/<id>.meta`) or worktree pointer is gone/superseded, never a live token, an in-flight empty token, or another home's live token, and it is age-guarded (`FM_HOOK_SWEEP_MIN_AGE_MINS`, default 2) against a spawn still wiring a token up.
+
+Manual `/no-mistakes` end-to-end verification (cannot run inside a firstmate-on-itself worktree, which has no live copilot pane): spawn a real copilot crewmate on a throwaway task, wait for the brief to start, then steer `bin/fm-send.sh <window> '/no-mistakes'`.
+`/no-mistakes` opens copilot's slash-autocomplete popup, so the first Enter can hit the popup entry instead of sending; `fm-send`'s retried Enter lands it (peek the pane to confirm the invocation sent and copilot began driving a real `no-mistakes axi run`, re-sending once if the popup swallowed it).
+Verified end to end 2026-07-02 on GitHub Copilot CLI 1.0.68.

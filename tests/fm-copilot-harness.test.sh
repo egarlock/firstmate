@@ -29,6 +29,16 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  # A compatible copilot so the spawn-time version gate passes; the gate's
+  # incompatible/absent paths are covered in fm-copilot-version.test.sh.
+  cat > "$fakebin/copilot" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf 'GitHub Copilot CLI 1.0.68.\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/copilot"
   printf '%s\n' "$fakebin"
 }
 

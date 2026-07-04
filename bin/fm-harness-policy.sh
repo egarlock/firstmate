@@ -42,6 +42,58 @@ fm_harness_is_verified() {
   return 1
 }
 
+# --- copilot spawn-time version gate ---------------------------------------
+# copilot's supervised launch shape (the agentStop turn-end hook, --allow-all
+# autonomy, and the --model/--effort flags) is verified against GitHub Copilot
+# CLI 1.0.68; an older CLI may lack the agentStop hook event or a launch flag and
+# fail opaquely mid-run. fm-spawn probes this before a copilot launch, mirroring
+# bootstrap's treehouse/no-mistakes version gates, so an incompatible CLI is
+# caught up front with a clear message. Keep this the ONE place the minimum lives.
+FM_COPILOT_MIN_MAJOR=1
+FM_COPILOT_MIN_MINOR=0
+FM_COPILOT_MIN_PATCH=68
+
+# fm_harness_version_parts <harness>: print "<major> <minor> <patch>" parsed from
+# the harness CLI's `--version` output, or return non-zero when the CLI is
+# absent, errors, or prints no dotted-numeric version. Same extraction shape as
+# bootstrap's no_mistakes_version_parts so spawn-time gating reads versions the
+# same way the bootstrap gates do.
+fm_harness_version_parts() {
+  local harness=$1 output parts
+  command -v "$harness" >/dev/null 2>&1 || return 1
+  output=$("$harness" --version 2>/dev/null) || return 1
+  parts=$(printf '%s\n' "$output" \
+    | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
+  [ -n "$parts" ] || return 1
+  printf '%s\n' "$parts"
+}
+
+# fm_version_ge <maj> <min> <pat> <need_maj> <need_min> <need_pat>: succeed iff
+# the first three-field version is >= the second. Integer compares only, so it
+# is bash 3.2 safe and locale-independent.
+fm_version_ge() {
+  local a1=$1 a2=$2 a3=$3 b1=$4 b2=$5 b3=$6
+  [ "$a1" -gt "$b1" ] && return 0
+  [ "$a1" -lt "$b1" ] && return 1
+  [ "$a2" -gt "$b2" ] && return 0
+  [ "$a2" -lt "$b2" ] && return 1
+  [ "$a3" -ge "$b3" ]
+}
+
+# fm_copilot_compatible: succeed iff the installed copilot CLI is >= the verified
+# minimum (FM_COPILOT_MIN_*). Fails when copilot is absent or its version is
+# unreadable, so the caller reports a clear, actionable spawn error rather than a
+# later opaque hook/flag failure.
+fm_copilot_compatible() {
+  local parts major minor patch
+  parts=$(fm_harness_version_parts copilot) || return 1
+  # fm_harness_version_parts emits exactly three space-separated fields.
+  IFS=' ' read -r major minor patch <<< "$parts"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] || return 1
+  fm_version_ge "$major" "$minor" "$patch" \
+    "$FM_COPILOT_MIN_MAJOR" "$FM_COPILOT_MIN_MINOR" "$FM_COPILOT_MIN_PATCH"
+}
+
 # fm_harness_efforts <harness>: print the effort values the installed CLI was
 # verified to accept at launch, space-separated; print nothing when the adapter
 # has no verified effort flag. This is the ONE effort matrix.

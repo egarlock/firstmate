@@ -327,6 +327,19 @@ case "$ARG3" in
     ;;
 esac
 
+# copilot version gate: the supervised launch shape is verified against GitHub
+# Copilot CLI 1.0.68+; an older/absent CLI can lack the agentStop turn-end hook or
+# a launch flag and fail opaquely mid-run. Probe up front (mirrors bootstrap's
+# treehouse/no-mistakes gates) and abort with a clear message before any worktree
+# side effects. Skippable for tests/edge cases via FM_SPAWN_SKIP_VERSION_CHECK=1.
+if [ "$HARNESS" = copilot ] && [ "${FM_SPAWN_SKIP_VERSION_CHECK:-0}" != 1 ]; then
+  if ! fm_copilot_compatible; then
+    have=$(fm_harness_version_parts copilot 2>/dev/null | tr ' ' '.' || true)
+    echo "error: copilot CLI is incompatible (need >= $FM_COPILOT_MIN_MAJOR.$FM_COPILOT_MIN_MINOR.$FM_COPILOT_MIN_PATCH, found ${have:-none}); update with 'copilot update' or install GitHub Copilot CLI, then respawn $ID" >&2
+    exit 1
+  fi
+fi
+
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so

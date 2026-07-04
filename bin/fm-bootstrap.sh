@@ -429,5 +429,9 @@ if ! fm_backlog_backend_manual "$CONFIG"; then
 fi
 secondmate_sync
 x_mode_setup
+# Remove orphaned grok/copilot turn-end hook registry tokens left by tasks that
+# died without teardown, so the global hook registry does not accumulate cruft.
+# Best-effort, quiet unless it removed something (AGENTS.md supervision protocol).
+[ -x "$SCRIPT_DIR/fm-hook-sweep.sh" ] && "$SCRIPT_DIR/fm-hook-sweep.sh" 2>/dev/null || true
 fleet_sync
 exit 0
