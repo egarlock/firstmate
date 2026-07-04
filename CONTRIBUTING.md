@@ -69,6 +69,7 @@ shellcheck bin/*.sh bin/backends/*.sh tests/*.sh   # lint the toolbelt and behav
 for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
+tests/fm-session-lock.test.sh             # session lock (fm-lock.sh, state/.lock): atomic single-winner under concurrency and against a live reused-pid impostor, live-holder refusal, reused-pid/dead-holder/legacy-plain-file reclaim, and identity-verifying status tests
 tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale wedge threshold, heartbeat backstop, afk one-shot coherence, whitespace-state fail-fast guard, and corrupt-counter (.heartbeat-streak/.count-*) resilience
 tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, fm-send submit, and whitespace-state fail-fast guard tests
 tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
