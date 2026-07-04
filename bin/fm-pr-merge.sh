@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Merge a task's PR, always recording pr= and any available pr_head= into
-# state/<id>.meta first via bin/fm-pr-check.sh, so bin/fm-teardown.sh's
-# landed-check has a PR reference to verify a squash merge against.
+# state/<id>.meta first via bin/fm-pr-check.sh, then recording landed=<sha> once
+# the merge itself succeeds. That landed= line is the authoritative verdict
+# bin/fm-teardown.sh consults - the merge already happened, so teardown need not
+# re-derive "is this work landed?" from remote/PR-head heuristics.
 #
 # Why this exists: the normal trigger for running fm-pr-check.sh is the crew's
 # `done: PR <url> checks green` line, which no-mistakes only emits once its CI
@@ -92,3 +94,13 @@ fi
 # under `set -u` is an "unbound variable" error on bash < 4.4 (stock /bin/bash on
 # macOS is 3.2). "$@" is a special parameter and is always safe empty.
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
+
+# The merge succeeded (set -e would have exited above otherwise). Record the
+# authoritative "this task's work reached its destination" fact so bin/fm-teardown.sh
+# can allow teardown without re-deriving it from remote/PR heuristics. The recorded
+# sha is the merged PR head when fm-pr-check.sh captured it, else the PR number as a
+# non-empty presence marker - teardown only needs the field to be present, but the
+# head sha is the better breadcrumb.
+LANDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$LANDED" ] || LANDED="pr-$PR_NUMBER"
+grep -qxF "landed=$LANDED" "$META" || echo "landed=$LANDED" >> "$META"

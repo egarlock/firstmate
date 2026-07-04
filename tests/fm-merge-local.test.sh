@@ -103,7 +103,12 @@ test_fast_forward_merge_advances_default() {
     || fail "ff-merge: project left off its default branch"
   printf '%s\n' "$out" | grep -F "merged fm/task-x1 into local main" >/dev/null \
     || fail "ff-merge: success line missing: $out"
-  pass "a clean fast-forward advances the default branch to the crewmate branch tip"
+  # The authoritative landed verdict (the merged default-branch tip) is recorded so
+  # bin/fm-teardown.sh can allow teardown of the local-only worktree from the fact
+  # alone, without re-deriving it.
+  assert_grep "landed=$tip" "$case_dir/state/task-x1.meta" \
+    "ff-merge: landed= was not recorded with the merged default-branch tip"
+  pass "a clean fast-forward advances the default branch and records the landed verdict"
 }
 
 test_diverged_branch_is_refused_and_leaves_default_untouched() {
@@ -122,6 +127,9 @@ test_diverged_branch_is_refused_and_leaves_default_untouched() {
   grep -q REFUSED "$case_dir/stderr" || fail "diverged-refuse: no REFUSED line in stderr: $(cat "$case_dir/stderr")"
   after=$(git -C "$case_dir/project" rev-parse main)
   [ "$after" = "$before" ] || fail "diverged-refuse: default branch was modified despite the refusal"
+  # A refused merge landed nothing, so it must not record a landed verdict.
+  assert_no_grep '^landed=' "$case_dir/state/task-x1.meta" \
+    "diverged-refuse: landed= was recorded despite the refusal"
   pass "a diverged (non-fast-forward) branch is refused and the default branch is left untouched"
 }
 

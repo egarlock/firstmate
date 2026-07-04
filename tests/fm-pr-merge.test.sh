@@ -6,8 +6,9 @@
 # fm-pr-check.sh trigger never fires.
 #
 # Matrix:
-#   (a) merge records pr= and pr_head= before merging, and merges
-#   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
+#   (a) merge records pr=, pr_head=, and landed= (the PR head sha) on success
+#   (a2) merge records landed=pr-<n> when no pr_head is available
+#   (b) merge is refused when gh-axi pr merge itself fails (no landed= recorded)
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
 #   (d) merge is refused before gh-axi when task meta is missing
 #   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
@@ -111,9 +112,37 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
+  # The authoritative landed verdict is recorded once the merge succeeds; it uses the
+  # PR head sha when fm-pr-check captured one, so bin/fm-teardown.sh can allow teardown
+  # from the recorded fact alone.
+  assert_grep 'landed=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
+    "records-before-merge: landed= was not recorded with the PR head sha after a successful merge"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+  pass "fm-pr-merge records pr=, pr_head=, and landed= before/after invoking gh-axi pr merge"
+}
+
+test_records_landed_pr_number_when_no_head_available() {
+  local case_dir rc
+  case_dir=$(make_case landed-no-head)
+  # No worktree on disk, so fm-pr-check.sh skips the pr_head lookup and records no
+  # pr_head=. The merge must still record a non-empty landed= verdict, derived from
+  # the PR number, so teardown has the recorded fact to act on.
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/11 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-no-head: fm-pr-merge should succeed"
+  assert_no_grep '^pr_head=' "$case_dir/state/task-x1.meta" \
+    "landed-no-head: pr_head= should be absent when no worktree resolves the head"
+  assert_grep 'landed=pr-11' "$case_dir/state/task-x1.meta" \
+    "landed-no-head: landed= should fall back to the PR number marker"
+  pass "fm-pr-merge records landed=pr-<n> when no PR head sha is available"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -132,7 +161,11 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
-  pass "fm-pr-merge propagates a real merge failure without silently succeeding"
+  # A failed merge must NOT record a landed verdict: nothing landed, so teardown must
+  # keep refusing until a real merge succeeds.
+  assert_no_grep '^landed=' "$case_dir/state/task-x1.meta" \
+    "merge-fails: landed= was recorded despite the merge failing"
+  pass "fm-pr-merge propagates a real merge failure without recording a landed verdict"
 }
 
 test_extra_merge_args_forwarded() {
@@ -296,6 +329,7 @@ test_parses_pr_url_for_gh_axi() {
 }
 
 test_records_pr_and_head_before_merging
+test_records_landed_pr_number_when_no_head_available
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge

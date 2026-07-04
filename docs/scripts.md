@@ -19,7 +19,7 @@ Each file also starts with a short header comment.
 | `backends/herdr.sh`      | Experimental herdr session-provider adapter used by `fm-backend.sh`; owns version/tool gating, workspace/tab creation, send, capture, native busy-state, current-path, label-based live discovery, and kill primitives |
 | `fm-config-push.sh`      | Config-only mid-session push of declared inheritable local config into live secondmate homes; reports each item as pushed, unchanged, skipped, or error without fast-forwarding tracked files or nudging agents |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
-| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
+| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval, recording `landed=<sha>` (the merged tip) as teardown's landed verdict |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker and detector sourced by `fm-send.sh`, `fm-brief.sh`, and tests                 |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
@@ -41,7 +41,7 @@ Each file also starts with a short header comment.
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives: the one busy-footer regex `FM_TMUX_BUSY_REGEX_DEFAULT`, a pane-existence probe `fm_tmux_pane_exists`, busy detection, dim-ghost-aware and border-aware composer detection, and verified submit retry |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint through the target's recorded runtime backend                            |
 | `fm-pr-check.sh`         | Validate the PR URL to the exact `https://github.com/<owner>/<repo>/pull/<n>` shape (the check shim is watcher-executed), then record `pr=` and GitHub's `pr_head=` when available for a PR-ready task and arm the watcher's merge poll |
-| `fm-pr-merge.sh`         | Require a full GitHub PR URL, record `pr=` and available `pr_head=` via `fm-pr-check.sh`, parse it into `gh-axi pr merge <n> --repo <owner>/<repo>`, default to `--squash` unless a merge method is forwarded, and reject malformed URLs or repo overrides |
+| `fm-pr-merge.sh`         | Require a full GitHub PR URL, record `pr=` and available `pr_head=` via `fm-pr-check.sh`, parse it into `gh-axi pr merge <n> --repo <owner>/<repo>`, default to `--squash` unless a merge method is forwarded, reject malformed URLs or repo overrides, and record `landed=<sha>` (merged PR head, or `pr-<n>`) on a successful merge as teardown's landed verdict |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
 | `fm-teardown.sh`         | Return a clean, landed ship worktree or retire/release a secondmate home; requires scout reports, checks child work, removes firstmate-owned hook artifacts, and prints the backlog-backend reminder |
 | `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate (`crew`) or secondmate-launch (`secondmate`) harness; expose optional `config/secondmate-harness` model and effort tokens with `secondmate-model` and `secondmate-effort` |
