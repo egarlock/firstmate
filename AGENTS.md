@@ -100,6 +100,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error       generated X-mode relay diagnostic dedupe marker
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
+  .lock .lock.steal  per-home session lock (atomic symlink-to-owner-dir form, holding pid/pid-identity/fm-home) and its reclaim mutex; acquired by fm-lock.sh (section 5)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .hash-* .count-* .stale-* .stale-since-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
@@ -283,7 +284,8 @@ Load `harness-adapters` before any spawn, recovery, trust-dialog handling, harne
 You may have been restarted mid-flight.
 Reconcile reality with your records before doing anything else:
 
-1. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
+1. Run `bin/fm-lock.sh` to acquire the session lock (`state/.lock`).
+   Acquisition is atomic and identity-verified: it claims the lock through the same portable `fm_lock_try_acquire` primitive the watcher/queue locks use (a symlink-to-owner-dir create that is atomic on POSIX and needs no `flock`), so two sessions starting at once resolve to exactly one winner, and it records the session-stable harness PID plus that process's `pid-identity` (start time + command, via `fm_pid_identity`). A contended holder is trusted only when it is genuinely alive AND its recorded identity still matches (guarding against a reused/recycled PID) AND it is a firstmate harness; a holder that fails any of those is stale and is reclaimed atomically. A leftover pre-directory plain-file `.lock` is migrated on the next acquire.
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
 2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
 3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
