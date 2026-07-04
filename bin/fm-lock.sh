@@ -119,7 +119,7 @@ record_holder() {  # stamp the session-stable harness identity into a freshly he
   printf '%s\n' "$pid" > "$LOCK/pid" 2>/dev/null || return 1
   fm_pid_identity "$pid" > "$LOCK/pid-identity" 2>/dev/null || true
   printf '%s\n' "$FM_HOME" > "$LOCK/fm-home" 2>/dev/null || true
-  [ "$(lock_pid)" = "$pid" ]
+  [ "$(lock_pid)" = "$pid" ] && [ -s "$LOCK/pid-identity" ]
 }
 
 # Atomically reclaim a LIVE-but-impostor lock (a reused/recycled pid or a
