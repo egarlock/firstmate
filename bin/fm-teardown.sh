@@ -4,24 +4,33 @@
 # state, refresh/prune the project's clone for PR-based ship tasks, then print a backlog-refresh
 # reminder.
 # REFUSES if the worktree holds work that has not LANDED, because treehouse return
-# hard-resets the worktree and kills its processes. The landed-work oracle is three
-# checks, in order:
+# hard-resets the worktree and kills its processes. The landed-work oracle is a
+# dirty gate followed by three allow-conditions (ANY one lands it), in order:
 #   (a) a dirty worktree (uncommitted changes) is never landed -> always REFUSE,
 #       because the reset would discard those changes;
-#   (b) a recorded landed=<sha> in state/<id>.meta -> ALLOW. This is the
-#       authoritative verdict written at merge time by bin/fm-pr-merge.sh and
-#       bin/fm-merge-local.sh: the merge already happened, so teardown does not
-#       re-derive it. This is what makes teardown robust to a no-mistakes run that
-#       advanced origin past the local worktree HEAD.
-#   (c) with no landed= recorded, the single fallback: is the branch's content
-#       already present in the up-to-date default branch? After any merge (squash,
-#       rebase, ff, or a local-only fast-forward) the change is in the default
-#       branch regardless of whether the branch's own commits survived, so this one
-#       check covers the pre-record case without the old PR-head/patch-id/remote-
-#       reachability heuristics. content_in_default fetches the default branch fresh
-#       and refuses when inconclusive, so genuinely unlanded work still REFUSES.
+#   then ALLOW when ANY of the following holds, else REFUSE:
+#   (b) a recorded landed=<sha> in state/<id>.meta. This is the authoritative
+#       verdict written at merge time by bin/fm-pr-merge.sh and bin/fm-merge-local.sh:
+#       the merge already happened, so teardown does not re-derive it. This is what
+#       makes teardown robust to a no-mistakes run that advanced origin past the
+#       local worktree HEAD.
+#   (c) HEAD is reachable from a publishing remote-tracking branch (a fork counts).
+#       This is the base "landed" definition of prime directive #3: the work is
+#       already published, so the reset discards nothing. It is a direct reachability
+#       check, cheap and local, NOT a return of the old PR-head-ancestor or patch-id
+#       heuristics. The local no-mistakes gate remote (refs/remotes/no-mistakes/*) is
+#       excluded, so a branch pushed there during a failed validation run does not
+#       count as landed.
+#   (d) with no landed= recorded and no publishing remote reachable, the single
+#       content fallback: is the branch's content already present in the up-to-date
+#       default branch? After any merge (squash, rebase, ff, or a local-only fast-
+#       forward) the change is in the default branch regardless of whether the
+#       branch's own commits survived. content_in_default fetches the default branch
+#       fresh and refuses when inconclusive, so genuinely unlanded work still REFUSES.
+# The evaluation order is deliberate: (b) and (c) are cheap and local, and only (d)
+# does a network fetch, so a fetch is attempted only when it is actually needed.
 # Uncommitted changes are never landed. The local-only path needs no special case:
-# bin/fm-merge-local.sh records landed= on the approved local merge, and the (c)
+# bin/fm-merge-local.sh records landed= on the approved local merge, and the (d)
 # content check also recognizes a purely local default branch (refs/heads/<default>)
 # when there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -164,6 +173,20 @@ content_in_default() {
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
+}
+
+# Is HEAD reachable from a publishing remote-tracking branch? The work is landed in
+# the base sense of prime directive #3 when its commits are already published on some
+# remote (a fork counts, for the upstream-contribution-on-local-only workflow). List
+# HEAD's commits that are NOT reachable from any remote-tracking branch, excluding the
+# local no-mistakes gate remote (refs/remotes/no-mistakes/*) so a branch pushed there
+# during a failed validation run does not count. An empty result means everything on
+# HEAD is already published -> reachable. This is a cheap, local, direct reachability
+# check, not a resurrection of the old PR-head-ancestor or patch-id heuristics.
+head_reachable_from_publishing_remote() {
+  local unpushed
+  unpushed=$(git -C "$WT" log --oneline HEAD --not --exclude=no-mistakes/'*' --remotes -- 2>/dev/null | head -5 || true)
+  [ -z "$unpushed" ]
 }
 
 backlog_refresh_reminder() {
@@ -512,10 +535,12 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   else
-    # The landed-work oracle, in three checks (see the header comment):
-    #   (a) dirty worktree            -> always REFUSE (the reset would discard it)
-    #   (b) landed=<sha> in meta      -> ALLOW (the merge already happened)
-    #   (c) else content in default   -> ALLOW, else REFUSE (single fallback)
+    # The landed-work oracle (see the header comment): a dirty gate, then ALLOW on
+    # any one of three conditions, else REFUSE:
+    #   (a) dirty worktree             -> always REFUSE (the reset would discard it)
+    #   (b) landed=<sha> in meta       -> ALLOW (the merge already happened)
+    #   (c) HEAD on a publishing remote -> ALLOW (already published; fork counts)
+    #   (d) else content in default    -> ALLOW, else REFUSE (single fallback fetch)
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
     dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-copilot-turnend$)' | head -1 || true)
     if [ -n "$dirty" ]; then
@@ -527,20 +552,14 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
     LANDED=$(grep '^landed=' "$META" | tail -1 | cut -d= -f2- || true)
-    if [ -z "$LANDED" ]; then
-      # (c) No merge was recorded (older tasks merged before landed= existed, or a
-      # merge that bypassed fm-pr-merge/fm-merge-local). Fall back to the one reliable
-      # content check: after any merge - squash, rebase, ff, or a local-only fast-
-      # forward - the branch's change is present in the up-to-date default branch,
-      # regardless of whether the branch's own commits survived. content_in_default
-      # fetches the default branch fresh and refuses when inconclusive, so genuinely
-      # unlanded work still refuses rather than being silently discarded.
-      if ! content_in_default; then
-        echo "REFUSED: worktree $WT has work that has not landed." >&2
-        echo "No merge was recorded (landed=) and the branch's content is not in the default branch." >&2
-        echo "Land its PR (bin/fm-pr-merge.sh), merge it locally (bin/fm-merge-local.sh after the captain approves), push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
-        exit 1
-      fi
+    # Evaluate the allow-conditions cheapest-first: (b) the recorded verdict and (c)
+    # the local reachability check need no network, so only (d) fetches, and only when
+    # neither (b) nor (c) already landed the work.
+    if [ -z "$LANDED" ] && ! head_reachable_from_publishing_remote && ! content_in_default; then
+      echo "REFUSED: worktree $WT has work that has not landed." >&2
+      echo "No merge was recorded (landed=), HEAD is not reachable from any publishing remote, and the branch's content is not in the default branch." >&2
+      echo "Land its PR (bin/fm-pr-merge.sh), merge it locally (bin/fm-merge-local.sh after the captain approves), push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      exit 1
     fi
   fi
 fi

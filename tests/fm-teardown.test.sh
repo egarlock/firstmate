@@ -2,28 +2,33 @@
 # Tests for bin/fm-teardown.sh's landed-work safety check.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. The oracle is three checks, in order:
+# treehouse return hard-resets the worktree. The oracle is a dirty gate then three
+# allow-conditions (ANY one lands it), in order:
 #   (a) a dirty worktree (uncommitted changes) -> always REFUSE;
 #   (b) a recorded landed=<sha> in state/<id>.meta -> ALLOW (the merge already
 #       happened; bin/fm-pr-merge.sh / bin/fm-merge-local.sh write it on success);
-#   (c) with no landed= recorded, one fallback: is the branch's content already in
-#       the up-to-date default branch? -> ALLOW, else REFUSE.
-# This replaced a ~100-line heuristic oracle (remote reachability + PR-head ancestor
-# + patch-id replay + content) with the recorded verdict plus the single content
-# fallback. The recorded verdict is what makes teardown robust to a no-mistakes run
-# that advanced origin past the local worktree HEAD.
+#   (c) HEAD reachable from a publishing remote-tracking branch (a fork counts, the
+#       local no-mistakes gate remote excluded) -> ALLOW (already published);
+#   (d) with none of the above, one fallback: is the branch's content already in the
+#       up-to-date default branch? -> ALLOW, else REFUSE.
+# This replaced a ~100-line heuristic oracle (PR-head ancestor + patch-id replay) with
+# the recorded verdict, a direct reachability check, and the single content fallback.
+# The recorded verdict is what makes teardown robust to a no-mistakes run that advanced
+# origin past the local worktree HEAD.
 #
 # Matrix:
-#   (a) landed= recorded, content NOT in default, no PR   -> ALLOW  (recorded verdict wins)
-#   (b) dirty worktree, even when landed= recorded         -> REFUSE (dirty always wins)
-#   (c) real content, no landed=, content not in default   -> REFUSE (safety)
-#   (d) no landed=, content already in default             -> ALLOW  (content fallback)
-#   (e) content fallback fetches a fresh origin default     -> ALLOW  (stale ref refreshed)
-#   (f) local-only + landed= recorded (local merge)        -> ALLOW  (local merge verdict)
-#   (g) local-only + no landed=, content not in default    -> REFUSE (safety)
-#   (h) --force bypasses the landed-work check              -> ALLOW  (escape hatch)
-#   (i) scout with no report                                -> REFUSE (report is the product)
-#   (j) scout with a report                                 -> ALLOW  (scratch carve-out)
+#   (a) landed= recorded, content NOT in default, no PR      -> ALLOW  (recorded verdict wins)
+#   (b) dirty worktree, even when landed= recorded            -> REFUSE (dirty always wins)
+#   (c) real content, no landed=, content not in default      -> REFUSE (safety)
+#   (d) HEAD pushed to a fork remote, no landed=, not in default -> ALLOW (reachability)
+#   (e) HEAD pushed only to the no-mistakes gate remote        -> REFUSE (gate is excluded)
+#   (f) no landed=, content already in default                -> ALLOW  (content fallback)
+#   (g) content fallback fetches a fresh origin default        -> ALLOW  (stale ref refreshed)
+#   (h) local-only + landed= recorded (local merge)           -> ALLOW  (local merge verdict)
+#   (i) local-only + no landed=, content not in default       -> REFUSE (safety)
+#   (j) --force bypasses the landed-work check                 -> ALLOW  (escape hatch)
+#   (k) scout with no report                                   -> REFUSE (report is the product)
+#   (l) scout with a report                                    -> ALLOW  (scratch carve-out)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -158,6 +163,29 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+# Push the worktree's HEAD to a separate publishing remote (a fork) and create its
+# remote-tracking branch, so head_reachable_from_publishing_remote sees the work as
+# already published even though it never reached origin/main. Args: case_dir remote
+push_head_to_publishing_remote() {
+  local case_dir=$1 remote=$2
+  git init -q --bare "$case_dir/$remote.git"
+  git -C "$case_dir/project" remote add "$remote" "$case_dir/$remote.git"
+  git -C "$case_dir/wt" push -q "$remote" HEAD:refs/heads/task-x1
+  git -C "$case_dir/project" fetch -q "$remote"
+}
+
+# Push the worktree's HEAD ONLY to the local no-mistakes gate remote (its tracking
+# refs land under refs/remotes/no-mistakes/*), simulating a branch published to the
+# gate during a failed validation run. The reachability check excludes this remote,
+# so it must NOT count as landed. Args: case_dir
+push_head_to_gate_remote() {
+  local case_dir=$1
+  git init -q --bare "$case_dir/nm-gate.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/nm-gate.git"
+  git -C "$case_dir/wt" push -q no-mistakes HEAD:refs/heads/task-x1
+  git -C "$case_dir/project" fetch -q no-mistakes
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -226,6 +254,48 @@ test_unpushed_no_record_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no landed= and content not in default is refused (safety preserved)"
+}
+
+test_reachable_from_publishing_remote_allows() {
+  local case_dir rc
+  case_dir=$(make_case reachable-fork)
+  write_meta "$case_dir" no-mistakes ship
+  # The upstream-contribution workflow: real content pushed to a fork remote, no
+  # landed= recorded, and the same change NOT independently on origin/main. HEAD is
+  # reachable from the fork's remote-tracking branch, so the work is already
+  # published and teardown must ALLOW via the reachability allow-condition.
+  wt_commit_file "$case_dir" feature.txt hello "fork work"
+  push_head_to_publishing_remote "$case_dir" fork
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "reachable-fork: teardown should succeed when HEAD is reachable from a publishing remote"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "reachable-fork: teardown printed a REFUSED line"
+  pass "worktree whose HEAD is reachable from a publishing fork remote is torn down (reachability allow)"
+}
+
+test_gate_remote_only_refuses() {
+  local case_dir rc
+  case_dir=$(make_case gate-remote-only)
+  write_meta "$case_dir" no-mistakes ship
+  # The branch was pushed ONLY to the local no-mistakes gate remote (a failed
+  # validation run), no landed= recorded, and its content is not in the default
+  # branch. The gate remote is excluded from the reachability check, so this must
+  # still REFUSE - a gate push is not a landing.
+  wt_commit_file "$case_dir" feature.txt hello "gate-only work"
+  push_head_to_gate_remote "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gate-remote-only: teardown should refuse work reachable only via the excluded gate remote"
+  grep -q REFUSED "$case_dir/stderr" || fail "gate-remote-only: no REFUSED line in stderr"
+  pass "branch published only to the excluded no-mistakes gate remote is refused (gate is not a landing)"
 }
 
 test_content_in_default_fallback_allows() {
@@ -399,6 +469,8 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
 test_landed_recorded_allows
 test_dirty_worktree_refuses
 test_unpushed_no_record_refuses
+test_reachable_from_publishing_remote_allows
+test_gate_remote_only_refuses
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_local_only_landed_recorded_allows
