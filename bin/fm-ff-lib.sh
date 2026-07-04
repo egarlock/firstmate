@@ -21,26 +21,18 @@
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 
+# fm_default_branch lives in the shared git lib (resolved at source time from
+# BASH_SOURCE so it works however this lib is sourced).
+_FM_FF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-git-lib.sh
+. "$_FM_FF_LIB_DIR/fm-git-lib.sh"
+# shellcheck source=bin/fm-path-lib.sh
+. "$_FM_FF_LIB_DIR/fm-path-lib.sh"
+
 # --- helpers ---------------------------------------------------------------
 
 first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
-}
-
-default_branch() {
-  local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
 }
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD
@@ -50,7 +42,7 @@ default_branch() {
 # stray feature branch to the fleet. Echoes the commit SHA, or returns 1.
 primary_head_commit() {
   local root=$1 default
-  default=$(default_branch "$root") || return 1
+  default=$(fm_default_branch "$root") || return 1
   git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
 }
 
@@ -64,17 +56,6 @@ resolved_existing_dir() {
   local path=$1
   [ -d "$path" ] || return 1
   cd "$path" && pwd -P
-}
-
-path_is_ancestor_of() {
-  local ancestor=$1 path=$2
-  [ -n "$ancestor" ] || return 1
-  [ -n "$path" ] || return 1
-  [ "$ancestor" != "$path" ] || return 1
-  case "$path" in
-    "$ancestor"/*) return 0 ;;
-  esac
-  return 1
 }
 
 VALIDATED_HOME=""
@@ -290,7 +271,7 @@ ff_target() {
   fi
 
   local default base cur instr local_rev base_rev before after out
-  default=$(default_branch "$dir") || {
+  default=$(fm_default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }

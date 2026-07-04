@@ -25,9 +25,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-env-lib.sh
+. "$SCRIPT_DIR/fm-env-lib.sh"
+fm_env_init            # FM_ROOT, FM_HOME, STATE
 mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -46,6 +46,11 @@ mkdir -p "$STATE"
 # see bin/fm-backend.sh and docs/herdr-backend.md.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# Shared tmux pane primitives: the ONE canonical busy-footer regex
+# (FM_TMUX_BUSY_REGEX_DEFAULT) lives here, consumed by both this watcher and the
+# away-mode daemon so the busy signature has a single definition.
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 
 # Refuse to run with a whitespace-bearing state path: the signal wake format is a
 # space-delimited path list, so a spaced STATE would silently break captain-verb
@@ -130,8 +135,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # copilot: "esc cancel" (the cancel hint in copilot's working footer, shown iff
 # a turn is running; the idle footer is "/ commands · ? help · → next tab" -
 # verified GitHub Copilot CLI 1.0.68, the ASCII hint chosen over the footer's
-# Unicode dot and spinner glyphs).
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|esc cancel'}
+# Unicode dot and spinner glyphs). The literal is defined once in fm-tmux-lib.sh
+# (FM_TMUX_BUSY_REGEX_DEFAULT) and consumed here so it cannot drift.
+BUSY_REGEX=${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash

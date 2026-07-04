@@ -42,6 +42,10 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
+- Logic shared by more than one `bin/` script lives in one sourced `bin/fm-*-lib.sh` helper, never a copy-paste, so a fix or a per-VCS/per-backend quirk has a single home and cannot drift.
+  A lib self-locates via `BASH_SOURCE` (so it works however it is sourced) and guards against double-sourcing.
+  The foundational ones: `fm-env-lib.sh` resolves `FM_ROOT`/`FM_HOME`/`STATE` (call `fm_env_init` right after computing `SCRIPT_DIR`); `fm-git-lib.sh` holds `fm_default_branch`; `fm-path-lib.sh` holds `path_is_ancestor_of`; `fm-tmux-lib.sh` owns the tmux pane primitives and the one busy-footer regex `FM_TMUX_BUSY_REGEX_DEFAULT`.
+  When you add a new duplicate site, source the lib instead of re-inlining the body.
   Test scripts and helpers in `tests/` are plain bash too.
   They must stay portable to macOS stock `/bin/bash` 3.2 (no `$(cat <<EOF)` heredocs, no bare `"${arr[@]}"` on a possibly-empty array under `set -u`, no locale-dependent `[a-z]` ranges); a dedicated CI leg runs the whole behavior suite under real bash 3.2 alongside the Linux (bash 5) legs.
   `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` must pass, and CI enforces it.
