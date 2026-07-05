@@ -602,8 +602,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       echo "The landed-work oracle cannot run on it, so nothing can be proven landed. Investigate the worktree (or get the captain's explicit OK to discard, then --force)." >&2
       exit 1
     fi
-    # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-copilot-turnend$)' | head -1 || true)
+    # The fm-spawn hook files are ours, never work product; ignore them in the dirty
+    # check (one per harness: .claude/, .opencode/ (plugins/fm-turn-end.js),
+    # .fm-grok-turnend, .fm-copilot-turnend).
+    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.opencode/|\.fm-grok-turnend$|\.fm-copilot-turnend$)' | head -1 || true)
     if [ -n "$dirty" ]; then
       # (a) Uncommitted changes are never landed and the reset would discard them;
       # always refuse, regardless of whether the committed work itself has landed.

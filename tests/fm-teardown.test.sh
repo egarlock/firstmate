@@ -665,6 +665,27 @@ test_teardown_removes_watcher_markers() {
   pass "teardown removes every per-task watcher/daemon marker family, leaving sibling tasks' markers"
 }
 
+test_opencode_hook_file_not_dirty() {
+  local case_dir rc
+  case_dir=$(make_case opencode-hook)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_landed_meta "$case_dir"
+  # The opencode turn-end plugin fm-spawn writes into the worktree is ours, never
+  # work product; an untracked .opencode/ must not read as a dirty worktree.
+  mkdir -p "$case_dir/wt/.opencode/plugins"
+  printf 'export const FmTurnEnd = 1\n' > "$case_dir/wt/.opencode/plugins/fm-turn-end.js"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "opencode-hook: teardown should not refuse over the fm-spawn opencode hook file"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "opencode-hook: teardown printed a REFUSED line"
+  pass "an untracked fm-spawn .opencode/ turn-end plugin does not false-refuse teardown as dirty"
+}
+
 test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
@@ -722,5 +743,6 @@ test_force_overrides_unlanded
 test_scout_without_report_refuses
 test_scout_with_report_allows
 test_teardown_removes_watcher_markers
+test_opencode_hook_file_not_dirty
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
