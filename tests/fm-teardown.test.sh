@@ -617,6 +617,54 @@ test_scout_with_report_allows() {
   pass "scout task with a report is torn down despite scratch commits (scratch carve-out)"
 }
 
+test_teardown_removes_watcher_markers() {
+  local case_dir rc state task_key window_key f
+  case_dir=$(make_case watcher-markers)
+  state="$case_dir/state"
+  # A window target with backend punctuation so the tr ':/.' '___' key
+  # derivation is actually exercised, not just an identity mapping.
+  fm_write_meta "$state/task-x1.meta" \
+    "window=sess:fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_landed_meta "$case_dir"
+  task_key=task-x1
+  window_key=sess_fm-task-x1
+  # Every per-task marker family the watcher (fm-watch.sh) and the away-mode
+  # daemon (fm-supervise-daemon.sh) write, plus a sibling task's markers that
+  # must survive.
+  printf 'sig' > "$state/.seen-task-x1_status"
+  printf 'sig' > "$state/.seen-task-x1_turn-ended"
+  printf 'done: x' > "$state/.hb-surfaced-$task_key"
+  printf 'done: x' > "$state/.subsuper-seen-status-$task_key"
+  printf '123' > "$state/.subsuper-stale-$task_key"
+  printf 'hash' > "$state/.hash-$window_key"
+  printf '2' > "$state/.count-$window_key"
+  printf 'hash' > "$state/.stale-$window_key"
+  printf '123' > "$state/.stale-since-$window_key"
+  printf 'sig' > "$state/.seen-other-x9_status"
+  printf 'hash' > "$state/.hash-sess_fm-other-x9"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "watcher-markers: teardown should succeed on the landed task"
+  for f in \
+    ".seen-task-x1_status" ".seen-task-x1_turn-ended" \
+    ".hb-surfaced-$task_key" ".subsuper-seen-status-$task_key" ".subsuper-stale-$task_key" \
+    ".hash-$window_key" ".count-$window_key" ".stale-$window_key" ".stale-since-$window_key"; do
+    [ ! -e "$state/$f" ] || fail "watcher-markers: teardown left orphaned marker $f behind"
+  done
+  [ -e "$state/.seen-other-x9_status" ] || fail "watcher-markers: teardown removed a sibling task's .seen marker"
+  [ -e "$state/.hash-sess_fm-other-x9" ] || fail "watcher-markers: teardown removed a sibling task's .hash marker"
+  pass "teardown removes every per-task watcher/daemon marker family, leaving sibling tasks' markers"
+}
+
 test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
@@ -673,5 +721,6 @@ test_broken_gitfile_worktree_refuses
 test_force_overrides_unlanded
 test_scout_without_report_refuses
 test_scout_with_report_allows
+test_teardown_removes_watcher_markers
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present

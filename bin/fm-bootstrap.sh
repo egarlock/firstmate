@@ -429,5 +429,12 @@ x_mode_setup
 if [ -x "$SCRIPT_DIR/fm-hook-sweep.sh" ]; then
   "$SCRIPT_DIR/fm-hook-sweep.sh" 2>/dev/null || true
 fi
+# Remove orphaned per-task watcher/daemon markers (state/ sidecars whose task no
+# longer has a state/<id>.meta), left by tasks that died without teardown or were
+# torn down before teardown cleaned marker families. Best-effort, age-guarded,
+# quiet unless it removed something.
+if [ -x "$SCRIPT_DIR/fm-marker-sweep.sh" ]; then
+  "$SCRIPT_DIR/fm-marker-sweep.sh" 2>/dev/null || true
+fi
 fleet_sync
 exit 0
