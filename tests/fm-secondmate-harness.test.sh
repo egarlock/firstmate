@@ -1015,7 +1015,23 @@ test_config_push_exits_nonzero_on_copy_error() {
   pass "B14 config-push exits nonzero on real propagation errors"
 }
 
+# fm-harness.sh verb handling: a bare invocation keeps printing the detected own
+# harness (the documented default), but an unrecognized non-empty verb must error
+# with the known verbs listed and a non-zero exit - it must never silently fall
+# through to detect_own and exit 0 as if the typo were the default query.
+test_harness_unknown_verb_errors() {
+  local out rc
+  out=$(CLAUDECODE=1 "$ROOT/bin/fm-harness.sh")
+  [ "$out" = claude ] || fail "bare fm-harness.sh no longer prints the detected own harness (got '$out')"
+  out=$(CLAUDECODE=1 "$ROOT/bin/fm-harness.sh" bogus-verb 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-harness.sh bogus-verb exited 0 (silently fell through to detect_own)"
+  assert_contains "$out" "unknown fm-harness.sh verb 'bogus-verb'" "unknown verb error did not name the verb"
+  assert_contains "$out" "secondmate-effort" "unknown verb error did not list the known verbs"
+  pass "A2 fm-harness.sh: bare invocation detects own harness; an unknown verb errors with the verb list"
+}
+
 test_harness_resolution
+test_harness_unknown_verb_errors
 test_secondmate_model_effort_tokens
 test_propagate_lib
 test_spawn_split_and_inherit
