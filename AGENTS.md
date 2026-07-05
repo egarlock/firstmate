@@ -122,6 +122,7 @@ Run `bin/fm-bootstrap.sh`.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Bootstrap also runs `bin/fm-hook-sweep.sh`, best-effort and quiet, to remove orphaned grok/copilot turn-end hook registry tokens left by tasks that died without teardown (section 7 spawn); it is home-agnostic and age-guarded, so it never touches a live token.
+Bootstrap also runs `bin/fm-marker-sweep.sh`, best-effort and quiet, to remove orphaned per-task watcher/daemon markers in `state/` whose task no longer has a `state/<id>.meta`; it is age-guarded, so it never touches a live task's markers.
 Bootstrap also sweeps every live secondmate home, fast-forwarding each one's worktree to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
 The live set comes from `state/<id>.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 This is a purely local fast-forward (every secondmate home is a worktree of this same repo, sharing one object store), never a fetch from origin and never a surprise pull: the version followed is simply whatever the primary is currently on, which only the captain changes deliberately via `git pull` or `/updatefirstmate`.

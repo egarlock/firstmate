@@ -159,7 +159,7 @@ secondmate_sync() {
     if ! propagate_inheritable_config "$CONFIG" "$home_real/config"; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: config inheritance failed"
     fi
-  done < <(live_secondmate_meta_records "$STATE" "$FM_HOME/data/secondmates.md")
+  done < <(live_secondmate_meta_records "$STATE" "${FM_DATA_OVERRIDE:-$FM_HOME/data}/secondmates.md")
   [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
   return 0
 }
@@ -428,6 +428,13 @@ x_mode_setup
 # Best-effort, quiet unless it removed something (AGENTS.md supervision protocol).
 if [ -x "$SCRIPT_DIR/fm-hook-sweep.sh" ]; then
   "$SCRIPT_DIR/fm-hook-sweep.sh" 2>/dev/null || true
+fi
+# Remove orphaned per-task watcher/daemon markers (state/ sidecars whose task no
+# longer has a state/<id>.meta), left by tasks that died without teardown or were
+# torn down before teardown cleaned marker families. Best-effort, age-guarded,
+# quiet unless it removed something.
+if [ -x "$SCRIPT_DIR/fm-marker-sweep.sh" ]; then
+  "$SCRIPT_DIR/fm-marker-sweep.sh" 2>/dev/null || true
 fi
 fleet_sync
 exit 0

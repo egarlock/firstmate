@@ -38,6 +38,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-env-lib.sh"
 fm_env_init            # FM_ROOT, FM_HOME, STATE
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+
+usage() {
+  echo "usage: fm-brief.sh <task-id> <repo-name> [--scout]" >&2
+  echo "       fm-brief.sh <task-id> --secondmate <project>..." >&2
+}
+
 KIND=ship
 POS=()
 for a in "$@"; do
@@ -47,6 +53,7 @@ for a in "$@"; do
     *) POS+=("$a") ;;
   esac
 done
+[ "${#POS[@]}" -ge 1 ] || { usage; exit 1; }
 ID=${POS[0]}
 # Task ids are LLM-generated and flow into filesystem paths (and downstream into
 # tmux targets, branch names, and regexes via fm-spawn), so reject anything but a
@@ -137,6 +144,9 @@ fi
 exit 0
 fi
 
+# Ship and scout briefs need the repo name; a bare `fm-brief.sh <task-id>` must
+# print usage instead of dying on an unbound POS[1] under set -u.
+[ "${#POS[@]}" -ge 2 ] || { usage; exit 1; }
 REPO=${POS[1]}
 
 if [ "$KIND" = scout ]; then

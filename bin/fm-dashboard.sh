@@ -103,11 +103,10 @@ status_last_line() {  # <file>
 
 # Parse the "state:" and detail out of a fm-crew-state.sh line, which looks like:
 #   state: working · source: run-step · validating (running)
-crew_field() {  # <line> <field: state|source|detail>
+crew_field() {  # <line> <field: state|detail>
   local line=$1 field=$2 rest
   case "$field" in
     state)  printf '%s' "$line" | sed -n 's/^state:[[:space:]]*\([^ ]*\).*/\1/p' ;;
-    source) printf '%s' "$line" | sed -n 's/.*source:[[:space:]]*\([^ ]*\).*/\1/p' ;;
     detail)
       # Everything after the last " · " separator, when there are 3+ segments.
       rest=${line##* · }

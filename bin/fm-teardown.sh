@@ -154,6 +154,30 @@ remove_copilot_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+# Remove the per-task watcher/daemon marker sidecars so a torn-down task leaves
+# no orphaned suppression state behind. The keys mirror the writers exactly:
+#   fm-watch.sh: .seen-<signal-file-basename through tr '.' '_'> (scan_signals),
+#     .hb-surfaced-<taskkey> (_hb_surfaced_path), and the window-keyed
+#     .hash-/.count-/.stale-/.stale-since-<windowkey> staleness sidecars;
+#   fm-supervise-daemon.sh: .subsuper-seen-status-<taskkey> (mark_status_seen)
+#     and .subsuper-stale-<taskkey> (stale_marker_record).
+# taskkey and windowkey are the id/window target through `tr ':/.' '___'`
+# (the daemon's _stale_key and the watcher's key= derivation).
+remove_task_markers() {
+  local state_dir=$1 id=$2 window=$3 task_key seen_status seen_turnend window_key
+  task_key=$(printf '%s' "$id" | tr ':/.' '___')
+  seen_status=$(printf '%s.status' "$id" | tr '.' '_')
+  seen_turnend=$(printf '%s.turn-ended' "$id" | tr '.' '_')
+  rm -f "$state_dir/.seen-$seen_status" "$state_dir/.seen-$seen_turnend" \
+    "$state_dir/.hb-surfaced-$task_key" \
+    "$state_dir/.subsuper-seen-status-$task_key" "$state_dir/.subsuper-stale-$task_key"
+  if [ -n "$window" ]; then
+    window_key=$(printf '%s' "$window" | tr ':/.' '___')
+    rm -f "$state_dir/.hash-$window_key" "$state_dir/.count-$window_key" \
+      "$state_dir/.stale-$window_key" "$state_dir/.stale-since-$window_key"
+  fi
+}
+
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -513,6 +537,7 @@ cleanup_firstmate_home_children() {
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_copilot_turnend_auth "$sub_state" "$child_id"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.copilot-turnend-token"
+    remove_task_markers "$sub_state" "$child_id" "$child_t"
   done
 }
 
@@ -577,8 +602,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       echo "The landed-work oracle cannot run on it, so nothing can be proven landed. Investigate the worktree (or get the captain's explicit OK to discard, then --force)." >&2
       exit 1
     fi
-    # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
-    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-copilot-turnend$)' | head -1 || true)
+    # The fm-spawn hook files are ours, never work product; ignore them in the dirty
+    # check (one per harness: .claude/, .opencode/ (plugins/fm-turn-end.js),
+    # .fm-grok-turnend, .fm-copilot-turnend).
+    dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.opencode/|\.fm-grok-turnend$|\.fm-copilot-turnend$)' | head -1 || true)
     if [ -n "$dirty" ]; then
       # (a) Uncommitted changes are never landed and the reset would discard them;
       # always refuse, regardless of whether the committed work itself has landed.
@@ -632,6 +659,7 @@ remove_copilot_turnend_auth "$STATE" "$ID"
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.copilot-turnend-token"
+remove_task_markers "$STATE" "$ID" "$T"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

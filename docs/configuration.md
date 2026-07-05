@@ -83,6 +83,7 @@ The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 Copilot uses the same global turn-end hook shape under `$COPILOT_HOME/hooks/`, or `~/.copilot/hooks/` when `COPILOT_HOME` is unset; before a copilot launch `fm-spawn.sh` version-gates the CLI against the verified minimum 1.0.68, aborting with a clear "copilot CLI is incompatible" message on an older or absent CLI (mirroring bootstrap's treehouse/no-mistakes gates), with `FM_SPAWN_SKIP_VERSION_CHECK=1` bypassing it.
 Orphaned grok/copilot registry tokens left by tasks that die without teardown are cleared by `bin/fm-hook-sweep.sh`, run best-effort by bootstrap; it is home-agnostic and age-guarded (`FM_HOOK_SWEEP_MIN_AGE_MINS`, default 2), so it never touches a live, in-flight, or other-home token.
+Orphaned per-task watcher/daemon markers in `state/` (sidecars whose task has no `state/<id>.meta`) are cleared the same way by `bin/fm-marker-sweep.sh`, also run best-effort by bootstrap and age-guarded (`FM_MARKER_SWEEP_MIN_AGE_MINS`, default 2).
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -110,7 +111,7 @@ If compatible `tasks-axi` is already on `PATH`, bootstrap records it as `TASKS_A
 When it is absent or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and firstmate keeps hand-editing `data/backlog.md` until installation is approved and completed.
 When `config/backlog-backend=manual`, bootstrap hand-edits and does not suggest installing `tasks-axi`.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
-Bootstrap also runs `bin/fm-hook-sweep.sh` best-effort to clear orphaned grok/copilot turn-end registry tokens; it stays quiet unless it removed something.
+Bootstrap also runs `bin/fm-hook-sweep.sh` best-effort to clear orphaned grok/copilot turn-end registry tokens, and `bin/fm-marker-sweep.sh` best-effort to clear orphaned per-task watcher/daemon markers; both stay quiet unless they removed something.
 Bootstrap also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms; local-only and no-origin skips stay silent.
 Bootstrap also runs the guarded local secondmate sync for recorded live secondmate homes, then propagates declared inheritable local config into each validated live home.
@@ -210,6 +211,7 @@ GROK_HOME=              # optional Grok config home for firstmate's global grok 
 COPILOT_HOME=           # optional Copilot config home for firstmate's global copilot turn-end hook; defaults to ~/.copilot
 FM_SPAWN_SKIP_VERSION_CHECK=0   # set to 1 to bypass fm-spawn's copilot CLI version gate (tests/edge cases)
 FM_HOOK_SWEEP_MIN_AGE_MINS=2    # fm-hook-sweep.sh age guard; only tokens older than this are swept, <= 0 disables it (mainly for tests)
+FM_MARKER_SWEEP_MIN_AGE_MINS=2  # fm-marker-sweep.sh age guard; only markers older than this are swept, <= 0 disables it (mainly for tests)
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables

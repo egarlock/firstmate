@@ -112,6 +112,23 @@ test_missing_meta_is_refused() {
   pass "a task with no meta is refused"
 }
 
+test_no_args_prints_usage() {
+  local case_dir rc out
+  case_dir=$(make_case promote-no-args)
+
+  # No task id: usage on stderr, exit 1, never the set -u unbound crash.
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$case_dir/fmroot" FM_STATE_OVERRIDE="$case_dir/state" "$PROMOTE" 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "promote-no-args: fm-promote with no args should exit 1"
+  assert_contains "$out" "usage: fm-promote.sh <task-id>" "no-arg run did not print usage"
+  assert_not_contains "$out" "unbound variable" "no-arg run crashed on an unbound positional"
+  pass "fm-promote prints usage and exits 1 with no task id instead of an unbound-variable crash"
+}
+
 test_scout_is_promoted_to_ship
 test_non_scout_is_refused_and_meta_untouched
 test_missing_meta_is_refused
+test_no_args_prints_usage

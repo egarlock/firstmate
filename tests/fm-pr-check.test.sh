@@ -121,6 +121,32 @@ test_non_github_url_rejected() {
   pass "fm-pr-check rejects a non-GitHub PR URL before arming the merge poll"
 }
 
+test_missing_args_print_usage() {
+  local case_dir rc out
+  case_dir=$(make_case missing-args)
+
+  # No args at all: usage on stderr, exit 1, never the set -u unbound crash.
+  set +e
+  out=$(run_pr_check "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing-args: fm-pr-check with no args should exit 1"
+  assert_contains "$out" "usage: fm-pr-check.sh <task-id> <pr-url>" "no-arg run did not print usage"
+  assert_not_contains "$out" "unbound variable" "no-arg run crashed on an unbound positional"
+
+  # Task id only (the missing-URL shape): same usage guard.
+  set +e
+  out=$(run_pr_check "$case_dir" task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing-args: fm-pr-check with only a task id should exit 1"
+  assert_contains "$out" "usage: fm-pr-check.sh <task-id> <pr-url>" "id-only run did not print usage"
+  assert_not_contains "$out" "unbound variable" "id-only run crashed on an unbound positional"
+  assert_absent "$case_dir/state/task-x1.check.sh" "usage-guarded run still armed a check shim"
+  pass "fm-pr-check prints usage and exits 1 on missing required args instead of an unbound-variable crash"
+}
+
 test_wellformed_url_accepted
 test_injection_url_rejected_before_any_write
 test_non_github_url_rejected
+test_missing_args_print_usage
