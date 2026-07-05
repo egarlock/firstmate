@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-env-lib.sh"
 fm_env_init            # FM_ROOT, FM_HOME, STATE
 "$FM_ROOT/bin/fm-guard.sh" || true
+[ $# -ge 2 ] || { echo "usage: fm-pr-check.sh <task-id> <pr-url>" >&2; exit 1; }
 ID=$1
 URL=$2
 

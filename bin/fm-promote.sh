@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-env-lib.sh"
 fm_env_init            # FM_ROOT, FM_HOME, STATE
 "$FM_ROOT/bin/fm-guard.sh" || true
+[ $# -ge 1 ] || { echo "usage: fm-promote.sh <task-id>" >&2; exit 1; }
 ID=$1
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
