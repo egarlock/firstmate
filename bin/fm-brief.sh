@@ -206,6 +206,7 @@ case "$MODE" in
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+If this project's \`origin\` is on dev.azure.com or visualstudio.com, open the PR with \`az repos pr create\` (az CLI with the azure-devops extension) instead of gh-axi.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
     ;;
