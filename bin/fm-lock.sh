@@ -99,27 +99,51 @@ classify_holder() {
 
 # Migrate a legacy plain-file lock (the pre-directory format: $STATE/.lock holding
 # just a pid) so the atomic directory primitive can take over. Returns 1 (refuse)
-# when it names a different live harness session, 0 after clearing a reclaimable one.
+# when it names a different live harness session, 0 after clearing a reclaimable
+# one (or after leaving it to a concurrent migrator; the acquire loop re-classifies
+# whatever remains).
 migrate_legacy_lock() {
-  local legacy
+  local legacy steal="$LOCK.steal"
   [ -e "$LOCK" ] && [ ! -d "$LOCK" ] && [ ! -L "$LOCK" ] || return 0
   legacy=$(cat "$LOCK" 2>/dev/null || true)
   if [ -n "$legacy" ] && [ "$legacy" != "${1:-}" ] && holder_is_harness_alive "$legacy"; then
     return 1
   fi
-  rm -f "$LOCK" 2>/dev/null || true
+  # Test-only fault injection: hold the gate->removal window open so the migration
+  # race regression test can interleave a full migrate-and-acquire into it.
+  [ -n "${FM_LOCK_TEST_STALL_BEFORE_MIGRATE_RM:-}" ] && sleep "$FM_LOCK_TEST_STALL_BEFORE_MIGRATE_RM"
+  # Remove the legacy file only under the `.steal` mutex, re-verifying the
+  # plain-file shape there. Every remover of the directory/symlink lock already
+  # serializes on `.steal`; without this, a session that passed the plain-file
+  # gate just before a concurrent session migrated AND acquired would `rm -f` that
+  # session's freshly created symlink lock and both would end up holding it.
+  # On mutex contention, remove nothing: the concurrent holder is mid-migration
+  # or mid-steal, and the acquire loop handles whatever it leaves behind.
+  if fm_lock_try_acquire "$steal"; then
+    if [ -e "$LOCK" ] && [ ! -d "$LOCK" ] && [ ! -L "$LOCK" ]; then
+      rm -f "$LOCK" 2>/dev/null || true
+    fi
+    fm_lock_release "$steal"
+  fi
   return 0
 }
 
 record_holder() {  # stamp the session-stable harness identity into a freshly held lock
-  local pid=$1
-  # pid FIRST (so a contender in the window sees an empty identity + fresh lock and
-  # waits, never a pid/identity mismatch that would look like a reused pid), then
-  # the identity, then the home. Mirrors fm-watch.sh's post-acquire stamping.
-  printf '%s\n' "$pid" > "$LOCK/pid" 2>/dev/null || return 1
-  fm_pid_identity "$pid" > "$LOCK/pid-identity" 2>/dev/null || true
-  printf '%s\n' "$FM_HOME" > "$LOCK/fm-home" 2>/dev/null || true
-  [ "$(lock_pid)" = "$pid" ] && [ -s "$LOCK/pid-identity" ]
+  local pid=$1 owner=${FM_LOCK_OWNER_DIR:-}
+  [ -n "$owner" ] || return 1
+  # Write into the owner dir captured at acquire, NEVER through the $LOCK symlink:
+  # a contender that swapped the symlink while we stalled would otherwise receive
+  # our writes into ITS owner dir (both sessions then verify their own clobber and
+  # both stay live - split brain). pid FIRST (so a contender in the window sees an
+  # empty identity + fresh lock and waits, never a pid/identity mismatch that would
+  # look like a reused pid), then the identity, then the home; finally confirm the
+  # symlink still names our owner dir. A stalled winner's late writes land in its
+  # own already-discarded owner dir, its verify fails, and it backs off.
+  { printf '%s\n' "$pid" > "$owner/pid"; } 2>/dev/null || return 1
+  { fm_pid_identity "$pid" > "$owner/pid-identity"; } 2>/dev/null || true
+  { printf '%s\n' "$FM_HOME" > "$owner/fm-home"; } 2>/dev/null || true
+  [ -s "$owner/pid-identity" ] || return 1
+  fm_lock_points_to_owner "$LOCK" "$owner"
 }
 
 # Atomically reclaim a LIVE-but-impostor lock (a reused/recycled pid or a
@@ -184,6 +208,9 @@ fi
 tries=0
 while [ "$tries" -lt 120 ]; do
   if fm_lock_try_acquire "$LOCK"; then
+    # Test-only fault injection: hold the acquire->record window open past the
+    # steal grace so the split-brain regression test can race a stealer into it.
+    [ -n "${FM_LOCK_TEST_STALL_BEFORE_RECORD:-}" ] && sleep "$FM_LOCK_TEST_STALL_BEFORE_RECORD"
     if record_holder "$me"; then
       echo "lock acquired: harness pid $me"
       exit 0
