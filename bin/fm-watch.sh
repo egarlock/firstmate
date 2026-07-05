@@ -243,14 +243,21 @@ recorded_windows() {
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
+# ABSORBED wakes reset it too (reset_heartbeat_streak at each absorb site): an
+# absorbed benign signal or provably-working stale is fleet ACTIVITY, so only
+# heartbeats themselves - absorbed or surfaced - may grow the streak. Without
+# that, a busy fleet whose wakes are all absorbed would back the heartbeat
+# safety net off to HEARTBEAT_MAX exactly when it matters most.
 wake() {
   case "$1" in
     heartbeat*) echo $(( $(fm_read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak" ;;
-    *) echo 0 > "$STATE/.heartbeat-streak" ;;
+    *) reset_heartbeat_streak ;;
   esac
   echo "$1"
   exit 0
 }
+
+reset_heartbeat_streak() { echo 0 > "$STATE/.heartbeat-streak"; }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
@@ -438,6 +445,7 @@ EOF
       done <<EOF
 $pending
 EOF
+      reset_heartbeat_streak
       triage_log "absorbed benign $reason"
     fi
   fi
@@ -500,6 +508,7 @@ EOF
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
+              reset_heartbeat_streak
               triage_log "absorbed non-terminal stale (provably working): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
@@ -512,6 +521,7 @@ EOF
             case "$since" in
               ''|*[!0-9]*)
                 date +%s > "$ssf"
+                reset_heartbeat_streak
                 triage_log "absorbed non-terminal stale timer reset: $w"
                 ;;
               *)
@@ -541,7 +551,8 @@ EOF
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
-  # surfaced non-heartbeat wake.
+  # non-heartbeat wake, surfaced OR absorbed - absorbed signal/stale activity
+  # still proves the fleet is busy, so the safety net must not back off.
   streak=$(fm_read_counter "$STATE/.heartbeat-streak")
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))

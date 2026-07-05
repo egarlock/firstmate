@@ -508,6 +508,75 @@ test_heartbeat_no_change_absorbed() {
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
 }
 
+# --- absorbed activity resets the heartbeat backoff streak -------------------
+# The heartbeat interval backs off only across consecutive heartbeats on an IDLE
+# fleet. An ABSORBED benign wake (a provably-working signal, a provably-working
+# non-terminal stale) is fleet activity, so it must reset the streak exactly as a
+# surfaced wake does - otherwise the heartbeat safety net backs off to
+# HEARTBEAT_MAX precisely while the fleet is busiest (all its wakes absorbed).
+
+wait_file_value() {  # <file> <value> [limit]
+  local file=$1 value=$2 limit=${3:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(cat "$file" 2>/dev/null || true)" = "$value" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_absorbed_signal_resets_heartbeat_streak() {
+  local dir state fakebin out pid
+  dir=$(make_case absorb-signal-streak); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # A long idle stretch backed the heartbeat off (streak 7 = 600s * 128, capped).
+  printf '7\n' > "$state/.heartbeat-streak"
+  # Then a crewmate got busy: a no-verb working: note whose crew is provably
+  # working - absorbed, never surfaced.
+  printf 'working: compiling step 2\n' > "$state/task.status"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_file_value "$state/.heartbeat-streak" 0 40; then
+    reap "$pid"; fail "absorbed benign signal did not reset the heartbeat backoff streak (still $(cat "$state/.heartbeat-streak" 2>/dev/null))"
+  fi
+  [ -s "$state/.seen-task_status" ] || { reap "$pid"; fail "signal was not actually absorbed (.seen-* missing)"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbed signal enqueued a wake while testing streak reset"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "absorbed signal printed a wake reason while testing streak reset: $(cat "$out")"; }
+  reap "$pid"
+  pass "an absorbed benign signal resets the heartbeat backoff streak (busy fleet never backs off the safety net)"
+}
+
+test_absorbed_stale_resets_heartbeat_streak() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case absorb-stale-streak); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-busy-quiet"
+  printf '9\n' > "$state/.heartbeat-streak"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/busy-quiet.meta"
+  # Non-terminal status with a primed .seen-* so only the stale path fires.
+  printf 'working: still compiling\n' > "$state/busy-quiet.status"
+  sig=$(seen_sig "$state/busy-quiet.status"); printf '%s' "$sig" > "$state/.seen-busy-quiet_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Provably working -> the non-terminal stale is absorbed (no exit), which must
+  # reset the streak.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_file_value "$state/.heartbeat-streak" 0 40; then
+    reap "$pid"; fail "absorbed provably-working stale did not reset the heartbeat backoff streak (still $(cat "$state/.heartbeat-streak" 2>/dev/null))"
+  fi
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || { reap "$pid"; fail "stale was not actually absorbed (suppressor not advanced)"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbed stale enqueued a wake while testing streak reset"; }
+  reap "$pid"
+  pass "an absorbed provably-working non-terminal stale resets the heartbeat backoff streak"
+}
+
 test_heartbeat_backstop_surfaces_unsurfaced_status() {
   local dir state fakebin out drain_out sig pid
   dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
@@ -701,6 +770,8 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
+test_absorbed_signal_resets_heartbeat_streak
+test_absorbed_stale_resets_heartbeat_streak
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
