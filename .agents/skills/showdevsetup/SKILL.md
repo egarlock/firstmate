@@ -22,7 +22,7 @@ The load-bearing part is the no-mistakes binary wiring check: no-mistakes is com
    - the canonical no-mistakes checkout (the `no-mistakes.git` sibling of the firstmate root, overridable via `FM_NM_CANONICAL`), flagged when behind its `origin/main` tracking ref,
    - the treehouse sibling checkout when present.
 
-   Each repo shows its origin URL (flagging whether it is the captain's `egarlock/*` fork), its branch and upstream tracking ref, the HEAD one-line, and a dirty flag.
+   Each repo shows its origin URL (flagged as the captain's fork when its GitHub owner matches `FM_FORK_OWNER`, or the logged-in `gh api user` account when that is unset; with neither available the origin owner is shown with no verdict), its branch and upstream tracking ref, the HEAD one-line, and a dirty flag.
    It ends with the no-mistakes binary wiring section: the CLI on PATH (and its resolved symlink target), the GOPATH binary, the running daemon pid, each binary's version, and a `PASS`/`DRIFT` verdict on whether they all report the same commit.
    Missing pieces print `(absent)`/`(not running)` instead of erroring.
 

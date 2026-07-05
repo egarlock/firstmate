@@ -4,8 +4,11 @@
 # Mechanical half of the /showdevsetup skill. Scans the real repos on every
 # invocation — nothing is cached and NOTHING is written anywhere (no state/,
 # no data/, no projects/, no fetches), so the printout is always the current
-# truth. For each repo it reports the origin remote (flagging the captain's
-# egarlock/* fork), the branch and its upstream tracking ref, the HEAD
+# truth. For each repo it reports the origin remote (flagged as the captain's
+# fork when its GitHub owner matches FM_FORK_OWNER, or the logged-in
+# `gh api user` account when that is unset; with neither available the origin
+# owner is printed with no verdict), the branch and its upstream tracking ref,
+# the HEAD
 # one-line, and a dirty flag. Repos covered: the operating firstmate
 # ($FM_ROOT), every clone under $FM_HOME/projects/, the canonical no-mistakes
 # checkout (sibling no-mistakes.git, overridable via FM_NM_CANONICAL — also
@@ -42,11 +45,19 @@ fi
 
 PROJECTS_DIR="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 
+# Expected fork owner: FM_FORK_OWNER wins; else the logged-in GitHub account
+# (a read-only gh api call, tolerating gh missing or unauthenticated); empty
+# means no fork/not-fork verdict is made.
+FORK_OWNER=${FM_FORK_OWNER:-}
+if [ -z "$FORK_OWNER" ] && command -v gh >/dev/null 2>&1; then
+  FORK_OWNER=$(gh api user -q .login 2>/dev/null || true)
+fi
+
 # Print one repo's block: origin (+fork flag), branch -> upstream, HEAD
 # one-line, dirty flag. <indent> prefixes every detail line.
 report_repo() {
   local dir=$1 indent=$2
-  local url fork branch upstream head dirty
+  local url fork owner branch upstream head dirty
 
   if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
     echo "${indent}(not a git repo)"
@@ -56,12 +67,15 @@ report_repo() {
   url=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
   if [ -z "$url" ]; then
     echo "${indent}origin:  (no origin remote)"
-  else
+  elif [ -n "$FORK_OWNER" ]; then
     case "$url" in
-      *github.com[:/]egarlock/*) fork="captain's fork" ;;
-      *)                         fork="not the captain's fork" ;;
+      *github.com[:/]"$FORK_OWNER"/*) fork="captain's fork: $FORK_OWNER" ;;
+      *)                              fork="not the captain's fork" ;;
     esac
     echo "${indent}origin:  $url  ($fork)"
+  else
+    owner=$(printf '%s\n' "$url" | sed -n 's#.*github\.com[:/]\([^/][^/]*\)/.*#\1#p')
+    echo "${indent}origin:  $url${owner:+  (owner: $owner)}"
   fi
 
   branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)

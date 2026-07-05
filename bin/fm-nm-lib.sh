@@ -84,29 +84,35 @@ if [ -z "${FM_NM_LIB_SOURCED:-}" ]; then
   # reading the daemon's sqlite state read-only; the CLI's `runs`/`axi status`
   # are per-repository, and a `make install` daemon restart would kill an
   # active run in any repo. Anything not in a known terminal status counts as
-  # active, so an unknown future status fails safe. Echoes the count, or
-  # nothing when it cannot be determined (sqlite3 missing, db absent, schema
-  # mismatch) — callers must treat empty as "unknown", not as zero.
+  # active, so an unknown future status fails safe. sqlite3 runs with
+  # -init /dev/null -batch -noheader so ~/.sqliterc can never reshape the
+  # output, and anything but a pure non-negative integer is discarded. Echoes
+  # the count, or nothing when it cannot be determined (sqlite3 missing, db
+  # absent, schema mismatch, non-numeric output) — callers must treat empty as
+  # "unknown", not as zero.
   fm_nm_active_runs() {
     local db out
     db="$(fm_nm_data_root)/state.sqlite"
     command -v sqlite3 >/dev/null 2>&1 || return 0
     [ -f "$db" ] || return 0
-    out=$(sqlite3 -readonly "$db" \
+    out=$(sqlite3 -init /dev/null -batch -noheader -readonly "$db" \
       "SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','cancelled','failed');" \
       2>/dev/null) || return 0
+    case "$out" in
+      ''|*[!0-9]*) return 0 ;;
+    esac
     printf '%s\n' "$out"
   }
 
   # One "<status> <branch> (<run-id-prefix>)" line per active run, for refusal
-  # messages. Same read-only source and terminal-status set as
-  # fm_nm_active_runs; echoes nothing when unavailable.
+  # messages. Same read-only source, terminal-status set, and config-proof
+  # sqlite3 invocation as fm_nm_active_runs; echoes nothing when unavailable.
   fm_nm_active_run_list() {
     local db
     db="$(fm_nm_data_root)/state.sqlite"
     command -v sqlite3 >/dev/null 2>&1 || return 0
     [ -f "$db" ] || return 0
-    sqlite3 -readonly "$db" \
+    sqlite3 -init /dev/null -batch -noheader -readonly "$db" \
       "SELECT status || ' ' || branch || ' (' || substr(id,1,8) || ')' FROM runs WHERE status NOT IN ('completed','cancelled','failed');" \
       2>/dev/null || true
   }
