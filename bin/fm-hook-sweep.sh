@@ -58,13 +58,16 @@ _token_is_orphan() {
   meta="$state_dir/$id.meta"
   # Task record gone -> orphan.
   [ -f "$meta" ] || return 0
-  wt=$(sed -n 's/^worktree=//p' "$meta" | head -n 1)
+  # Meta files are append-only records, so every reader is LAST-wins (tail -1),
+  # matching fm_meta_get and the other meta readers; a first-match read would
+  # silently pick a stale value if a key were ever re-appended.
+  wt=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
   # No worktree recorded or the worktree directory is gone -> orphan.
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
   ptr="$wt/.fm-$h-turnend"
   # Worktree pointer missing -> orphan.
   [ -f "$ptr" ] || return 0
-  ptok=$(sed -n 's/^token=//p' "$ptr" | head -n 1)
+  ptok=$(sed -n 's/^token=//p' "$ptr" | tail -1)
   # Pointer now names a different token (superseded by a respawn) -> orphan.
   [ "$ptok" = "$tok_name" ] || return 0
   return 1

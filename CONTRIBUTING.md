@@ -79,6 +79,7 @@ tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: res
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, and crew-dispatch reporting tests
+tests/fm-shared-libs.test.sh              # shared helper lib equivalence: fm_default_branch fallback order, path_is_ancestor_of edge cases, fm_env_init precedence, busy-regex and pane-probe behavior, plus single-definition and former-site sourcing invariants
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
 tests/fm-copilot-harness.test.sh          # copilot adapter spawn hook (agentStop registry token + worktree pointer), token guard, teardown cleanup, and session-lock detection tests
 tests/fm-copilot-version.test.sh          # copilot spawn-time version gate: fm_version_ge ordering, fm_harness_version_parts extraction, fm_copilot_compatible accept/reject, and fm-spawn abort with a clear message before any worktree side effects
@@ -95,7 +96,8 @@ tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch
 tests/fm-secondmate-harness.test.sh       # secondmate-vs-crewmate harness resolution, optional secondmate model/effort pins, primary-to-secondmate config inheritance, and config-push tests
 tests/fm-secondmate-lifecycle-e2e.test.sh # persistent secondmate routing, seeding, backlog handoff, spawn, recovery, teardown, and FM_HOME flow tests
 tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter, handoff validation, cheap reference-clone borrowing/disable/rollback, and teardown boundary tests
-tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety and reminder checks: fork-remote allow, squash/content landings, dirty and unlanded refusals, no-mistakes gate-remote-only refusal, PR-head metadata, no-pr= branch discovery, tasks-axi/manual backlog reminder, --force override
+tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety and reminder checks: landed=-recorded allow gated on covering HEAD (stale/placeholder verdicts fall through), fork-remote allow, squash/content landings incl. stale-origin refresh and no-origin local-only, dirty, unlanded, and git-unreadable-worktree refusals, no-mistakes gate-remote-only refusal, tasks-axi/manual backlog reminder, --force override
+tests/fm-gotmp.test.sh                    # per-task temp root (tasktmp= recorded by fm-spawn, whole /tmp/fm-<id>/ root removed by fm-teardown, graceful absent/missing skips)
 tests/fm-pr-check.test.sh                 # fm-pr-check.sh PR-URL validation: well-formed URL accepted and check shim armed, command-substitution URL rejected before any write, non-GitHub URL rejected
 tests/fm-pr-merge.test.sh                 # fm-pr-merge.sh records pr= and available pr_head= before merging, parses PR URLs into gh-axi number/--repo calls, defaults to squash, preserves explicit merge methods, rejects malformed URLs and repo overrides, and propagates real merge failures
 tests/fm-merge-local.test.sh              # fm-merge-local.sh local-only merge safety: a clean fast-forward advances the default branch, while non-fast-forward, wrong-mode, dirty-worktree, off-default, and missing-branch cases refuse and leave the default branch untouched
@@ -106,6 +108,7 @@ tests/fm-backend.test.sh                  # runtime-backend abstraction: fm-back
 tests/fm-backend-tmux-smoke.test.sh       # real (private-socket) tmux smoke test for the tmux adapter: create/duplicate-refuse, send text + Enter, send literal + key, bounded capture, live-window resolve, kill
 tests/fm-backend-herdr.test.sh            # fake herdr CLI unit tests for the experimental herdr adapter, including version/tool gates, target parsing, send/capture, native busy state, and verified CLI bug workarounds
 tests/fm-backend-herdr-smoke.test.sh      # real herdr smoke test, skipped when herdr or jq is unavailable, using an isolated throwaway HERDR_SESSION
+tests/fm-backend-autodetect-smoke.test.sh # real herdr smoke test for runtime backend auto-detection driven through fm-spawn/fm-teardown end to end, skipped when herdr or jq is unavailable
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
