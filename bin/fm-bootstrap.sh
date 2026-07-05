@@ -159,7 +159,7 @@ secondmate_sync() {
     if ! propagate_inheritable_config "$CONFIG" "$home_real/config"; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: config inheritance failed"
     fi
-  done < <(live_secondmate_meta_records "$STATE" "$FM_HOME/data/secondmates.md")
+  done < <(live_secondmate_meta_records "$STATE" "${FM_DATA_OVERRIDE:-$FM_HOME/data}/secondmates.md")
   [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
   return 0
 }

@@ -54,7 +54,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-env-lib.sh"
 fm_env_init            # FM_ROOT, FM_HOME, STATE
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-DATA="$FM_HOME/data"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATES_MD="$DATA/secondmates.md"
 
 "$SCRIPT_DIR/fm-guard.sh" || true

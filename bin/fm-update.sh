@@ -33,7 +33,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-env-lib.sh
 . "$SCRIPT_DIR/fm-env-lib.sh"
 fm_env_init            # FM_ROOT, FM_HOME, STATE
-SECONDMATES_MD="$FM_HOME/data/secondmates.md"
+SECONDMATES_MD="${FM_DATA_OVERRIDE:-$FM_HOME/data}/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 

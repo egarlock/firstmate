@@ -1030,6 +1030,37 @@ test_harness_unknown_verb_errors() {
   pass "A2 fm-harness.sh: bare invocation detects own harness; an unknown verb errors with the verb list"
 }
 
+# fm-config-push.sh must resolve the data dir exactly as the registry WRITER
+# (fm-home-seed.sh) does: ${FM_DATA_OVERRIDE:-$FM_HOME/data}. With the registry
+# ONLY in the override dir and no home= in the meta, discovery works iff the
+# reader honors the override.
+test_config_push_honors_data_override() {
+  local w c1 sm_real altdata tmp out status
+  w=$(new_world config-push-data-override)
+  c1=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$c1"
+  sm_real=$(cd "$w/sm" && pwd -P)
+  tmp="$w/home/state/sm.meta.tmp"
+  grep -v '^home=' "$w/home/state/sm.meta" > "$tmp"
+  mv "$tmp" "$w/home/state/sm.meta"
+  altdata="$w/altdata"
+  mkdir -p "$altdata"
+  printf -- '- sm - override target (home: %s; scope: config; projects: alpha; added 2026-07-05)\n' "$sm_real" > "$altdata/secondmates.md"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_DATA_OVERRIDE="$altdata" "$ROOT/bin/fm-config-push.sh" 2>&1); status=$?
+
+  expect_code 0 "$status" "config push with FM_DATA_OVERRIDE should succeed"
+  assert_contains "$out" "secondmate sm ($sm_real):" \
+    "config push did not discover the live secondmate through the FM_DATA_OVERRIDE registry"
+  assert_not_contains "$out" "no home=" \
+    "config push ignored the FM_DATA_OVERRIDE registry (home unresolved)"
+  [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "config push did not push crew-harness into the override-discovered home"
+  pass "B15 config-push honors FM_DATA_OVERRIDE for the secondmate registry, matching the writer side"
+}
+
 test_harness_resolution
 test_harness_unknown_verb_errors
 test_secondmate_model_effort_tokens
@@ -1055,5 +1086,6 @@ test_bootstrap_sweep_surfaces_config_propagation_failure
 test_config_push_propagates_reports_without_ff_or_nudge
 test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
+test_config_push_honors_data_override
 
 echo "# all fm-secondmate-harness tests passed"
