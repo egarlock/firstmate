@@ -33,17 +33,20 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-env-lib.sh
+. "$SCRIPT_DIR/fm-env-lib.sh"
+fm_env_init            # FM_ROOT, FM_HOME, STATE
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # The crew-state helper is injectable so tests can substitute a deterministic
 # fake without a live no-mistakes/tmux environment.
 CREW_STATE_CMD="${FM_DASHBOARD_CREW_STATE_CMD:-$SCRIPT_DIR/fm-crew-state.sh}"
 
-# Field separator packed into each in-flight task record (ASCII unit separator);
-# never appears in the meta/status text we render.
+# Field separator packed into each in-flight task record (ASCII unit separator).
+# Status files and meta are crewmate-written (semi-trusted: crewmates run project
+# code and are prompt-injectable), so every value read out of them is stripped of
+# this byte before packing (us_strip below) - a smuggled 0x1f would otherwise
+# shift the remaining fields and let attacker-chosen text land in the pr field.
 US=$(printf '\037')
 
 usage() {
@@ -82,15 +85,20 @@ html_escape() {
 # HTML-escape a single argument, echoed.
 esc() { printf '%s' "${1:-}" | html_escape; }
 
+# Strip the record separator from semi-trusted text before it is packed.
+us_strip() {
+  LC_ALL=C tr -d '\037'
+}
+
 # Read a meta key's last value from a meta file.
 meta_value() {  # <file> <key>
-  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true; } | us_strip
 }
 
 # Last non-empty line of a status file.
 status_last_line() {  # <file>
   [ -f "$1" ] || return 0
-  grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1 || true
+  { grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1 || true; } | us_strip
 }
 
 # Parse the "state:" and detail out of a fm-crew-state.sh line, which looks like:
@@ -151,8 +159,9 @@ for meta in "$STATE"/*.meta; do
     project="(unknown)"
   fi
 
-  # Current state (authoritative) via the shared helper.
-  crew_line=$("$CREW_STATE_CMD" "$id" 2>/dev/null || true)
+  # Current state (authoritative) via the shared helper. Its detail text can echo
+  # crewmate-written status content, so it gets the same separator strip.
+  crew_line=$("$CREW_STATE_CMD" "$id" 2>/dev/null | us_strip || true)
   state=$(crew_field "$crew_line" state)
   detail=$(crew_field "$crew_line" detail)
   [ -n "$state" ] || state=unknown
@@ -226,7 +235,15 @@ EOF
     printf '<div class="status">%s</div>' "$(esc "$status_line")"
   fi
   if [ -n "$pr" ]; then
-    printf '<div class="pr"><a href="%s">%s</a></div>' "$(esc "$pr")" "$(esc "$pr")"
+    # Render an anchor only for an http(s) URL: HTML-escaping cannot neutralize a
+    # javascript:/data: scheme inside an href, and the pr field is read from a
+    # crewmate-writable meta file. Anything else renders as escaped text.
+    case "$pr" in
+      http://*|https://*)
+        printf '<div class="pr"><a href="%s">%s</a></div>' "$(esc "$pr")" "$(esc "$pr")" ;;
+      *)
+        printf '<div class="pr">%s</div>' "$(esc "$pr")" ;;
+    esac
   fi
   printf '</td>'
   # Meta chips.
