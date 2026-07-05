@@ -155,6 +155,47 @@ test_housekeeping_resumed_stale_cleared() {
   pass "resumed (busy) stale clears its marker without escalating"
 }
 
+test_oldest_line_age_survives_corrupt_since_sidecar() {
+  local dir state buf out rc
+  dir=$(make_supercase corrupt-since)
+  state="$dir/state"
+  buf="$state/.subsuper-escalations"
+  printf 'one buffered escalation\n' > "$buf"
+  # The truncated-write failure class: a stray word (e.g. Linux stat -f garbage)
+  # in the epoch sidecar. Under set -u, unhardened $(( now - File )) aborts with
+  # 'File: unbound variable' and every downstream -ge comparison errors each tick.
+  printf 'File\n' > "$buf.since"
+  rc=0
+  out=$( _oldest_line_age "$buf" 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "_oldest_line_age aborted on a corrupt .since sidecar (rc $rc): $out"
+  case "$out" in
+    ''|*[!0-9]*) fail "_oldest_line_age printed a non-numeric age for a corrupt sidecar: '$out'" ;;
+  esac
+  # Corrupt epoch degrades to 0 -> a very large age (flush now), never an abort.
+  [ "$out" -ge 1000000 ] || fail "corrupt .since should read as epoch 0 (very old), got age $out"
+  pass "_oldest_line_age degrades a corrupt .since sidecar to a numeric age"
+}
+
+test_housekeeping_survives_corrupt_stale_marker() {
+  local dir state fakebin key rc out
+  dir=$(make_supercase corrupt-stale-marker)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  key=$(printf '%s' "corr-w9" | tr ':/.' '___')
+  printf 'working\n' > "$state/corr-w9.status"
+  # A corrupt (non-numeric) first-seen epoch in the stale marker used to abort
+  # housekeeping's age arithmetic under set -u every tick. It must now read as
+  # "$now" (age 0), skip the below-threshold marker, and keep the tick alive.
+  printf 'File\n' > "$state/.subsuper-stale-$key"
+  rc=0
+  out=$( PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    housekeeping "$state" 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "housekeeping aborted on a corrupt stale marker (rc $rc): $out"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "corrupt stale marker should survive as age-0 for the next recheck"
+  [ -s "$state/.subsuper-escalations" ] && fail "corrupt stale marker must not escalate on the corrupt read"
+  pass "housekeeping degrades a corrupt stale marker to age 0 instead of aborting"
+}
+
 test_housekeeping_herdr_persistent_stale_resolves_meta() {
   local dir state key
   dir=$(make_supercase stale-herdr-persistent)
@@ -771,6 +812,8 @@ test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
+test_oldest_line_age_survives_corrupt_since_sidecar
+test_housekeeping_survives_corrupt_stale_marker
 test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_resumed_stale_cleared
 test_escalate_batches_into_one_digest

@@ -103,21 +103,12 @@ else
   stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
 fi
 
-# Read a non-negative integer counter file (.heartbeat-streak, .count-*),
-# degrading to 0 for a missing, empty, or NON-NUMERIC value. These counters are
-# fed straight into arithmetic ($(( x + 1 )), 1 << streak); under `set -u` a
-# corrupt value (a stray word from a truncated/garbled write, or filesystem
-# damage) would abort the arithmetic on an "unbound variable" and silently kill
-# the watcher mid-cycle. Sanitizing on read makes a corrupt counter reset to 0
-# instead. Mirrors the .stale-since-* corrupt-timer hardening below.
-read_counter() {  # <file>
-  local v
-  v=$(cat "$1" 2>/dev/null || true)
-  case "$v" in
-    ''|*[!0-9]*) printf '0' ;;
-    *)           printf '%s' "$v" ;;
-  esac
-}
+# Counter files (.heartbeat-streak, .count-*) are read through the shared
+# fm_read_counter (fm-classify-lib.sh, sourced above): it degrades a missing,
+# empty, or NON-NUMERIC value to 0 so a corrupt sidecar cannot abort the
+# arithmetic it feeds ($(( x + 1 )), 1 << streak) and silently kill the watcher
+# mid-cycle. Mirrors the .stale-since-* corrupt-timer hardening below; the
+# away-mode daemon reads its sidecars through the same helper.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
@@ -254,7 +245,7 @@ recorded_windows() {
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
 wake() {
   case "$1" in
-    heartbeat*) echo $(( $(read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak" ;;
+    heartbeat*) echo $(( $(fm_read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
   echo "$1"
@@ -468,7 +459,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
-      n=$(( $(read_counter "$cf") + 1 ))
+      n=$(( $(fm_read_counter "$cf") + 1 ))
       echo "$n" > "$cf"
       # Busy match: a backend's native semantic state when available (herdr),
       # else the last 6 non-blank lines only (the TUI footer area, where every
@@ -551,7 +542,7 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
-  streak=$(read_counter "$STATE/.heartbeat-streak")
+  streak=$(fm_read_counter "$STATE/.heartbeat-streak")
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
@@ -575,7 +566,7 @@ EOF
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
-      echo $(( $(read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak"
+      echo $(( $(fm_read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
