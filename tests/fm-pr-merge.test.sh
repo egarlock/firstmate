@@ -15,6 +15,11 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) an Azure DevOps PR URL merges via `az repos pr update --status completed`
+#       and records landed= from the completed PR's lastMergeCommit
+#   (j) ADO landed= falls back to pr-<n> when az yields no merge commit sha
+#   (k) extra `--` merge args are refused for ADO URLs (branch policy governs)
+#   (l) an ADO URL without a usable az CLI is refused with the remedy
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -328,6 +333,140 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# az mock recording every invocation, answering the extension probe, completing
+# `repos pr update`, and serving the two `repos pr show` queries fm-pr-check /
+# fm-pr-merge issue (lastMergeSourceCommit head, lastMergeCommit landed sha).
+# Args: case_dir head_sha merge_sha  (empty merge_sha = no sha available)
+add_az_mock() {
+  local case_dir=$1 head=$2 merged=$3
+  cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_AZ_LOG"
+case "\${1:-} \${2:-} \${3:-}" in
+  "extension show --name") exit 0 ;;
+  "repos pr update") printf '%s\n' '{"status": "completed"}' ; exit 0 ;;
+  "repos pr show")
+    case " \$* " in
+      *" --query lastMergeSourceCommit.commitId "*) printf '%s\n' '$head' ; exit 0 ;;
+      *" --query lastMergeCommit.commitId "*) printf '%s\n' '$merged' ; exit 0 ;;
+      *" --query status "*) printf '%s\n' 'active' ; exit 0 ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/az"
+}
+
+run_pr_merge_ado() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_AZ_LOG="$case_dir/az.log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" "$@"
+}
+
+test_ado_merge_happy_path_records_landed() {
+  local case_dir rc
+  case_dir=$(make_case ado-happy)
+  add_az_mock "$case_dir" aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111 bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222
+  : > "$case_dir/az.log"
+
+  set +e
+  run_pr_merge_ado "$case_dir" task-x1 https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/42 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ado-happy: fm-pr-merge should succeed on an ADO PR URL"
+  assert_grep 'pr=https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/42' "$case_dir/state/task-x1.meta" \
+    "ado-happy: pr= was not recorded"
+  assert_grep 'pr_head=aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111' "$case_dir/state/task-x1.meta" \
+    "ado-happy: pr_head= was not recorded from lastMergeSourceCommit"
+  grep -qxF 'repos pr update --id 42 --status completed --organization https://dev.azure.com/exampleorg' "$case_dir/az.log" \
+    || fail "ado-happy: az repos pr update was not invoked with --status completed and the org URL"
+  assert_grep 'landed=bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222' "$case_dir/state/task-x1.meta" \
+    "ado-happy: landed= was not recorded from the completed PR's lastMergeCommit"
+  pass "fm-pr-merge completes an ADO PR via az and records pr=, pr_head=, and landed="
+}
+
+test_ado_merge_landed_falls_back_to_pr_number() {
+  local case_dir rc
+  case_dir=$(make_case ado-landed-fallback)
+  # No merge-commit sha from az (empty tsv), and no head either: landed= must
+  # still be recorded, as the pr-<n> placeholder, mirroring the GitHub path.
+  add_az_mock "$case_dir" '' ''
+  : > "$case_dir/az.log"
+
+  set +e
+  run_pr_merge_ado "$case_dir" task-x1 https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/11 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ado-landed-fallback: fm-pr-merge should succeed"
+  assert_no_grep 'pr_head=' "$case_dir/state/task-x1.meta" \
+    "ado-landed-fallback: pr_head= should be absent when az yields no head sha"
+  assert_grep 'landed=pr-11' "$case_dir/state/task-x1.meta" \
+    "ado-landed-fallback: landed= should fall back to the pr-<n> placeholder"
+  pass "fm-pr-merge records landed=pr-<n> when az yields no merge commit sha"
+}
+
+test_ado_extra_merge_args_refused() {
+  local case_dir rc
+  case_dir=$(make_case ado-extra-args)
+  add_az_mock "$case_dir" cccc3333cccc3333cccc3333cccc3333cccc3333 dddd4444dddd4444dddd4444dddd4444dddd4444
+  : > "$case_dir/az.log"
+
+  set +e
+  run_pr_merge_ado "$case_dir" task-x1 https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/5 -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ado-extra-args: fm-pr-merge should refuse -- args for an ADO PR URL"
+  assert_grep 'governed by ADO branch policy' "$case_dir/stderr" \
+    "ado-extra-args: refusal did not explain that ADO branch policy governs the merge strategy"
+  assert_no_grep 'pr=' "$case_dir/state/task-x1.meta" \
+    "ado-extra-args: pr= was recorded despite the refusal"
+  assert_no_grep 'repos pr update' "$case_dir/az.log" \
+    "ado-extra-args: az repos pr update was invoked despite the refusal"
+  assert_no_grep 'landed=' "$case_dir/state/task-x1.meta" \
+    "ado-extra-args: landed= was recorded despite the refusal"
+  pass "fm-pr-merge refuses extra -- merge args for ADO PR URLs before any state write"
+}
+
+test_ado_preflight_missing_extension_refused() {
+  local case_dir rc
+  case_dir=$(make_case ado-no-extension)
+  cat > "$case_dir/fakebin/az" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_AZ_LOG"
+case "${1:-} ${2:-}" in
+  "extension show") echo "The extension azure-devops is not installed." >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/az"
+  : > "$case_dir/az.log"
+
+  set +e
+  run_pr_merge_ado "$case_dir" task-x1 https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/6 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ado-no-extension: fm-pr-merge should refuse without the azure-devops extension"
+  assert_grep 'az extension add --name azure-devops' "$case_dir/stderr" \
+    "ado-no-extension: refusal did not give the actionable remedy"
+  assert_no_grep 'repos pr update' "$case_dir/az.log" \
+    "ado-no-extension: az repos pr update was invoked despite the failed preflight"
+  assert_no_grep 'landed=' "$case_dir/state/task-x1.meta" \
+    "ado-no-extension: landed= was recorded despite the failed preflight"
+  pass "fm-pr-merge refuses an ADO PR URL with a clear remedy when the azure-devops extension is missing"
+}
+
 test_records_pr_and_head_before_merging
 test_records_landed_pr_number_when_no_head_available
 test_merge_failure_propagates_after_recording
@@ -339,3 +478,7 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_ado_merge_happy_path_records_landed
+test_ado_merge_landed_falls_back_to_pr_number
+test_ado_extra_merge_args_refused
+test_ado_preflight_missing_extension_refused

@@ -14,30 +14,40 @@
 # a squash-merge-then-delete-branch flow and false-refuses provably landed work.
 # This script makes recording part of the merge itself, so it cannot be skipped
 # by omission. Use it for every PR merge (captain-requested or yolo-authorized),
-# in place of calling `gh-axi pr merge` directly.
+# in place of calling `gh-axi pr merge` or `az repos pr update` directly.
 #
-# gh-axi pr merge expects a PR number and --repo <owner>/<repo>; it does not
-# parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
+# The PR URL may be GitHub or Azure DevOps; bin/fm-pr-url-lib.sh classifies it.
+#
+# GitHub: gh-axi pr merge expects a PR number and --repo <owner>/<repo>; it does
+# not parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
 # parses the URL and invokes gh-axi in the form it accepts.
-#
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit
 # caller method is never overridden.
 # Extra args must not include --repo or -R because the repo is parsed from the
 # PR URL.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Azure DevOps: merges by completing the PR via
+# `az repos pr update --id <n> --status completed --organization <org url>`
+# (default merge strategy - the strategy is governed by ADO branch policy, so
+# the `--` extra-args passthrough is refused for ADO URLs), then records
+# landed= from the completed PR's lastMergeCommit, falling back to the pr-<n>
+# placeholder exactly like the GitHub path when no sha is available.
+#
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args, GitHub only>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]}
-URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]}
+ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args, GitHub only>]}
+URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args, GitHub only>]}
 shift 2
 [ "${1:-}" = "--" ] && shift
 
 # shellcheck source=bin/fm-env-lib.sh
 . "$SCRIPT_DIR/fm-env-lib.sh"
 fm_env_init            # FM_ROOT, FM_HOME, STATE
+# shellcheck source=bin/fm-pr-url-lib.sh
+. "$SCRIPT_DIR/fm-pr-url-lib.sh"
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META; refusing to merge without recording pr=" >&2; exit 1; }
 
@@ -48,20 +58,6 @@ caller_has_merge_method() {
       --squash|--merge|--rebase|--method|--method=*) return 0 ;;
     esac
   done
-  return 1
-}
-
-parse_pr_url() {
-  local url=$1
-  if [[ "$url" =~ ^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]+)/pull/([0-9]+)/?$ ]]; then
-    PR_OWNER="${BASH_REMATCH[1]}"
-    PR_REPO="${BASH_REMATCH[2]}"
-    PR_NUMBER="${BASH_REMATCH[3]}"
-    if [[ "$PR_OWNER" != *- ]]; then
-      return 0
-    fi
-  fi
-  echo "error: PR URL must match https://github.com/<owner>/<repo>/pull/<number> (got: $url)" >&2
   return 1
 }
 
@@ -78,29 +74,60 @@ reject_repo_overrides() {
   return 0
 }
 
-parse_pr_url "$URL" || exit 1
-reject_repo_overrides "$@" || exit 1
+fm_pr_url_parse "$URL" || exit 1
+
+case "$FM_PR_KIND" in
+  github)
+    reject_repo_overrides "$@" || exit 1
+    ;;
+  azuredevops)
+    if [ $# -gt 0 ]; then
+      echo "error: extra merge args (a merge method after --) are not supported for Azure DevOps PRs; the merge strategy is governed by ADO branch policy (got: $*)" >&2
+      exit 1
+    fi
+    fm_ado_preflight || exit 1
+    ;;
+esac
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
 
-merge_args=()
-if ! caller_has_merge_method "$@"; then
-  merge_args=(--squash)
-fi
-
-# ${merge_args[@]+"..."} guards the empty-array case: when the caller passed an
-# explicit merge method, merge_args stays empty, and a bare "${merge_args[@]}"
-# under `set -u` is an "unbound variable" error on bash < 4.4 (stock /bin/bash on
-# macOS is 3.2). "$@" is a special parameter and is always safe empty.
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
+case "$FM_PR_KIND" in
+  github)
+    merge_args=()
+    if ! caller_has_merge_method "$@"; then
+      merge_args=(--squash)
+    fi
+    # ${merge_args[@]+"..."} guards the empty-array case: when the caller passed an
+    # explicit merge method, merge_args stays empty, and a bare "${merge_args[@]}"
+    # under `set -u` is an "unbound variable" error on bash < 4.4 (stock /bin/bash on
+    # macOS is 3.2). "$@" is a special parameter and is always safe empty.
+    gh-axi pr merge "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
+    ;;
+  azuredevops)
+    # Completing the PR prints the whole PR JSON on success; keep stdout quiet
+    # and report one line instead. Failures still surface on stderr and abort
+    # via set -e before any landed= is recorded.
+    az repos pr update --id "$FM_PR_NUMBER" --status completed --organization "$FM_PR_ADO_ORG_URL" >/dev/null
+    echo "completed: ADO PR $FM_PR_NUMBER in $FM_PR_ADO_ORG_URL/$FM_PR_ADO_PROJECT"
+    ;;
+esac
 
 # The merge succeeded (set -e would have exited above otherwise). Record the
 # authoritative "this task's work reached its destination" fact so bin/fm-teardown.sh
-# can allow teardown without re-deriving it from remote/PR heuristics. The recorded
-# sha is the merged PR head when fm-pr-check.sh captured it, else the PR number as a
-# non-empty presence marker - teardown only needs the field to be present, but the
-# head sha is the better breadcrumb.
-LANDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
-[ -n "$LANDED" ] || LANDED="pr-$PR_NUMBER"
+# can allow teardown without re-deriving it from remote/PR heuristics. GitHub records
+# the merged PR head when fm-pr-check.sh captured it; ADO records the completed PR's
+# merge commit. Either falls back to the PR number as a non-empty presence marker -
+# teardown only needs the field to be present, but the sha is the better breadcrumb.
+case "$FM_PR_KIND" in
+  github)
+    LANDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    ;;
+  azuredevops)
+    LANDED=$(az repos pr show --id "$FM_PR_NUMBER" --organization "$FM_PR_ADO_ORG_URL" --query lastMergeCommit.commitId -o tsv 2>/dev/null || true)
+    # az tsv renders a missing field as empty; be defensive about a literal None.
+    [ "$LANDED" = None ] && LANDED=
+    ;;
+esac
+[ -n "$LANDED" ] || LANDED="pr-$FM_PR_NUMBER"
 grep -qxF "landed=$LANDED" "$META" || echo "landed=$LANDED" >> "$META"
