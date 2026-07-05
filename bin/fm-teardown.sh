@@ -9,11 +9,18 @@
 #   (a) a dirty worktree (uncommitted changes) is never landed -> always REFUSE,
 #       because the reset would discard those changes;
 #   then ALLOW when ANY of the following holds, else REFUSE:
-#   (b) a recorded landed=<sha> in state/<id>.meta. This is the authoritative
-#       verdict written at merge time by bin/fm-pr-merge.sh and bin/fm-merge-local.sh:
-#       the merge already happened, so teardown does not re-derive it. This is what
-#       makes teardown robust to a no-mistakes run that advanced origin past the
-#       local worktree HEAD.
+#   (b) a recorded landed=<sha> in state/<id>.meta that COVERS HEAD (HEAD is an
+#       ancestor of the recorded sha). This is the authoritative verdict written at
+#       merge time by bin/fm-pr-merge.sh and bin/fm-merge-local.sh: the merge
+#       already happened, so teardown does not re-derive it. This is what makes
+#       teardown robust to a no-mistakes run that advanced origin past the local
+#       worktree HEAD (local HEAD is an ancestor of the recorded merged head, so
+#       the verdict still covers it). Covering HEAD is required because the
+#       verdict is about the commits that were merged, not the task: commits made
+#       AFTER the merge (late review feedback, a follow-up steer) are not landed,
+#       so a landed= that no longer covers HEAD falls through to (c)/(d) instead
+#       of allowing. An unresolvable landed= (the pr-<n> placeholder recorded when
+#       GitHub returned no head sha) likewise falls through to (c)/(d).
 #   (c) HEAD is reachable from a publishing remote-tracking branch (a fork counts).
 #       This is the base "landed" definition of prime directive #3: the work is
 #       already published, so the reset discards nothing. It is a direct reachability
@@ -184,10 +191,27 @@ content_in_default() {
 # during a failed validation run does not count. An empty result means everything on
 # HEAD is already published -> reachable. This is a cheap, local, direct reachability
 # check, not a resurrection of the old PR-head-ancestor or patch-id heuristics.
+# FAIL CLOSED: a git failure must read as "not reachable", never as the empty
+# "everything published" output, so git's own exit status is checked (the commit
+# count is bounded inside git with -5 rather than a piped head, which would mask it).
 head_reachable_from_publishing_remote() {
   local unpushed
-  unpushed=$(git -C "$WT" log --oneline HEAD --not --exclude=no-mistakes/'*' --remotes -- 2>/dev/null | head -5 || true)
+  unpushed=$(git -C "$WT" log --oneline -5 HEAD --not --exclude=no-mistakes/'*' --remotes -- 2>/dev/null) || return 1
   [ -z "$unpushed" ]
+}
+
+# Does the recorded landed= verdict cover the worktree's current HEAD? True iff
+# the recorded sha resolves to a commit and HEAD is its ancestor (equal counts).
+# A landed= that does NOT cover HEAD means commits were made after the merge -
+# late review feedback, a follow-up steer, the captain typing into the pane -
+# and those commits are NOT landed; the caller falls through to the reachability
+# and content checks instead of allowing on the stale verdict. The pr-<n>
+# placeholder (recorded when GitHub returned no head sha) never resolves, so it
+# also falls through. The no-mistakes-advanced-origin case still allows here:
+# local HEAD lags the recorded merged head, so it IS an ancestor of it.
+landed_covers_head() {
+  git -C "$WT" rev-parse --verify -q "$LANDED^{commit}" >/dev/null 2>&1 || return 1
+  git -C "$WT" merge-base --is-ancestor HEAD "$LANDED" 2>/dev/null
 }
 
 backlog_refresh_reminder() {
@@ -538,10 +562,21 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   else
     # The landed-work oracle (see the header comment): a dirty gate, then ALLOW on
     # any one of three conditions, else REFUSE:
-    #   (a) dirty worktree             -> always REFUSE (the reset would discard it)
-    #   (b) landed=<sha> in meta       -> ALLOW (the merge already happened)
+    #   (a) dirty worktree              -> always REFUSE (the reset would discard it)
+    #   (b) landed=<sha> covering HEAD  -> ALLOW (the merge already happened AND
+    #       nothing was committed past it; a stale verdict falls through)
     #   (c) HEAD on a publishing remote -> ALLOW (already published; fork counts)
-    #   (d) else content in default    -> ALLOW, else REFUSE (single fallback fetch)
+    #   (d) else content in default     -> ALLOW, else REFUSE (single fallback fetch)
+    # FAIL CLOSED before the oracle runs: if git cannot even resolve HEAD in the
+    # worktree (broken .git gitfile pointer, corrupted repo, a plain non-git dir),
+    # every downstream git read would emit empty output that reads as "clean" and
+    # "everything published" - an ALLOW that would destroy whatever the directory
+    # holds. Refuse loudly instead.
+    if ! git -C "$WT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+      echo "REFUSED: worktree $WT is unreadable by git (cannot resolve HEAD)." >&2
+      echo "The landed-work oracle cannot run on it, so nothing can be proven landed. Investigate the worktree (or get the captain's explicit OK to discard, then --force)." >&2
+      exit 1
+    fi
     # The fm-spawn hook file is ours, never work product; ignore it in the dirty check.
     dirty=$(git -C "$WT" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$|\.fm-copilot-turnend$)' | head -1 || true)
     if [ -n "$dirty" ]; then
@@ -555,10 +590,14 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     LANDED=$(grep '^landed=' "$META" | tail -1 | cut -d= -f2- || true)
     # Evaluate the allow-conditions cheapest-first: (b) the recorded verdict and (c)
     # the local reachability check need no network, so only (d) fetches, and only when
-    # neither (b) nor (c) already landed the work.
-    if [ -z "$LANDED" ] && ! head_reachable_from_publishing_remote && ! content_in_default; then
+    # neither (b) nor (c) already landed the work. (b) allows only when the recorded
+    # sha covers HEAD - presence alone would let commits made AFTER the merge be
+    # silently destroyed by the reset.
+    landed_ok=0
+    if [ -n "$LANDED" ] && landed_covers_head; then landed_ok=1; fi
+    if [ "$landed_ok" != 1 ] && ! head_reachable_from_publishing_remote && ! content_in_default; then
       echo "REFUSED: worktree $WT has work that has not landed." >&2
-      echo "No merge was recorded (landed=), HEAD is not reachable from any publishing remote, and the branch's content is not in the default branch." >&2
+      echo "No recorded merge (landed=) covers HEAD, HEAD is not reachable from any publishing remote, and the branch's content is not in the default branch." >&2
       echo "Land its PR (bin/fm-pr-merge.sh), merge it locally (bin/fm-merge-local.sh after the captain approves), push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       exit 1
     fi
