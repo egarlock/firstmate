@@ -54,6 +54,25 @@ fm_assert_state_space_safe() {  # <state-dir>
   return 0
 }
 
+# Read a non-negative integer sidecar file (.heartbeat-streak, .count-*,
+# .subsuper-*-since epochs), degrading to <default> (0 when omitted) for a
+# missing, empty, or NON-NUMERIC value. These values are fed straight into
+# arithmetic ($(( x + 1 )), 1 << streak, now - epoch); under `set -u` a corrupt
+# value (a stray word from a truncated/garbled write, or filesystem damage)
+# aborts the arithmetic on an "unbound variable" and silently kills the reader
+# mid-cycle - and non-numeric content in $(( )) is the classic
+# arithmetic-injection surface. Sanitizing on read makes a corrupt sidecar reset
+# to the default instead. Shared here so the always-on watcher and the away-mode
+# daemon read sidecars through ONE hardened path rather than per-file copies.
+fm_read_counter() {  # <file> [<default>]
+  local v d=${2:-0}
+  v=$(cat "$1" 2>/dev/null || true)
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$d" ;;
+    *)           printf '%s' "$v" ;;
+  esac
+}
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses

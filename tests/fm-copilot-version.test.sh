@@ -64,6 +64,40 @@ test_version_parts_extracts_fields() {
   pass "fm_harness_version_parts: extracts fields, fails on absent CLI"
 }
 
+test_version_parts_anchors_to_first_triple() {
+  # Format-drift fixtures: a SECOND dotted number later on the version line (a
+  # node runtime, a build stamp) must not win the match. A greedy .* prefix
+  # locked onto the LAST triple, parsing '... 1.0.50 (node v20.11.1)' as 0.11.1
+  # and '0.9.0 build 2026.1.15' as 6.1.15 - the latter let an incompatible 0.9.0
+  # PASS the gate. The parser must anchor to the FIRST triple.
+  local fb out
+  fb=$(fake_copilot "$TMP_ROOT/first-triple-node" 'GitHub Copilot CLI 1.0.50 (node v20.11.1)')
+  out=$(PATH="$fb:$PATH" bash -c '. "'"$ROOT"'/bin/fm-harness-policy.sh"; fm_harness_version_parts copilot')
+  [ "$out" = "1 0 50" ] || fail "trailing node runtime version won the parse (got '$out', want '1 0 50')"
+  fb=$(fake_copilot "$TMP_ROOT/first-triple-build" 'copilot 0.9.0 build 2026.1.15')
+  out=$(PATH="$fb:$PATH" bash -c '. "'"$ROOT"'/bin/fm-harness-policy.sh"; fm_harness_version_parts copilot')
+  [ "$out" = "0 9 0" ] || fail "trailing build stamp won the parse (got '$out', want '0 9 0')"
+  # Two-digit major must not truncate (10.2.3 parsed as 0.2.3 under the greedy sed).
+  fb=$(fake_copilot "$TMP_ROOT/first-triple-major" 'copilot 10.2.3')
+  out=$(PATH="$fb:$PATH" bash -c '. "'"$ROOT"'/bin/fm-harness-policy.sh"; fm_harness_version_parts copilot')
+  [ "$out" = "10 2 3" ] || fail "two-digit major truncated (got '$out', want '10 2 3')"
+  pass "fm_harness_version_parts: anchors to the first dotted triple, full major kept"
+}
+
+test_compatible_rejects_old_cli_with_noisy_version_line() {
+  # The exact fail-open the anchor fix closes: an incompatible 0.9.0 whose
+  # version line carries a later dotted build stamp must NOT pass the gate.
+  local fb
+  fb=$(fake_copilot "$TMP_ROOT/noisy-old" 'copilot 0.9.0 build 2026.1.15')
+  PATH="$fb:$PATH" bash -c '. "'"$ROOT"'/bin/fm-harness-policy.sh"; fm_copilot_compatible' \
+    && fail "0.9.0 with a trailing build stamp should be incompatible"
+  # And a compatible CLI with a noisy line must still pass (no fail-closed drift).
+  fb=$(fake_copilot "$TMP_ROOT/noisy-good" 'GitHub Copilot CLI 1.0.68 (node v20.11.1)')
+  PATH="$fb:$PATH" bash -c '. "'"$ROOT"'/bin/fm-harness-policy.sh"; fm_copilot_compatible' \
+    || fail "1.0.68 with a trailing node version should be compatible"
+  pass "fm_copilot_compatible: noisy version lines gate on the tool's own version"
+}
+
 test_compatible_accepts_and_rejects() {
   local fb
   fb=$(fake_copilot "$TMP_ROOT/good" 'GitHub Copilot CLI 1.0.68.')
@@ -130,6 +164,8 @@ test_spawn_skip_env_bypasses_gate() {
 
 test_version_ge_orders_numerically
 test_version_parts_extracts_fields
+test_version_parts_anchors_to_first_triple
+test_compatible_rejects_old_cli_with_noisy_version_line
 test_compatible_accepts_and_rejects
 test_spawn_aborts_on_incompatible_copilot
 test_spawn_skip_env_bypasses_gate

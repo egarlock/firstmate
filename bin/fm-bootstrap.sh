@@ -184,23 +184,17 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-no_mistakes_version_parts() {
-  local output
-  command -v no-mistakes >/dev/null 2>&1 || return 1
-  output=$(no-mistakes --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1
-}
-
+# Version probe and compare come from the shared policy lib (sourced above):
+# fm_harness_version_parts anchors to the FIRST dotted triple on the version
+# line and fm_version_ge does the field-wise integer compare, so the parser
+# cannot drift between this gate, the copilot spawn gate, and the tasks-axi probe.
 no_mistakes_compatible() {
   local parts major minor patch extra
-  parts=$(no_mistakes_version_parts) || return 1
+  parts=$(fm_harness_version_parts no-mistakes) || return 1
   IFS=' ' read -r major minor patch extra <<< "$parts"
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  [ "$major" -gt "$NO_MISTAKES_MIN_MAJOR" ] && return 0
-  [ "$major" -eq "$NO_MISTAKES_MIN_MAJOR" ] || return 1
-  [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
-  [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
-  [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
+  fm_version_ge "$major" "$minor" "$patch" \
+    "$NO_MISTAKES_MIN_MAJOR" "$NO_MISTAKES_MIN_MINOR" "$NO_MISTAKES_MIN_PATCH"
 }
 
 # Write CONTENT to DEST only when it differs, so re-running bootstrap does not

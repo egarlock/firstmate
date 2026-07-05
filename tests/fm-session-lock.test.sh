@@ -264,6 +264,143 @@ test_legacy_plainfile_lock_is_migrated() {
   pass "a legacy dead plain-file lock is migrated to the atomic directory format"
 }
 
+test_stalled_winner_never_splits_brain_with_stealer() {
+  # M1 regression: a winner that stalls past the steal grace between acquiring the
+  # symlink and recording its identity looks like an identity-less impostor, and a
+  # contender legitimately steals the lock. The resumed original must NOT write
+  # through the swapped symlink into the stealer's owner dir and verify against
+  # its own clobber - that yields TWO live sessions both reporting the lock
+  # acquired. Fault-inject the stall via the test-only hook and require exactly
+  # one winner: the stealer keeps the lock, the stalled original refuses.
+  local dir state fakebin sim lock res_a res_b apid bpid i winners lockpid
+  dir="$TMP_ROOT/stalled-winner"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sim="$dir/harness-sim.sh"
+  lock="$state/.lock"
+  res_a="$dir/result-a"
+  res_b="$dir/result-b"
+  mkdir -p "$state" "$fakebin"
+  write_delegating_ps "$fakebin"
+  cat > "$sim" <<'SH'
+#!/usr/bin/env bash
+"$FMLOCK" >> "$RESULTS" 2>&1
+sleep 10
+SH
+  chmod +x "$sim"
+  # A acquires first and stalls 4s (> the 2s steal grace) before recording.
+  FMLOCK="$FMLOCK" RESULTS="$res_a" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    FM_LOCK_TEST_STALL_BEFORE_RECORD=4 "$sim" &
+  apid=$!
+  # Give A time to win the atomic create and age the identity-less lock past the
+  # grace, then start B, which classifies the holder as an impostor and steals.
+  sleep 2.5
+  FMLOCK="$FMLOCK" RESULTS="$res_b" PATH="$fakebin:$PATH" FM_HOME="$dir" "$sim" &
+  bpid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -q 'lock acquired\|^error:' "$res_a" 2>/dev/null \
+      && grep -q 'lock acquired\|^error:' "$res_b" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lockpid=$(cat "$lock/pid" 2>/dev/null || true)
+  winners=$(cat "$res_a" "$res_b" 2>/dev/null | grep -c '^lock acquired: harness pid' || true)
+  kill "$apid" "$bpid" 2>/dev/null || true
+  wait "$apid" 2>/dev/null || true
+  wait "$bpid" 2>/dev/null || true
+  if [ ! -s "$res_a" ] || [ ! -s "$res_b" ]; then fail "stalled-winner: contenders did not both report: a='$(cat "$res_a" 2>/dev/null)' b='$(cat "$res_b" 2>/dev/null)'"; fi
+  [ "$winners" -eq 1 ] || fail "stalled-winner: expected exactly one winner, got $winners: a='$(cat "$res_a")' b='$(cat "$res_b")'"
+  grep -q '^lock acquired: harness pid' "$res_b" || fail "stalled-winner: the stealer (B) should hold the lock: b='$(cat "$res_b")'"
+  grep -q 'another live firstmate session holds the lock' "$res_a" || fail "stalled-winner: the stalled original (A) should refuse: a='$(cat "$res_a")'"
+  [ "$lockpid" = "$bpid" ] || fail "stalled-winner: lock pid should be the stealer's harness pid $bpid, got '$lockpid' (late write clobbered the stealer?)"
+  pass "a winner stalled past the steal grace backs off instead of splitting brain with the stealer"
+}
+
+test_legacy_migration_race_single_winner() {
+  # S2 regression: with a reclaimable legacy plain-file lock and two sessions
+  # starting together, the slower migrator's removal must re-verify the
+  # plain-file condition under the .steal mutex - otherwise its unconditional
+  # rm -f deletes the faster session's freshly acquired symlink lock and both
+  # sessions end up holding it. Fault-inject the gate->removal stall in B and
+  # require exactly one winner: A keeps its lock, B refuses.
+  local dir state fakebin sim lock dead res_a res_b apid bpid i winners lockpid
+  dir="$TMP_ROOT/migration-race"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sim="$dir/harness-sim.sh"
+  lock="$state/.lock"
+  res_a="$dir/result-a"
+  res_b="$dir/result-b"
+  mkdir -p "$state" "$fakebin"
+  write_delegating_ps "$fakebin"
+  # Pre-directory format: a plain FILE holding a now-dead pid (reclaimable).
+  dead=999999
+  while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+  printf '%s\n' "$dead" > "$lock"
+  cat > "$sim" <<'SH'
+#!/usr/bin/env bash
+"$FMLOCK" >> "$RESULTS" 2>&1
+sleep 10
+SH
+  chmod +x "$sim"
+  # B passes the plain-file gate first, then stalls 3s before its removal step.
+  FMLOCK="$FMLOCK" RESULTS="$res_b" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    FM_LOCK_TEST_STALL_BEFORE_MIGRATE_RM=3 "$sim" &
+  bpid=$!
+  # While B stalls, A migrates the legacy file, acquires, and records.
+  sleep 0.5
+  FMLOCK="$FMLOCK" RESULTS="$res_a" PATH="$fakebin:$PATH" FM_HOME="$dir" "$sim" &
+  apid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -q 'lock acquired\|^error:' "$res_a" 2>/dev/null \
+      && grep -q 'lock acquired\|^error:' "$res_b" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lockpid=$(cat "$lock/pid" 2>/dev/null || true)
+  winners=$(cat "$res_a" "$res_b" 2>/dev/null | grep -c '^lock acquired: harness pid' || true)
+  kill "$apid" "$bpid" 2>/dev/null || true
+  wait "$apid" 2>/dev/null || true
+  wait "$bpid" 2>/dev/null || true
+  if [ ! -s "$res_a" ] || [ ! -s "$res_b" ]; then fail "migration-race: contenders did not both report: a='$(cat "$res_a" 2>/dev/null)' b='$(cat "$res_b" 2>/dev/null)'"; fi
+  [ "$winners" -eq 1 ] || fail "migration-race: expected exactly one winner, got $winners: a='$(cat "$res_a")' b='$(cat "$res_b")'"
+  grep -q '^lock acquired: harness pid' "$res_a" || fail "migration-race: the fast migrator (A) should hold the lock: a='$(cat "$res_a")'"
+  grep -q 'another live firstmate session holds the lock' "$res_b" || fail "migration-race: the stalled migrator (B) should refuse: b='$(cat "$res_b")'"
+  [ -L "$lock" ] || [ -d "$lock" ] || fail "migration-race: the winner's directory-format lock was deleted by the stalled migrator"
+  [ "$lockpid" = "$apid" ] || fail "migration-race: lock pid should be the fast migrator's harness pid $apid, got '$lockpid'"
+  pass "a concurrent legacy migration cannot delete the other session's freshly acquired lock"
+}
+
+test_live_legacy_plainfile_holder_refuses() {
+  # The pre-directory plain-file lock naming a LIVE harness session must refuse
+  # (not migrate), and `status` must report it held; after the holder dies it
+  # reads stale. Only the dead-legacy migration path was covered before.
+  local dir state fakebin lock holder status out
+  dir="$TMP_ROOT/legacy-live-holder"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lock="$state/.lock"
+  mkdir -p "$state" "$fakebin"
+  write_delegating_ps "$fakebin"
+  sleep 300 &
+  holder=$!
+  printf '%s\n' "$holder" > "$lock"
+  status=0
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" 2>&1) || status=$?
+  [ "$status" -eq 1 ] || fail "acquire did not refuse a live legacy plain-file holder (status $status): $out"
+  assert_contains "$out" "another live firstmate session holds the lock" "legacy refusal did not name the live holder"
+  [ "$(cat "$lock" 2>/dev/null || true)" = "$holder" ] || fail "live legacy plain-file lock was clobbered"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" status)
+  assert_contains "$out" "lock: held by live harness pid $holder" "status did not report the live legacy plain-file holder"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" status)
+  assert_contains "$out" "lock: stale" "status did not report the dead legacy plain-file holder as stale"
+  pass "a live legacy plain-file holder is refused and status-visible; a dead one reads stale"
+}
+
 test_status_verifies_identity() {
   local dir state fakebin lock holder ident out
   dir="$TMP_ROOT/status-identity"
@@ -299,4 +436,7 @@ test_live_holder_refuses
 test_reused_pid_holder_is_reclaimed
 test_dead_holder_is_reclaimed
 test_legacy_plainfile_lock_is_migrated
+test_stalled_winner_never_splits_brain_with_stealer
+test_legacy_migration_race_single_winner
+test_live_legacy_plainfile_holder_refuses
 test_status_verifies_identity

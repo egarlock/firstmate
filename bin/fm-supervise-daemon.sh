@@ -490,7 +490,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
   [ -s "$f" ] || { echo 999999; return; }
   since="${f}.since"
   if [ -r "$since" ]; then
-    echo $(( $(_now) - $(cat "$since" 2>/dev/null || echo 0) ))
+    # fm_read_counter (fm-classify-lib.sh): a corrupt/non-numeric sidecar reads
+    # as 0 (very old -> flush now) instead of aborting the arithmetic under set -u.
+    echo $(( $(_now) - $(fm_read_counter "$since" 0) ))
   else
     echo 999999
   fi
@@ -545,7 +547,9 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-stale-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-stale-}"
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    # fm_read_counter: a corrupt/non-numeric marker reads as "$now" (age 0 ->
+    # recheck next tick) instead of aborting the arithmetic under set -u.
+    age=$(( now - $(fm_read_counter "$marker" "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     # Reconstruct the window target from metadata, with the live tmux list as the
     # legacy fallback for old markers that predate meta lookup.

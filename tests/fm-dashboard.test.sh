@@ -218,6 +218,31 @@ assert_contains "$ehtml" "&lt;script&gt;alert(1)&lt;/script&gt;" "status markup 
 assert_not_contains "$ehtml" "<script>alert(1)" "raw markup never reaches the document"
 pass "(f) untrusted status text is HTML-escaped"
 
+# (f2) hostile input: a 0x1f record-separator byte in a crewmate-written status
+# file must not shift the packed fields (which would let attacker-chosen text
+# land in the pr field), and a non-http(s) pr value must never be rendered as a
+# live anchor - HTML-escaping does not neutralize a javascript: scheme in an href.
+HOSTILE="$TMP_ROOT/hostile"
+build_busy_home "$HOSTILE"
+# Vector 1: smuggle the field separator + a javascript: URL through a status line.
+printf 'working: hello\037javascript:alert(document.cookie)\n' >> "$HOSTILE/state/fix-login-k3.status"
+# Vector 2: a crewmate-writable meta pr= that is not an http(s) URL at all.
+printf 'pr=javascript:alert(document.cookie)\n' >> "$HOSTILE/state/wedged-x2.meta"
+hhtml=$(run_dash "$HOSTILE" "$FAKE_CS" --stdout)
+assert_not_contains "$hhtml" 'href="javascript:' "no javascript: scheme ever reaches an href"
+assert_not_contains "$hhtml" "$(printf '\037')" "the raw 0x1f separator byte never reaches the document"
+# The separator is stripped, so the payload stays inside the escaped status text
+# of its own row instead of overflowing into the link field.
+printf '%s' "$hhtml" > "$TMP_ROOT/hostile.html"
+hostile_row=$(task_row "$TMP_ROOT/hostile.html" fix-login-k3)
+assert_contains "$hostile_row" "hellojavascript:alert" "0x1f-smuggled text stays in the status text field"
+assert_not_contains "$hostile_row" "<a href" "0x1f-smuggled text produced no anchor"
+# The hostile meta pr= still shows up, but as escaped text, not a link.
+wedged_row=$(task_row "$TMP_ROOT/hostile.html" wedged-x2)
+assert_contains "$wedged_row" "javascript:alert" "non-http pr value is still visible as text"
+assert_not_contains "$wedged_row" "<a href" "non-http pr value is not rendered as an anchor"
+pass "(f2) 0x1f field-separator smuggling and javascript: pr values are neutralized"
+
 # ---------------------------------------------------------------------------
 # (g) strictly read-only: state/ and data/ are never mutated
 # ---------------------------------------------------------------------------

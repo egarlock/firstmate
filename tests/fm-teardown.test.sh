@@ -5,8 +5,11 @@
 # treehouse return hard-resets the worktree. The oracle is a dirty gate then three
 # allow-conditions (ANY one lands it), in order:
 #   (a) a dirty worktree (uncommitted changes) -> always REFUSE;
-#   (b) a recorded landed=<sha> in state/<id>.meta -> ALLOW (the merge already
-#       happened; bin/fm-pr-merge.sh / bin/fm-merge-local.sh write it on success);
+#   (b) a recorded landed=<sha> in state/<id>.meta that COVERS HEAD (HEAD is an
+#       ancestor of the recorded sha) -> ALLOW (the merge already happened;
+#       bin/fm-pr-merge.sh / bin/fm-merge-local.sh write it on success). A landed=
+#       that does NOT cover HEAD (commits made after the merge) or that cannot be
+#       resolved (the pr-<n> placeholder) falls through to (c)/(d);
 #   (c) HEAD reachable from a publishing remote-tracking branch (a fork counts, the
 #       local no-mistakes gate remote excluded) -> ALLOW (already published);
 #   (d) with none of the above, one fallback: is the branch's content already in the
@@ -14,10 +17,15 @@
 # This replaced a ~100-line heuristic oracle (PR-head ancestor + patch-id replay) with
 # the recorded verdict, a direct reachability check, and the single content fallback.
 # The recorded verdict is what makes teardown robust to a no-mistakes run that advanced
-# origin past the local worktree HEAD.
+# origin past the local worktree HEAD (local HEAD lags the recorded merged head, so the
+# verdict covers it). A git-unreadable worktree refuses before the oracle runs: git
+# failures must never read as "clean and published" (fail closed).
 #
 # Matrix:
-#   (a) landed= recorded, content NOT in default, no PR      -> ALLOW  (recorded verdict wins)
+#   (a) landed= covering HEAD, content NOT in default, no PR  -> ALLOW  (recorded verdict wins)
+#   (a2) landed= recorded but HEAD advanced past it            -> REFUSE (post-merge commits are unlanded)
+#   (a3) landed= is a descendant of HEAD (origin advanced)     -> ALLOW  (verdict still covers HEAD)
+#   (a4) landed=pr-<n> placeholder, content in default         -> ALLOW  (falls through to the content check)
 #   (b) dirty worktree, even when landed= recorded            -> REFUSE (dirty always wins)
 #   (c) real content, no landed=, content not in default      -> REFUSE (safety)
 #   (d) HEAD pushed to a fork remote, no landed=, not in default -> ALLOW (reachability)
@@ -26,9 +34,12 @@
 #   (g) content fallback fetches a fresh origin default        -> ALLOW  (stale ref refreshed)
 #   (h) local-only + landed= recorded (local merge)           -> ALLOW  (local merge verdict)
 #   (i) local-only + no landed=, content not in default       -> REFUSE (safety)
+#   (i2) local-only, NO origin remote, content merged locally  -> ALLOW  (refs/heads fallback)
+#   (i3) local-only, NO origin remote, content unmerged        -> REFUSE (refs/heads fallback)
 #   (j) --force bypasses the landed-work check                 -> ALLOW  (escape hatch)
 #   (k) scout with no report                                   -> REFUSE (report is the product)
 #   (l) scout with a report                                    -> ALLOW  (scratch carve-out)
+#   (m) worktree unreadable by git (non-git dir, broken gitfile) -> REFUSE (fail closed)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -202,8 +213,9 @@ test_landed_recorded_allows() {
   case_dir=$(make_case landed-recorded)
   write_meta "$case_dir" no-mistakes ship
   # Real content that is NOT on origin/main and has no PR: the content fallback
-  # (c) would REFUSE this. A recorded landed= must short-circuit and ALLOW,
-  # proving the recorded verdict is authoritative and never re-derived.
+  # (c) would REFUSE this. A recorded landed= that covers HEAD (here it IS HEAD)
+  # must short-circuit and ALLOW, proving the recorded verdict is authoritative
+  # and never re-derived.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_landed_meta "$case_dir"
 
@@ -214,7 +226,77 @@ test_landed_recorded_allows() {
 
   expect_code 0 "$rc" "landed-recorded: teardown should succeed on a recorded landed= verdict"
   ! grep -q REFUSED "$case_dir/stderr" || fail "landed-recorded: teardown printed a REFUSED line"
-  pass "recorded landed= verdict allows teardown even when content is not in the default branch"
+  pass "recorded landed= verdict covering HEAD allows teardown even when content is not in the default branch"
+}
+
+test_landed_stale_head_advanced_refuses() {
+  local case_dir rc
+  case_dir=$(make_case landed-stale-head)
+  write_meta "$case_dir" no-mistakes ship
+  # The M2 regression: the PR was merged and landed=<sha of commit 1> recorded,
+  # then the crewmate committed MORE work (late review feedback, a follow-up
+  # steer). That post-merge commit is unpushed and not on origin/main; a landed=
+  # verdict that merely EXISTS must not allow teardown to destroy it. The stale
+  # verdict falls through to (c)/(d), which both find the work unlanded.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_landed_meta "$case_dir"
+  wt_commit_file "$case_dir" followup.txt "post-merge work" "post-merge follow-up"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "landed-stale-head: teardown should refuse when HEAD advanced past the recorded landed= sha"
+  grep -q REFUSED "$case_dir/stderr" || fail "landed-stale-head: no REFUSED line in stderr"
+  git -C "$case_dir/wt" cat-file -e "HEAD:followup.txt" || fail "landed-stale-head: the post-merge commit is gone"
+  pass "landed= recorded but HEAD advanced past it refuses (post-merge commits are protected)"
+}
+
+test_landed_descendant_of_head_allows() {
+  local case_dir landed_sha rc
+  case_dir=$(make_case landed-descendant)
+  write_meta "$case_dir" no-mistakes ship
+  # The false-refuse #10 fixed must stay fixed: a no-mistakes run advanced the
+  # merged head PAST the local worktree HEAD (the recorded landed= sha is a
+  # DESCENDANT of HEAD). HEAD is an ancestor of the verdict, so it is covered
+  # and teardown allows without re-deriving anything.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_commit_file "$case_dir" pipeline.txt fixup "pipeline fix commit"
+  landed_sha=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" reset --hard -q HEAD~1
+  append_landed_meta "$case_dir" "$landed_sha"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-descendant: teardown should allow when the recorded landed= sha is a descendant of HEAD"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "landed-descendant: teardown printed a REFUSED line"
+  pass "landed= ahead of local HEAD (no-mistakes advanced origin) still covers HEAD and allows"
+}
+
+test_landed_placeholder_falls_through_to_content() {
+  local case_dir rc
+  case_dir=$(make_case landed-placeholder)
+  write_meta "$case_dir" no-mistakes ship
+  # The pr-<n> placeholder recorded when GitHub returned no head sha never
+  # resolves to a commit, so (b) cannot vouch for HEAD; the oracle must fall
+  # through to the content check rather than allowing on the unresolvable
+  # verdict - and here the content HAS landed on origin/main, so (d) allows.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_landed_meta "$case_dir" "pr-7"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-placeholder: teardown should fall through to the content check and allow"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "landed-placeholder: teardown printed a REFUSED line"
+  pass "unresolvable landed=pr-<n> placeholder falls through to the content fallback"
 }
 
 test_dirty_worktree_refuses() {
@@ -374,6 +456,112 @@ test_local_only_unpushed_refuses() {
   pass "local-only worktree with unmerged, un-landed work is refused (safety preserved)"
 }
 
+# Build a sandbox for a purely local project: NO origin remote at all (the
+# local-only mode's native shape). Same layout as make_case minus origin.
+make_local_case() {
+  local name=$1 case_dir fakebin
+  case_dir="$TMP_ROOT/$name"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
+  git init -q -b main "$case_dir/project"
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "local baseline"
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+  touch "$case_dir/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir"
+}
+
+test_local_only_no_origin_merged_allows() {
+  local case_dir rc
+  case_dir=$(make_local_case local-no-origin-merged)
+  write_meta "$case_dir" local-only ship
+  # A purely local project (no origin remote anywhere) whose branch content was
+  # merged into local main by hand (no landed= recorded, e.g. a pre-helper merge).
+  # The content fallback must compare against refs/heads/main and ALLOW.
+  wt_commit_file "$case_dir" feature.txt hello "local work"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "local-no-origin-merged: teardown should allow merged content via the local default ref"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "local-no-origin-merged: teardown printed a REFUSED line"
+  pass "no-origin local-only worktree whose content is merged into local main is torn down"
+}
+
+test_local_only_no_origin_unmerged_refuses() {
+  local case_dir rc
+  case_dir=$(make_local_case local-no-origin-unmerged)
+  write_meta "$case_dir" local-only ship
+  # Same purely local project, but the branch was never merged: with no remotes
+  # and no landed=, the refs/heads/main content fallback must REFUSE.
+  wt_commit_file "$case_dir" feature.txt hello "unmerged local work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "local-no-origin-unmerged: teardown should refuse unmerged work in a no-origin project"
+  grep -q REFUSED "$case_dir/stderr" || fail "local-no-origin-unmerged: no REFUSED line in stderr"
+  pass "no-origin local-only worktree with unmerged work is refused"
+}
+
+test_nongit_worktree_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nongit-wt)
+  write_meta "$case_dir" no-mistakes ship
+  # S1 regression: the meta points at a directory git cannot read (here a plain
+  # non-git dir holding a real file). Every git read inside the oracle emits
+  # empty output, which used to read as "clean, everything published" -> ALLOW,
+  # and treehouse return --force would then destroy the directory. Teardown must
+  # fail CLOSED with a clear diagnostic instead.
+  rm -rf "$case_dir/wt"
+  mkdir -p "$case_dir/wt"
+  printf 'precious\n' > "$case_dir/wt/precious.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nongit-wt: teardown should refuse a worktree git cannot read"
+  grep -q REFUSED "$case_dir/stderr" || fail "nongit-wt: no REFUSED line in stderr"
+  grep -q "unreadable by git" "$case_dir/stderr" || fail "nongit-wt: refusal did not cite the unreadable worktree"
+  [ -f "$case_dir/wt/precious.txt" ] || fail "nongit-wt: the directory's contents were destroyed"
+  pass "a worktree unreadable by git refuses (fail closed, not fail open)"
+}
+
+test_broken_gitfile_worktree_refuses() {
+  local case_dir rc
+  case_dir=$(make_case broken-gitfile-wt)
+  write_meta "$case_dir" no-mistakes ship
+  # Same fail-closed requirement for a worktree whose .git gitfile pointer is
+  # broken (the linked worktree's common dir moved or was deleted).
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf 'gitdir: %s\n' "$case_dir/gone/.git/worktrees/wt" > "$case_dir/wt/.git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "broken-gitfile-wt: teardown should refuse a worktree with a broken .git pointer"
+  grep -q "unreadable by git" "$case_dir/stderr" || fail "broken-gitfile-wt: refusal did not cite the unreadable worktree"
+  pass "a worktree with a broken .git gitfile pointer refuses (fail closed)"
+}
+
 test_force_overrides_unlanded() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -467,6 +655,9 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
 }
 
 test_landed_recorded_allows
+test_landed_stale_head_advanced_refuses
+test_landed_descendant_of_head_allows
+test_landed_placeholder_falls_through_to_content
 test_dirty_worktree_refuses
 test_unpushed_no_record_refuses
 test_reachable_from_publishing_remote_allows
@@ -475,6 +666,10 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_local_only_landed_recorded_allows
 test_local_only_unpushed_refuses
+test_local_only_no_origin_merged_allows
+test_local_only_no_origin_unmerged_refuses
+test_nongit_worktree_refuses
+test_broken_gitfile_worktree_refuses
 test_force_overrides_unlanded
 test_scout_without_report_refuses
 test_scout_with_report_allows
