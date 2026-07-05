@@ -7,28 +7,21 @@
 # default tasks-axi backend path, falling back to manual when the tool is not
 # compatible.
 
-fm_tasks_axi_version_parts() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" |
-    sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
-    head -1
-}
+# The version probe and compare live in the shared policy lib
+# (fm_harness_version_parts / fm_version_ge), the ONE parser for every
+# version-gated tool, so its first-triple anchoring cannot drift here.
+_FM_TASKS_AXI_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-harness-policy.sh
+. "$_FM_TASKS_AXI_LIB_DIR/fm-harness-policy.sh"
 
 fm_tasks_axi_compatible() {
   local parts major minor patch rest
-  parts=$(fm_tasks_axi_version_parts) || return 1
-  [ -n "$parts" ] || return 1
+  parts=$(fm_harness_version_parts tasks-axi) || return 1
   major=${parts%% *}
   rest=${parts#* }
   minor=${rest%% *}
   patch=${rest##* }
-
-  [ "$major" -gt 0 ] && return 0
-  [ "$major" -eq 0 ] && [ "$minor" -gt 1 ] && return 0
-  [ "$major" -eq 0 ] && [ "$minor" -eq 1 ] && [ "$patch" -ge 1 ] && return 0
-  return 1
+  fm_version_ge "$major" "$minor" "$patch" 0 1 1
 }
 
 fm_backlog_backend_value() {

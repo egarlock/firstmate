@@ -53,17 +53,24 @@ FM_COPILOT_MIN_MAJOR=1
 FM_COPILOT_MIN_MINOR=0
 FM_COPILOT_MIN_PATCH=68
 
-# fm_harness_version_parts <harness>: print "<major> <minor> <patch>" parsed from
-# the harness CLI's `--version` output, or return non-zero when the CLI is
-# absent, errors, or prints no dotted-numeric version. Same extraction shape as
-# bootstrap's no_mistakes_version_parts so spawn-time gating reads versions the
-# same way the bootstrap gates do.
+# fm_harness_version_parts <command>: print "<major> <minor> <patch>" parsed from
+# the CLI's `--version` output, or return non-zero when the CLI is absent,
+# errors, or prints no dotted-numeric version. This is the ONE version-probe
+# parser: the no-mistakes and tasks-axi bootstrap gates build on it too, so a
+# format quirk is handled in exactly one place. The anchored ^[^0-9]* locks the
+# match onto the FIRST dotted triple on a line - a greedy .* prefix would lock
+# onto the LAST one and truncate leading digits, so 'copilot 1.0.50 (node
+# v20.11.1)' parsed as 0.11.1 and a trailing build date could make an
+# incompatible CLI pass the gate (or a compatible one fail it, or a two-digit
+# major truncate). Tools put their own version first; trailing dotted numbers
+# are runtimes and build stamps. A line whose first number is not a dotted
+# triple simply does not parse (fail closed) rather than mis-parsing.
 fm_harness_version_parts() {
   local harness=$1 output parts
   command -v "$harness" >/dev/null 2>&1 || return 1
   output=$("$harness" --version 2>/dev/null) || return 1
   parts=$(printf '%s\n' "$output" \
-    | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
+    | sed -nE 's/^[^0-9]*([0-9]+)\.([0-9]+)\.([0-9]+).*$/\1 \2 \3/p' | head -n 1)
   [ -n "$parts" ] || return 1
   printf '%s\n' "$parts"
 }
