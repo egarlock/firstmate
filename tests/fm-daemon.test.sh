@@ -803,7 +803,22 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   pass "fm-send exits non-zero when initial text send fails"
 }
 
+# The housekeeping cadence knob is FM_HOUSEKEEPING_TICK (documented, and what the
+# tests set). A regression once read the unprefixed ${HOUSEKEEPING_TICK:-...} in
+# the non-wake idle path, silently ignoring the knob there; pin that every
+# expansion carries the FM_ prefix (the bare name may appear only as the
+# HOUSEKEEPING_TICK_DEFAULT constant or in comments).
+test_housekeeping_tick_env_var_prefixed() {
+  if grep -nE '\$\{HOUSEKEEPING_TICK[:-]' "$ROOT/bin/fm-supervise-daemon.sh"; then
+    fail "fm-supervise-daemon.sh expands unprefixed \${HOUSEKEEPING_TICK} (the knob is FM_HOUSEKEEPING_TICK)"
+  fi
+  grep -qE '\$\{FM_HOUSEKEEPING_TICK[:-]' "$ROOT/bin/fm-supervise-daemon.sh" \
+    || fail "fm-supervise-daemon.sh no longer reads FM_HOUSEKEEPING_TICK at all"
+  pass "housekeeping tick reads the FM_HOUSEKEEPING_TICK knob everywhere (no unprefixed expansion)"
+}
+
 test_daemon_state_root_uses_fm_home
+test_housekeeping_tick_env_var_prefixed
 test_daemon_fails_fast_on_spaced_state
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
