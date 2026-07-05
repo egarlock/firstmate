@@ -309,7 +309,7 @@ SH
   kill "$apid" "$bpid" 2>/dev/null || true
   wait "$apid" 2>/dev/null || true
   wait "$bpid" 2>/dev/null || true
-  [ -s "$res_a" ] && [ -s "$res_b" ] || fail "stalled-winner: contenders did not both report: a='$(cat "$res_a" 2>/dev/null)' b='$(cat "$res_b" 2>/dev/null)'"
+  if [ ! -s "$res_a" ] || [ ! -s "$res_b" ]; then fail "stalled-winner: contenders did not both report: a='$(cat "$res_a" 2>/dev/null)' b='$(cat "$res_b" 2>/dev/null)'"; fi
   [ "$winners" -eq 1 ] || fail "stalled-winner: expected exactly one winner, got $winners: a='$(cat "$res_a")' b='$(cat "$res_b")'"
   grep -q '^lock acquired: harness pid' "$res_b" || fail "stalled-winner: the stealer (B) should hold the lock: b='$(cat "$res_b")'"
   grep -q 'another live firstmate session holds the lock' "$res_a" || fail "stalled-winner: the stalled original (A) should refuse: a='$(cat "$res_a")'"
@@ -364,7 +364,7 @@ SH
   kill "$apid" "$bpid" 2>/dev/null || true
   wait "$apid" 2>/dev/null || true
   wait "$bpid" 2>/dev/null || true
-  [ -s "$res_a" ] && [ -s "$res_b" ] || fail "migration-race: contenders did not both report: a='$(cat "$res_a" 2>/dev/null)' b='$(cat "$res_b" 2>/dev/null)'"
+  if [ ! -s "$res_a" ] || [ ! -s "$res_b" ]; then fail "migration-race: contenders did not both report: a='$(cat "$res_a" 2>/dev/null)' b='$(cat "$res_b" 2>/dev/null)'"; fi
   [ "$winners" -eq 1 ] || fail "migration-race: expected exactly one winner, got $winners: a='$(cat "$res_a")' b='$(cat "$res_b")'"
   grep -q '^lock acquired: harness pid' "$res_a" || fail "migration-race: the fast migrator (A) should hold the lock: a='$(cat "$res_a")'"
   grep -q 'another live firstmate session holds the lock' "$res_b" || fail "migration-race: the stalled migrator (B) should refuse: b='$(cat "$res_b")'"
