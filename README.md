@@ -142,6 +142,8 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
+| `/showdevsetup`    | Print a live, read-only snapshot of the dev setup: every repo's origin/branch/HEAD/dirty state plus a PASS/DRIFT verdict on the no-mistakes binary wiring (CLI, GOPATH binary, symlink target); writes nothing |
+| `/updatenomistakes` | Adopt the latest of the captain's no-mistakes fork into the running gate: fast-forward-only pull from `origin main`, rebuild and reinstall via `make install`, then verify all installed binaries report the new commit; refuses on a dirty checkout or an active pipeline run |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
