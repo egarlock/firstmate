@@ -177,6 +177,12 @@ The update is fast-forward only: dirty, diverged, offline, and off-default targe
 The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; only the origin mode fetches.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
+The no-mistakes gate gets the same treatment because it is compiled Go: a pull alone changes nothing until the binary is rebuilt and reinstalled.
+`/updatenomistakes` (`bin/fm-update-nomistakes.sh`) pulls the canonical no-mistakes checkout `--ff-only` from an explicit `origin main`, rebuilds and reinstalls via `make install` (which restarts the daemon), then verifies the CLI on PATH, its symlink target, and the GOPATH binary all report the new HEAD commit.
+It refuses on a dirty checkout (never bypassable), on any branch other than `main`, and while a pipeline run is active in any repo - detected by a read-only query of the daemon's sqlite run database, since the daemon restart would kill the run - with `--force` as the explicit opt-in for the active-run and unknown-state cases and `--dry-run` to run only the checks.
+`/showdevsetup` (`bin/fm-show-dev-setup.sh`) is the strictly read-only companion: it re-scans the operating firstmate repo, every project clone, the canonical no-mistakes checkout, and a treehouse sibling on each invocation, then ends with a `PASS`/`DRIFT` verdict on whether those same three no-mistakes binaries report one commit, writing nothing anywhere.
+Both scripts share checkout, binary, and active-run resolution through `bin/fm-nm-lib.sh`, so the scan and the updater can never disagree about which checkout or binary they mean.
+
 ## Restart-proof
 
 All state lives in each task's session-provider backend (tmux by hard default, herdr when selected or auto-detected), no-mistakes run records, status event logs, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
