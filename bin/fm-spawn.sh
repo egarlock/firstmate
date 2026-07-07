@@ -12,9 +12,11 @@
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
-#   $TMUX or HERDR_ENV=1; bin/fm-backend.sh's fm_backend_detect), then tmux.
-#   Known backends are the reference tmux adapter and experimental herdr. An
-#   auto-detected herdr spawn prints a loud stderr notice; auto-detected tmux
+#   $TMUX, HERDR_ENV=1, or CMUX_WORKSPACE_ID; bin/fm-backend.sh's
+#   fm_backend_detect), then tmux.
+#   Known backends are the reference tmux adapter and the experimental herdr
+#   and cmux adapters. An auto-detected herdr or cmux spawn prints a loud
+#   stderr notice; auto-detected tmux
 #   stays silent. Default tmux spawns do not write backend= to meta; absent
 #   backend= means tmux.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
@@ -575,29 +577,45 @@ EOF
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
+  cmux)
+    # cmux has no named-session container; container_ensure is the version +
+    # live-socket gate, and each task is one workspace named fm-<id>
+    # (workspace-per-task; docs/cmux-backend.md "Task container shape").
+    fm_backend_cmux_container_ensure >/dev/null || exit 1
+    CMUX_WORKSPACE_ID_TASK=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    if [ -z "$CMUX_WORKSPACE_ID_TASK" ]; then
+      echo "error: cmux did not return a workspace id for $W" >&2
+      exit 1
+    fi
+    T="cmux:$CMUX_WORKSPACE_ID_TASK"
+    ;;
 esac
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
     herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
+    cmux) fm_backend_cmux_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() {  # <target>
   case "$BACKEND" in
     tmux) fm_backend_tmux_current_path "$1" ;;
     herdr) fm_backend_herdr_current_path "$1" ;;
+    cmux) fm_backend_cmux_current_path "$1" ;;
   esac
 }
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
     herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
+    cmux) fm_backend_cmux_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_key "$1" "$2" ;;
     herdr) fm_backend_herdr_send_key "$1" "$2" ;;
+    cmux) fm_backend_cmux_send_key "$1" "$2" ;;
   esac
 }
 if [ "$KIND" != secondmate ]; then
@@ -838,6 +856,9 @@ fi
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+  fi
+  if [ "$BACKEND" = cmux ]; then
+    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID_TASK"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
