@@ -38,14 +38,15 @@ Its tmux supervisor injection path shares the same submit core used by the tmux 
 
 The runtime backend is the session-provider layer below firstmate's scripts.
 It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery, live-window fallback lookup, and endpoint teardown.
-`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter, and `bin/backends/herdr.sh` (P2) is an experimental second adapter.
-New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `$TMUX` or `HERDR_ENV=1`, then default `tmux`.
-Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1` when firstmate is inside tmux nested in herdr, auto-detected herdr prints a one-time opt-out notice, and auto-detected tmux stays silent.
+`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter, and `bin/backends/herdr.sh` (P2) and `bin/backends/cmux.sh` are experimental adapters.
+New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or `CMUX_WORKSPACE_ID`, then default `tmux`.
+Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1` and `CMUX_WORKSPACE_ID` when firstmate is inside tmux nested in another backend's pane, auto-detected herdr or cmux prints a one-time opt-out notice, and auto-detected tmux stays silent.
 Unknown backend names fail loudly.
 For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
-`fm-watch.sh` polls each window's backend for a busy state: tmux has no native primitive and always reports unknown, preserving its original pane-tail-regex detection unchanged; herdr's `agent.get` semantic state (working/idle/done/blocked) is consulted first, falling back to the same regex only when it reports unknown.
+`fm-watch.sh` polls each window's backend for a busy state: tmux has no native primitive and always reports unknown, preserving its original pane-tail-regex detection unchanged; herdr's `agent.get` semantic state (working/idle/done/blocked) and cmux's workspace agent state are consulted first, falling back to the same regex only when they report unknown.
 That poll loop is the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
 Herdr is experimental and can be selected explicitly or by runtime auto-detection: treehouse remains the worktree provider for it exactly as it is for tmux (herdr is a session provider only), and its full verification - the container shape decision, verified CLI facts, a verified small-`--lines` capture bug and its workaround, and known gaps - is recorded in `docs/herdr-backend.md`.
+Cmux is experimental on the same terms: a session provider only (treehouse stays the worktree provider), workspace-per-task in the cmux app, selected explicitly or by runtime auto-detection, with its verified CLI facts and known gaps recorded in `docs/cmux-backend.md`.
 
 ## Worktrees, not branches in your checkout
 

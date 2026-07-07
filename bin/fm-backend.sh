@@ -40,8 +40,9 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # section 4's harness-verification discipline. herdr is EXPERIMENTAL (P2;
 # data/fm-backend-design-d7/herdr-addendum.md) - verified against the real
 # v0.7.1/protocol-14 binary (data/fm-backend-design-d7/herdr-verification-p2.md)
-# but newer than tmux's long-proven default path.
-FM_BACKEND_KNOWN="tmux herdr"
+# but newer than tmux's long-proven default path. cmux is EXPERIMENTAL too -
+# verified against the real 0.64.17 binary (docs/cmux-backend.md).
+FM_BACKEND_KNOWN="tmux herdr cmux"
 
 # fm_backend_is_known: 0 iff <name> has a verified adapter.
 fm_backend_is_known() {  # <name>
@@ -69,6 +70,13 @@ fm_backend_detect() {
   fi
   if [ "${HERDR_ENV:-}" = "1" ]; then
     printf 'herdr'
+    return 0
+  fi
+  # cmux auto-sets CMUX_WORKSPACE_ID (and CMUX_SURFACE_ID) in every terminal
+  # it manages; checked after $TMUX so a tmux nested inside a cmux workspace
+  # still resolves innermost-first to tmux, mirroring the herdr rule.
+  if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+    printf 'cmux'
     return 0
   fi
   return 1
@@ -102,6 +110,9 @@ fm_backend_name() {
   if detected=$(fm_backend_detect); then
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
+    if [ "$detected" = cmux ]; then
+      echo "NOTICE: auto-detected cmux runtime (CMUX_WORKSPACE_ID) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     printf '%s' "$detected"
     return 0
@@ -182,6 +193,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_HERDR_SOURCED=1
       fi
       ;;
+    cmux)
+      if [ -z "${_FM_BACKEND_CMUX_SOURCED:-}" ]; then
+        # shellcheck source=bin/backends/cmux.sh
+        . "$FM_BACKEND_LIB_DIR/backends/cmux.sh"
+        _FM_BACKEND_CMUX_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -239,6 +257,7 @@ fm_backend_capture() {  # <backend> <target> <lines>
   case "$backend" in
     tmux) fm_backend_tmux_capture "$@" ;;
     herdr) fm_backend_herdr_capture "$@" ;;
+    cmux) fm_backend_cmux_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -251,6 +270,7 @@ fm_backend_send_key() {  # <backend> <target> <key>
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
     herdr) fm_backend_herdr_send_key "$@" ;;
+    cmux) fm_backend_cmux_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -265,6 +285,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
     herdr) fm_backend_herdr_send_text_submit "$@" ;;
+    cmux) fm_backend_cmux_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -279,6 +300,7 @@ fm_backend_kill() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_kill "$@" ;;
     herdr) fm_backend_herdr_kill "$@" ;;
+    cmux) fm_backend_cmux_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -294,6 +316,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    cmux) fm_backend_cmux_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }

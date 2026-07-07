@@ -19,14 +19,17 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 ## Runtime backend (config/backend / FM_BACKEND)
 
 The runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
-`tmux` is the verified reference backend; `herdr` is a second, experimental backend (see `docs/herdr-backend.md`) - treehouse remains the worktree provider for both, since herdr is a session provider only.
-New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX` or `HERDR_ENV=1`, then default `tmux`.
-If both runtime markers are present, `$TMUX` wins because tmux is the innermost surface firstmate is running on.
-Auto-detected herdr prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
-Any value other than `tmux` or `herdr` is rejected until another adapter is implemented and verified.
+`tmux` is the verified reference backend; `herdr` (see `docs/herdr-backend.md`) and `cmux` (see `docs/cmux-backend.md`) are experimental backends - treehouse remains the worktree provider for all of them, since they are session providers only.
+New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or `CMUX_WORKSPACE_ID`, then default `tmux`.
+If several runtime markers are present, `$TMUX` wins because tmux is the innermost surface firstmate is running on.
+Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
+Any value other than `tmux`, `herdr`, or `cmux` is rejected until another adapter is implemented and verified.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
+A cmux spawn additionally version-gates against the installed `cmux` CLI, requires `jq`, and requires a reachable, automation-authorized cmux socket (the app running with a socket control mode that permits local automation, or `CMUX_SOCKET_PASSWORD` exported), refusing loudly with the operator fix otherwise.
+The cmux task-container shape is configurable via `FM_CMUX_CONTAINER` or the first word of local gitignored `config/cmux-container`: `tab` (default) puts each task as an `fm-<id>` tab in the workspace firstmate itself runs in (or a shared `firstmate` workspace when firstmate is outside cmux), mirroring how tmux crewmates join the captain's own session; `workspace` gives each task its own `fm-<id>` workspace and sidebar row.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+A cmux task additionally records `cmux_workspace_id=`, plus `cmux_surface_id=` for a tab-mode task.
 The `config/backend` file is not inherited by secondmate homes.
 
 ## Gate defaults (.no-mistakes.yaml)
@@ -180,8 +183,10 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_NM_CANONICAL=         # canonical no-mistakes checkout used by fm-show-dev-setup.sh and fm-update-nomistakes.sh; unset means the no-mistakes.git sibling of the firstmate root
 FM_NM_DATA_ROOT=         # no-mistakes data root for the read-only active-run check; unset falls back to the running daemon's --root, then ~/.no-mistakes
 FM_FORK_OWNER=           # expected GitHub owner for fm-show-dev-setup.sh's captain's-fork verdict; unset falls back to the logged-in gh account, then no verdict
-FM_BACKEND=             # optional runtime session-provider backend override for new spawns; tmux (reference) or herdr (experimental)
+FM_BACKEND=             # optional runtime session-provider backend override for new spawns; tmux (reference), herdr, or cmux (experimental)
 HERDR_SESSION=default  # herdr-only: the named herdr session a herdr-backend spawn/op uses (docs/herdr-backend.md)
+CMUX_SOCKET_PASSWORD=  # cmux-only: socket password when the cmux app's socket control mode is "password" (docs/cmux-backend.md)
+FM_CMUX_CONTAINER=     # cmux-only: task container shape - tab (default; tasks join firstmate's workspace) or workspace (one workspace per task); config/cmux-container is the durable form
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
