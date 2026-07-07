@@ -578,16 +578,26 @@ EOF
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
   cmux)
-    # cmux has no named-session container; container_ensure is the version +
-    # live-socket gate, and each task is one workspace named fm-<id>
-    # (workspace-per-task; docs/cmux-backend.md "Task container shape").
-    fm_backend_cmux_container_ensure >/dev/null || exit 1
-    CMUX_WORKSPACE_ID_TASK=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    # container_ensure is the version + live-socket gate plus container
+    # resolution: tab mode (default) yields the container workspace's UUID -
+    # firstmate's own workspace inside cmux, or the shared "firstmate" one -
+    # and each task becomes a TAB in it; workspace mode yields the constant
+    # "cmux" and each task becomes its own fm-<id> workspace
+    # (docs/cmux-backend.md "Task container shape").
+    CMUX_CONTAINER=$(fm_backend_cmux_container_ensure "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$CMUX_CONTAINER" "$W" "$PROJ_ABS") || exit 1
+    read -r CMUX_WORKSPACE_ID_TASK CMUX_SURFACE_ID_TASK <<EOF
+$CMUX_TASK_IDS
+EOF
     if [ -z "$CMUX_WORKSPACE_ID_TASK" ]; then
       echo "error: cmux did not return a workspace id for $W" >&2
       exit 1
     fi
-    T="cmux:$CMUX_WORKSPACE_ID_TASK"
+    if [ -n "$CMUX_SURFACE_ID_TASK" ]; then
+      T="cmux:$CMUX_WORKSPACE_ID_TASK:$CMUX_SURFACE_ID_TASK"
+    else
+      T="cmux:$CMUX_WORKSPACE_ID_TASK"
+    fi
     ;;
 esac
 spawn_send_text_line() {  # <target> <text>
@@ -859,6 +869,7 @@ fi
   fi
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID_TASK"
+    [ -z "$CMUX_SURFACE_ID_TASK" ] || echo "cmux_surface_id=$CMUX_SURFACE_ID_TASK"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

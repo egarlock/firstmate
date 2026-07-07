@@ -31,26 +31,34 @@ Cmux is a session provider only.
 Treehouse remains the worktree provider, exactly as it is for tmux and herdr.
 Cmux's own worktree/PR features are never used by this adapter.
 
-## Task container shape: workspace-per-task
+## Task container shape: tab-per-task by default, workspace-per-task by config
 
-Firstmate creates ONE cmux workspace per task, named `fm-<id>`, in the app's current window - there is no named-session or per-firstmate container to create first (the app itself is the container), so `fm_backend_cmux_container_ensure` is purely the version + live-socket gate.
+The shape is configurable via `FM_CMUX_CONTAINER` (env), then the local gitignored `config/cmux-container` file, then the default `tab`:
 
-Workspace-per-task was chosen over pane-or-surface-per-task inside one shared workspace because cmux's sidebar is workspace-first: each workspace row shows its working directory, git branch, linked PR status, and latest notification, and lights up when an agent is waiting.
-That makes the sidebar itself the fleet view - each firstmate task gets its own row with native per-task status - which is exactly the human-watching axis that decided herdr's tab-per-task shape.
+- **`tab` (default)** - one cmux SURFACE (tab) per task, titled `fm-<id>`, inside one container workspace: the workspace firstmate itself runs in (`CMUX_WORKSPACE_ID`, auto-set in every cmux-managed terminal) when firstmate is inside cmux, else a find-or-create shared workspace named `firstmate`.
+  This mirrors `bin/backends/tmux.sh`'s container behavior exactly (crewmate windows join the captain's own session when firstmate runs inside tmux, else a detached `firstmate` session): the captain watches every task as a tab in the tab bar of the workspace they already have open.
+- **`workspace`** - one cmux workspace per task, named `fm-<id>`.
+  Each task gets its own sidebar row with cmux's native per-workspace status (working directory, git branch, linked-PR status, notifications), for captains who prefer a sidebar row per task.
+
+In tab mode, teardown closes only the task's tab; the container workspace (the captain's own, or the shared `firstmate` one) stays, exactly as tmux leaves the session.
 
 ## Target string and meta fields
 
-A cmux task's `window=` meta field holds `cmux:<workspace-uuid>`, for example `cmux:11111111-aaaa-bbbb-cccc-000000000001`.
-The literal `cmux` prefix keeps the target colon-containing, so `fm_backend_resolve_selector`'s pass-through and `fm_backend_of_selector`'s meta matching both work with no backend-specific logic, exactly like herdr's `<session>:<pane-id>` shape.
-Workspace UUIDs are requested explicitly (`--id-format uuids`) and stored because they are stable handles; cmux's default short refs (`workspace:2`) are index-based and shift as workspaces are created, closed, or reordered, so they are never stored.
+A cmux task's `window=` meta field holds `cmux:<workspace-uuid>:<surface-uuid>` in tab mode, or `cmux:<workspace-uuid>` in workspace mode.
+The literal `cmux` prefix keeps the target colon-containing, so `fm_backend_resolve_selector`'s pass-through and `fm_backend_of_selector`'s meta matching both work with no backend-specific logic, exactly like herdr's `<session>:<pane-id>` shape; the adapter splits the remainder into workspace and optional surface.
+UUIDs are requested explicitly (`--id-format uuids`) and stored because they are stable handles; cmux's default short refs (`workspace:2`, `surface:9`) are index-based and shift as things are created, closed, or reordered, so they are never stored.
 Operational commands should prefer the bare `fm-<id>` form, which resolves through this home's metadata.
 
-The task name lives in the workspace's `custom_title` field: verified that `new-workspace --name fm-<id>` sets `custom_title` (with `title` mirroring it), while cmux's opt-in AI auto-naming rewrites `title` from conversation content (observed live, including a busy-spinner glyph prefix) but never overrides a custom title.
-So every name-based operation (duplicate check, UUID resolution, `fm_backend_cmux_list_live`, bare-selector fallback) matches `custom_title`, never `title`.
+The task name lives in the workspace's `custom_title` field (workspace mode) or the surface's `title` (tab mode):
+
+- Verified: `new-workspace --name fm-<id>` sets `custom_title` (with `title` mirroring it), while cmux's opt-in AI auto-naming rewrites the workspace `title` from conversation content (observed live, including a busy-spinner glyph prefix) but never overrides a custom title.
+  Workspace-level name matching therefore uses `custom_title`, never `title`.
+- Verified: `rename-tab` sets a sticky surface title that running commands do not overwrite, so tab-level matching uses the surface `title` from `list-pane-surfaces --json`.
 
 Cmux tasks additionally record:
 
-- `cmux_workspace_id=` - the task workspace's UUID (same value as the target's suffix, recorded for symmetry with herdr's id fields).
+- `cmux_workspace_id=` - the task's workspace UUID (the container workspace in tab mode, the task's own workspace in workspace mode).
+- `cmux_surface_id=` - tab mode only: the task tab's surface UUID.
 
 ## Verified CLI facts
 
@@ -58,15 +66,17 @@ Cmux tasks additionally record:
 |---|---|---|
 | Version gate | `cmux version` -> `cmux 0.64.17 (97) [9ed29d81a]` | Socket-free (works while auth is refused); minimum pinned in `FM_BACKEND_CMUX_MIN_VERSION`. |
 | Socket gate | `cmux ping` -> `PONG` | One authenticated round-trip; an auth refusal prints `auth_required`, which the adapter maps to the operator fix. |
-| Create task workspace | `cmux new-workspace --name fm-<id> --cwd <proj> --focus false` | Prints a TEXT acknowledgment `OK workspace:<n>` carrying only the unstable index-based short ref; `--json` is IGNORED on this command in 0.64.17. The adapter therefore resolves the stable UUID with an immediate `custom_title` lookup, made unambiguous by its own duplicate check (cmux does not enforce workspace-name uniqueness). `--focus false` verified not to steal the captain's focus. |
-| List / recovery | `cmux list-workspaces --json --id-format uuids` | Honors both flags; per-workspace fields verified: `id` (UUID), `title`, `custom_title`, `current_directory`, `index`, `selected`, plus presentation fields. `fm-*` filtering matches `custom_title`. |
+| Create task workspace (workspace mode) | `cmux new-workspace --name fm-<id> --cwd <proj> --focus false` | Prints a TEXT acknowledgment `OK workspace:<n>` carrying only the unstable index-based short ref; `--json` is IGNORED on this command in 0.64.17. The adapter therefore resolves the stable UUID with an immediate `custom_title` lookup, made unambiguous by its own duplicate check (cmux does not enforce workspace-name uniqueness). `--focus false` verified not to steal the captain's focus. |
+| Create task tab (tab mode) | `cmux new-surface --type terminal --workspace <ws> --focus false` | Also acknowledges with short refs only (`OK surface:<n> pane:<m> workspace:<k>`), so the new surface's UUID is resolved by diffing `list-pane-surfaces --json --id-format uuids` around the create. A new tab starts in the container workspace's directory, so the adapter `cd`s it into the task's project before `treehouse get`. |
+| Name a task tab | `cmux rename-tab --workspace <ws> --surface <sf> fm-<id>` | Verified sticky: the title survives running commands (unlike auto-titles). Surface titles are not unique either; the adapter's duplicate check runs first. |
+| List / recovery | `cmux list-workspaces --json --id-format uuids`, `cmux list-pane-surfaces --workspace <ws> --json --id-format uuids` | Both honor the flags; per-workspace fields verified: `id` (UUID), `title`, `custom_title`, `current_directory`, `index`, `selected`; per-surface fields: `id`, `title`, `type`, `index`, `selected`. `fm-*` filtering matches workspace `custom_title` and surface `title`, covering both container shapes regardless of the configured mode. |
 | Send literal (unsubmitted) | `cmux send --workspace <ws> <text>` | Verified NOT to auto-submit: a marker command sat unexecuted in the composer until a separate Enter. Behaves exactly like tmux's `send-keys -l`. |
 | Send key | `cmux send-key --workspace <ws> <key>` | Verified names: `enter` (submits), `escape` (accepted), `ctrl+c` (interrupts a running foreground `sleep` immediately). Firstmate vocabulary normalized: Enter -> `enter`, Escape -> `escape`, C-c -> `ctrl+c`. |
 | Send + submit | literal send + `send-key enter` | Cmux exposes no atomic type-and-run primitive, so the two fixed spawn-time commands compose the two calls. |
 | Bounded capture | `cmux read-screen --workspace <ws> --lines N` | Verified to clamp small N correctly (`--lines 5` returned exactly the last 5 lines) - cmux does NOT have herdr's small-N empty-read bug. The adapter still over-fetches (>= 200 lines, trimmed locally with `tail`) as cheap insurance against any future viewport-dependent regression. |
-| Current path | surface tty from `cmux tree` + `ps -t <tty>` foreground pid + `lsof -d cwd` | OS-level ground truth, matching tmux's `#{pane_current_path}` semantics; the workspace list's `current_directory` is only the fallback. See "Live-cwd tracking" below - the JSON field alone verifiably fails the treehouse case. |
+| Current path | surface tty from `cmux tree` (`--id-format both` in tab mode, verified to print short ref + UUID per line) + `ps -t <tty>` foreground pid + `lsof -d cwd` | OS-level ground truth, matching tmux's `#{pane_current_path}` semantics. The workspace list's `current_directory` is a fallback ONLY in workspace mode; in tab mode there is no per-surface cwd field and the container workspace's directory would be a wrong-but-plausible answer, so tab mode is tty-or-empty. See "Live-cwd tracking" below - the JSON field alone verifiably fails the treehouse case. |
 | Busy state | forward-compatible `agent_status` probe on the workspace list | NO machine-readable agent-state field exists in 0.64.17's workspace list (the sidebar's busy cue rides the opt-in auto-naming title's spinner glyph, which is presentation-bound and never parsed), so busy state reports unknown and the watcher uses its shared tail-regex fallback, exactly like tmux. If a future cmux exposes `agent_status`, the mapping is ready: `working` -> busy; `idle`/`done` -> idle; `waiting`/`blocked` -> idle (stuck on the human - surfaced like a stale pane, not suppressed as busy). |
-| Kill | `cmux close-workspace --workspace <ws>` | Verified to close the workspace; closing an already-closed workspace exits non-zero (`not_found`), matching tmux's `kill-window \|\| true` best-effort contract. |
+| Kill | `cmux close-surface --workspace <ws> --surface <sf>` (tab mode) / `cmux close-workspace --workspace <ws>` (workspace mode) | Verified for both; closing an already-closed surface or workspace exits non-zero (`not_found`), matching tmux's `kill-window \|\| true` best-effort contract. Tab mode never closes the container workspace. |
 
 Every invocation goes through `fm_backend_cmux_cli`, which sets `CMUX_QUIET=1` so legacy-alias migration notices (e.g. "'list-workspaces' is now an alias for 'cmux workspace list'") can never contaminate parsed output.
 
@@ -92,7 +102,11 @@ Knobs: `FM_CMUX_READY_ATTEMPTS` (default 30), `FM_CMUX_READY_INTERVAL` (default 
 
 ## End-to-end verification (spawn -> steer -> done -> refuse -> merge -> teardown)
 
-Beyond the fake-CLI unit tests (`tests/fm-backend-cmux.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and workspace-per-task in the captain's running cmux app (scratch workspaces only; the captain's own workspaces were never touched):
+Beyond the fake-CLI unit tests (`tests/fm-backend-cmux.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME` and a scratch `local-only` git project, ONCE PER CONTAINER SHAPE in the captain's running cmux app:
+
+**Tab mode (default):** spawned with firstmate running inside cmux, so the task became an `fm-<id>` tab in firstmate's own workspace (target `cmux:<ws>:<surface>`; meta recorded both `cmux_workspace_id=` and `cmux_surface_id=`); `fm-peek`/`fm-send` routed through the surface flags; the crewmate branched, committed, and reported `done`; teardown REFUSED the unlanded work, `fm-merge-local.sh` landed it, and the second teardown closed ONLY the task's tab - every other tab in the captain's workspace was verified untouched.
+
+**Workspace mode** (`config/cmux-container` = `workspace`), the original pass:
 
 1. `FM_HOME=<scratch> FM_BACKEND=cmux bin/fm-spawn.sh cmux-e2e-t1 <scratch-project> claude` - spawned successfully, printing `window=cmux:<uuid>` and writing `backend=cmux` and `cmux_workspace_id=` to the task's meta.
 2. `bin/fm-peek.sh fm-cmux-e2e-t1` - routed through the cmux capture and showed the live claude trust dialog.

@@ -128,16 +128,56 @@ test_socket_check_reports_auth_fix() {
   pass "fm_backend_cmux_socket_check: an auth refusal names the socket-mode/password fix"
 }
 
-test_container_ensure_gates_and_echoes_token() {
+test_container_mode_resolution() {
+  ( . "$ROOT/bin/backends/cmux.sh"
+    [ "$(FM_CMUX_CONTAINER='' FM_BACKEND_CONFIG_DIR=/nonexistent fm_backend_cmux_container_mode)" = tab ] || { echo "default should be tab" >&2; exit 1; }
+    [ "$(FM_CMUX_CONTAINER=workspace fm_backend_cmux_container_mode)" = workspace ] || { echo "env should win" >&2; exit 1; }
+    [ "$(FM_CMUX_CONTAINER=bogus fm_backend_cmux_container_mode 2>/dev/null)" = tab ] || { echo "unknown should fall back to tab" >&2; exit 1; }
+    d=$(mktemp -d); printf 'workspace\n' > "$d/cmux-container"
+    [ "$(FM_CMUX_CONTAINER='' FM_BACKEND_CONFIG_DIR="$d" fm_backend_cmux_container_mode)" = workspace ] || { echo "config file should be read" >&2; exit 1; }
+    rm -rf "$d"
+  ) || fail "fm_backend_cmux_container_mode resolution broke"
+  pass "fm_backend_cmux_container_mode: env > config/cmux-container > default tab; unknown values fall back to tab"
+}
+
+test_container_ensure_workspace_mode_echoes_token() {
   local dir log resp fb out
   dir="$TMP_ROOT/container"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_cmux_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_container_ensure' "$ROOT" )
-  [ "$out" = "cmux" ] || fail "container_ensure should echo the constant container token 'cmux', got '$out'"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" FM_CMUX_CONTAINER=workspace \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_container_ensure /tmp' "$ROOT" )
+  [ "$out" = "cmux" ] || fail "workspace-mode container_ensure should echo the constant token 'cmux', got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''version' "container_ensure did not version-gate"
   assert_contains "$(cat "$log")" $'\x1f''ping' "container_ensure did not verify the live socket"
-  pass "fm_backend_cmux_container_ensure: version-gates, checks the socket, echoes 'cmux'"
+  pass "fm_backend_cmux_container_ensure (workspace mode): version-gates, checks the socket, echoes 'cmux'"
+}
+
+test_container_ensure_tab_mode_uses_own_workspace() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/container-tab-own"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" FM_CMUX_CONTAINER=tab CMUX_WORKSPACE_ID=my-own-ws \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_container_ensure /tmp' "$ROOT" )
+  [ "$out" = "my-own-ws" ] || fail "tab-mode container_ensure inside cmux should echo the caller's own workspace id, got '$out'"
+  pass "fm_backend_cmux_container_ensure (tab mode): reuses firstmate's own workspace via CMUX_WORKSPACE_ID"
+}
+
+test_container_ensure_tab_mode_shared_workspace() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/container-tab-shared"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: workspace lookup by custom_title "firstmate" -> absent
+  printf '{"workspaces":[]}\n' > "$resp/1.out"
+  # 2: new-workspace -> text ack
+  printf 'OK workspace:5\n' > "$resp/2.out"
+  # 3: lookup again -> resolved uuid
+  printf '{"workspaces":[{"id":"55555555-aaaa-bbbb-cccc-000000000005","custom_title":"firstmate"}]}\n' > "$resp/3.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" FM_CMUX_CONTAINER=tab CMUX_WORKSPACE_ID='' \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_container_ensure /tmp' "$ROOT" )
+  [ "$out" = "55555555-aaaa-bbbb-cccc-000000000005" ] || fail "tab-mode container_ensure outside cmux should create/echo the shared firstmate workspace, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''new-workspace'$'\x1f''--name'$'\x1f''firstmate' \
+    "container_ensure did not create the shared firstmate workspace"
+  pass "fm_backend_cmux_container_ensure (tab mode, outside cmux): find-or-create shared 'firstmate' workspace"
 }
 
 # --- create_task ----------------------------------------------------------------
@@ -148,11 +188,55 @@ test_create_task_refuses_duplicate_name() {
   printf '{"workspaces":[{"id":"11111111-aaaa-bbbb-cccc-000000000009","custom_title":"fm-dup1","current_directory":"/tmp"}]}\n' > "$resp/1.out"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task cmux fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should refuse an existing workspace name (cmux does not enforce uniqueness)"
   assert_contains "$out" "already exists" "create_task did not report the duplicate name"
-  pass "fm_backend_cmux_create_task: refuses a duplicate workspace name"
+  pass "fm_backend_cmux_create_task (workspace mode): refuses a duplicate workspace name"
+}
+
+test_create_task_tab_mode_full_flow() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/create-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: duplicate check by tab title -> no match
+  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/1.out"
+  # 2: surface ids BEFORE create
+  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/2.out"
+  # 3: new-surface -> text ack with short refs only
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/3.out"
+  # 4: surface ids AFTER create -> diff yields the new uuid
+  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"},{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/4.out"
+  # 5: rename-tab
+  printf 'OK action=rename tab=tab:9 workspace=workspace:2\n' > "$resp/5.out"
+  # 6: wait_ready wake enter; 7/8: stable screen reads
+  printf 'ready prompt\n' > "$resp/7.out"
+  printf 'ready prompt\n' > "$resp/8.out"
+  # 9: cd send; 10: cd enter
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-newtab /tmp/proj' "$ROOT" )
+  [ "$out" = "ws-77 sf-new" ] || fail "tab-mode create_task should echo '<ws> <surface>', got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''new-surface'$'\x1f''--type'$'\x1f''terminal'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--focus'$'\x1f''false' \
+    "create_task did not create the tab without focus-stealing"
+  assert_contains "$(cat "$log")" $'\x1f''rename-tab'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''fm-newtab' \
+    "create_task did not rename the new tab to the task label"
+  assert_contains "$(cat "$log")" $'\x1f''send'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''cd "/tmp/proj"' \
+    "create_task did not cd the new tab into the project"
+  pass "fm_backend_cmux_create_task (tab mode): dup-check, create, uuid-diff, rename, readiness, cd to project"
+}
+
+test_create_task_tab_mode_refuses_duplicate_title() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/create-tab-dup"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[{"id":"sf-1","title":"fm-duptab"}]}\n' > "$resp/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-duptab /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "tab-mode create_task should refuse an existing tab title"
+  assert_contains "$out" "already exists" "create_task did not report the duplicate tab title"
+  pass "fm_backend_cmux_create_task (tab mode): refuses a duplicate tab title"
 }
 
 test_create_task_creates_and_resolves_uuid() {
@@ -171,7 +255,7 @@ test_create_task_creates_and_resolves_uuid() {
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
     FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" )
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task cmux fm-newtask /tmp/proj' "$ROOT" )
   [ "$out" = "22222222-aaaa-bbbb-cccc-000000000002" ] || fail "create_task should echo the workspace uuid resolved by name, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''read-screen'$'\x1f''--workspace'$'\x1f''22222222-aaaa-bbbb-cccc-000000000002' \
     "create_task did not run the shell-readiness gate before returning"
@@ -189,7 +273,7 @@ test_create_task_fails_on_unacknowledged_create() {
   printf 'Error: something else\n' > "$resp/2.out"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task cmux fm-newtask /tmp/proj' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should fail when new-workspace does not acknowledge with 'OK workspace'"
   assert_contains "$out" "did not acknowledge" "create_task did not report the unacknowledged create"
@@ -202,11 +286,49 @@ test_parse_target() {
   ( . "$ROOT/bin/backends/cmux.sh"
     fm_backend_cmux_parse_target "cmux:11111111-aaaa-bbbb-cccc-000000000001" || exit 1
     [ "$FM_BACKEND_CMUX_WS" = "11111111-aaaa-bbbb-cccc-000000000001" ] || { echo "ws mismatch: $FM_BACKEND_CMUX_WS" >&2; exit 1; }
+    [ -z "$FM_BACKEND_CMUX_SURFACE" ] || { echo "surface should be empty for the 2-part form" >&2; exit 1; }
+    fm_backend_cmux_parse_target "cmux:ws-uuid:sf-uuid" || exit 1
+    [ "$FM_BACKEND_CMUX_WS" = "ws-uuid" ] || { echo "ws mismatch in 3-part form: $FM_BACKEND_CMUX_WS" >&2; exit 1; }
+    [ "$FM_BACKEND_CMUX_SURFACE" = "sf-uuid" ] || { echo "surface mismatch: $FM_BACKEND_CMUX_SURFACE" >&2; exit 1; }
     fm_backend_cmux_parse_target "notcmux:x" && exit 1
     fm_backend_cmux_parse_target "bare-no-colon" && exit 1
     exit 0
-  ) || fail "fm_backend_cmux_parse_target did not enforce the 'cmux:<workspace>' shape"
-  pass "fm_backend_cmux_parse_target: accepts 'cmux:<uuid>', refuses other prefixes and colon-free strings"
+  ) || fail "fm_backend_cmux_parse_target did not enforce the 'cmux:<ws>[:<surface>]' shapes"
+  pass "fm_backend_cmux_parse_target: accepts 2- and 3-part cmux targets, refuses other prefixes and colon-free strings"
+}
+
+test_ops_route_surface_targets() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/surface-ops"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'tab screen\n' > "$resp/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_capture cmux:ws-77:sf-9 250' "$ROOT" )
+  [ "$out" = "tab screen" ] || fail "capture should read a surface target, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''read-screen'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-9' \
+    "capture did not pass --surface for a 3-part target"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key cmux:ws-77:sf-9 Enter' "$ROOT"
+  assert_contains "$(cat "$log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-9'$'\x1f''enter' \
+    "send_key did not pass --surface for a 3-part target"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill cmux:ws-77:sf-9' "$ROOT"
+  assert_contains "$(cat "$log")" $'\x1f''close-surface'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-9' \
+    "kill did not close the surface for a 3-part target"
+  assert_not_contains "$(cat "$log")" $'\x1f''close-workspace' \
+    "kill must NOT close the container workspace for a tab task"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill cmux:ws-77' "$ROOT"
+  assert_contains "$(cat "$log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''ws-77' \
+    "kill did not close the workspace for a 2-part target"
+
+  pass "cmux ops: 3-part targets route --surface (kill closes only the tab); 2-part targets stay workspace-scoped"
 }
 
 test_normalize_key() {
@@ -459,11 +581,17 @@ test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
 test_version_check_refuses_missing_cmux
 test_socket_check_reports_auth_fix
-test_container_ensure_gates_and_echoes_token
+test_container_mode_resolution
+test_container_ensure_workspace_mode_echoes_token
+test_container_ensure_tab_mode_uses_own_workspace
+test_container_ensure_tab_mode_shared_workspace
 test_create_task_refuses_duplicate_name
 test_create_task_creates_and_resolves_uuid
 test_create_task_fails_on_unacknowledged_create
+test_create_task_tab_mode_full_flow
+test_create_task_tab_mode_refuses_duplicate_title
 test_parse_target
+test_ops_route_surface_targets
 test_normalize_key
 test_capture_calls_read_screen
 test_capture_overfetches_small_n_and_trims

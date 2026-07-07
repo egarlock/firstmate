@@ -26,9 +26,10 @@ Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `
 Any value other than `tmux`, `herdr`, or `cmux` is rejected until another adapter is implemented and verified.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A cmux spawn additionally version-gates against the installed `cmux` CLI, requires `jq`, and requires a reachable, automation-authorized cmux socket (the app running with a socket control mode that permits local automation, or `CMUX_SOCKET_PASSWORD` exported), refusing loudly with the operator fix otherwise.
+The cmux task-container shape is configurable via `FM_CMUX_CONTAINER` or the first word of local gitignored `config/cmux-container`: `tab` (default) puts each task as an `fm-<id>` tab in the workspace firstmate itself runs in (or a shared `firstmate` workspace when firstmate is outside cmux), mirroring how tmux crewmates join the captain's own session; `workspace` gives each task its own `fm-<id>` workspace and sidebar row.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
-A cmux task additionally records `cmux_workspace_id=`.
+A cmux task additionally records `cmux_workspace_id=`, plus `cmux_surface_id=` for a tab-mode task.
 The `config/backend` file is not inherited by secondmate homes.
 
 ## Gate defaults (.no-mistakes.yaml)
@@ -185,6 +186,7 @@ FM_FORK_OWNER=           # expected GitHub owner for fm-show-dev-setup.sh's capt
 FM_BACKEND=             # optional runtime session-provider backend override for new spawns; tmux (reference), herdr, or cmux (experimental)
 HERDR_SESSION=default  # herdr-only: the named herdr session a herdr-backend spawn/op uses (docs/herdr-backend.md)
 CMUX_SOCKET_PASSWORD=  # cmux-only: socket password when the cmux app's socket control mode is "password" (docs/cmux-backend.md)
+FM_CMUX_CONTAINER=     # cmux-only: task container shape - tab (default; tasks join firstmate's workspace) or workspace (one workspace per task); config/cmux-container is the durable form
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap

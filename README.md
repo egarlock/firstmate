@@ -86,7 +86,7 @@ With the default tmux backend, run it inside tmux for the best experience: launc
 Outside tmux, default-backend crewmates land in a detached `firstmate` session you can attach to.
 When firstmate is running natively inside herdr and no backend override is set, it auto-detects herdr, prints an opt-out notice, and spawns into the experimental herdr backend.
 With experimental herdr, attach to the selected `HERDR_SESSION` to watch the shared `firstmate` workspace and its task tabs.
-When firstmate is running inside a cmux terminal (outside tmux) and no backend override is set, it auto-detects cmux the same way; each task appears as an `fm-<id>` workspace in cmux's sidebar.
+When firstmate is running inside a cmux terminal (outside tmux) and no backend override is set, it auto-detects cmux the same way; each task appears as an `fm-<id>` tab in the workspace firstmate runs in (set local `config/cmux-container` to `workspace` for an `fm-<id>` sidebar workspace per task instead).
 
 ## How It Works
 
