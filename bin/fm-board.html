@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firstmate Board</title>
+<style>
+:root{
+  --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+  --fg:#e6e9ef; --muted:#96a0b5; --accent:#5aa9ff;
+  --suggested:#8b7bff; --queued:#4aa3ff; --flight:#f2b544; --done:#3ecf8e;
+  --blocked:#ff6b6b; --card:#1b1f28;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f4f6fa; --panel:#ffffff; --panel2:#eef1f6; --line:#dce0e8;
+    --fg:#1a1e26; --muted:#5b6474; --accent:#2b6fd6; --card:#ffffff;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+  padding:16px 22px;border-bottom:1px solid var(--line);position:sticky;top:0;
+  background:var(--bg);z-index:5}
+h1{font-size:19px;margin:0;letter-spacing:.2px}
+h1 .anchor{color:var(--accent)}
+.sub{color:var(--muted);font-size:12px}
+.toolbar{margin-left:auto;display:flex;gap:8px;align-items:center}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);
+  background:var(--panel2);color:var(--fg);border-radius:8px;padding:6px 12px}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#0c0e12;border-color:var(--accent);font-weight:600}
+.board{display:flex;gap:16px;padding:20px 22px 60px;align-items:flex-start;
+  overflow-x:auto;min-height:60vh}
+.lane{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  width:300px;min-width:280px;flex:0 0 auto;display:flex;flex-direction:column;
+  max-height:calc(100vh - 140px)}
+.lane-head{display:flex;align-items:center;gap:8px;padding:12px 14px;
+  border-bottom:1px solid var(--line);font-weight:600;font-size:13px}
+.lane-head .swatch{width:9px;height:9px;border-radius:50%}
+.lane-suggested .swatch{background:var(--suggested)}
+.lane-queued .swatch{background:var(--queued)}
+.lane-flight .swatch{background:var(--flight)}
+.lane-done .swatch{background:var(--done)}
+.lane-head .count{margin-left:auto;color:var(--muted);font-weight:500;
+  background:var(--panel2);border-radius:20px;padding:1px 9px;font-size:11px}
+.lane-body{padding:10px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;flex:1}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+  padding:10px 11px;cursor:pointer;transition:border-color .12s,box-shadow .12s}
+.card:hover{border-color:var(--accent)}
+.card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.card.dragging{opacity:.45}
+.card.drag-over{border-color:var(--accent);box-shadow:0 -2px 0 0 var(--accent)}
+.lane-queued .card{cursor:grab}
+.card .title{font-weight:600;font-size:13.5px;line-height:1.35;
+  overflow-wrap:anywhere}
+.card .cid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+  color:var(--muted);margin-top:3px}
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.chip{font-size:10.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+.chip.repo{color:var(--accent)}
+.chip.blocked{color:var(--blocked);border-color:var(--blocked)}
+.chip.link a{color:var(--accent);text-decoration:none}
+.lane-empty{color:var(--muted);font-size:12px;text-align:center;padding:18px 6px;
+  border:1px dashed var(--line);border-radius:10px}
+.add-suggest{margin:2px 10px 12px;display:flex}
+.add-suggest button{width:100%;background:transparent;border-style:dashed;color:var(--muted)}
+/* modal */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;
+  align-items:center;justify-content:center;padding:24px;z-index:20}
+.overlay.open{display:flex}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+  width:min(720px,100%);max-height:86vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.modal-head{display:flex;align-items:flex-start;gap:12px;padding:18px 20px;
+  border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
+.modal-head h2{margin:0;font-size:17px;line-height:1.35;overflow-wrap:anywhere}
+.modal-head .cid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12px;color:var(--muted);margin-top:4px}
+.modal-close{margin-left:auto;border-radius:8px;padding:4px 10px;font-size:18px;line-height:1}
+.modal-body{padding:8px 20px 22px}
+.field{margin-top:16px}
+.field h3{font-size:11px;text-transform:uppercase;letter-spacing:.7px;
+  color:var(--muted);margin:0 0 6px}
+.field .val{white-space:pre-wrap;overflow-wrap:anywhere}
+.field pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:10px 12px;margin:0;white-space:pre-wrap;overflow-wrap:anywhere;
+  font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:280px;overflow:auto}
+.field .missing{color:var(--muted);font-style:italic}
+.field a{color:var(--accent)}
+.linklist{list-style:none;padding:0;margin:0}
+.linklist li{margin:3px 0;overflow-wrap:anywhere}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:10px 16px;box-shadow:0 8px 24px rgba(0,0,0,.4);display:none;z-index:40}
+.toast.show{display:block}
+.toast.err{border-color:var(--blocked)}
+form.suggest label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px}
+form.suggest input,form.suggest select,form.suggest textarea{width:100%;font:inherit;
+  background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:7px 9px;color:var(--fg)}
+form.suggest .row{display:flex;gap:10px}
+form.suggest .row>div{flex:1}
+.hint{color:var(--muted);font-size:12px;margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="anchor">&#9875;</span> Firstmate Board</h1>
+  <span class="sub" id="gen"></span>
+  <div class="toolbar">
+    <button id="refresh" title="Reload from the backlog">Refresh</button>
+  </div>
+</header>
+
+<main class="board" id="board" aria-label="Task board"></main>
+
+<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal" id="modal">
+    <div class="modal-head">
+      <div>
+        <h2 id="modal-title">Task</h2>
+        <div class="cid" id="modal-cid"></div>
+      </div>
+      <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+var LANES = [
+  {key:"suggested", label:"Suggested", cls:"lane-suggested"},
+  {key:"queued",    label:"Todo / Queued", cls:"lane-queued"},
+  {key:"in_flight", label:"In Progress", cls:"lane-flight"},
+  {key:"done",      label:"Completed", cls:"lane-done"}
+];
+
+var boardData = null;
+
+function el(tag, attrs, kids){
+  var node = document.createElement(tag);
+  if(attrs){ for(var k in attrs){
+    if(k === "text"){ node.textContent = attrs[k]; }
+    else if(k === "html"){ node.innerHTML = attrs[k]; }
+    else { node.setAttribute(k, attrs[k]); }
+  }}
+  (kids || []).forEach(function(c){ if(c) node.appendChild(c); });
+  return node;
+}
+
+function toast(msg, isErr){
+  var t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (isErr ? " err" : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(function(){ t.className = "toast"; }, 2800);
+}
+
+function api(path, opts){
+  return fetch(path, opts).then(function(r){
+    return r.json().catch(function(){ return {}; }).then(function(body){
+      if(!r.ok || body.error){ throw new Error(body.error || ("HTTP " + r.status)); }
+      return body;
+    });
+  });
+}
+
+function cardChips(item, lane){
+  var chips = [];
+  if(item.repo){ chips.push(el("span",{class:"chip repo",text:item.repo})); }
+  if(item.kind){ chips.push(el("span",{class:"chip",text:item.kind})); }
+  (item.blocked_by || []).forEach(function(b){
+    chips.push(el("span",{class:"chip blocked",text:"blocked-by " + b}));
+  });
+  if(item.date){ chips.push(el("span",{class:"chip",text:item.date})); }
+  if(item.links && item.links.length){
+    var a = el("a",{href:item.links[0],target:"_blank",rel:"noopener",text:"link"});
+    a.addEventListener("click", function(e){ e.stopPropagation(); });
+    chips.push(el("span",{class:"chip link"},[a]));
+  }
+  if(item.report){ chips.push(el("span",{class:"chip",text:"report"})); }
+  return el("div",{class:"chips"}, chips);
+}
+
+function makeCard(item, lane){
+  var card = el("div",{
+    class:"card", tabindex:"0", role:"button",
+    "data-id":item.id, "aria-label":(item.title || item.id)
+  }, [
+    el("div",{class:"title",text:item.title || item.id}),
+    el("div",{class:"cid",text:item.id}),
+    cardChips(item, lane)
+  ]);
+  var isSuggestion = (lane === "suggested");
+  var open = function(){ openTask(item.id, isSuggestion); };
+  card.addEventListener("click", open);
+  card.addEventListener("keydown", function(e){
+    if(e.key === "Enter" || e.key === " "){ e.preventDefault(); open(); }
+  });
+  if(lane === "queued"){ makeDraggable(card); }
+  return card;
+}
+
+function makeLane(def, items){
+  var body = el("div",{class:"lane-body","data-lane":def.key});
+  if(!items.length){
+    body.appendChild(el("div",{class:"lane-empty",text:"Nothing here"}));
+  } else {
+    items.forEach(function(it){ body.appendChild(makeCard(it, def.key)); });
+  }
+  var head = el("div",{class:"lane-head"},[
+    el("span",{class:"swatch"}),
+    el("span",{text:def.label}),
+    el("span",{class:"count",text:String(items.length)})
+  ]);
+  var lane = el("div",{class:"lane " + def.cls},[head, body]);
+  if(def.key === "suggested"){
+    var add = el("div",{class:"add-suggest"},[
+      el("button",{type:"button",text:"+ New suggestion"})
+    ]);
+    add.querySelector("button").addEventListener("click", openSuggestForm);
+    lane.appendChild(add);
+  }
+  return lane;
+}
+
+function render(){
+  var board = document.getElementById("board");
+  board.innerHTML = "";
+  LANES.forEach(function(def){
+    board.appendChild(makeLane(def, boardData[def.key] || []));
+  });
+  document.getElementById("gen").textContent =
+    "Queued " + (boardData.queued||[]).length +
+    " · In progress " + (boardData.in_flight||[]).length +
+    " · Completed " + (boardData.done||[]).length;
+}
+
+function load(){
+  return api("/api/board").then(function(data){
+    boardData = data; render();
+  }).catch(function(e){ toast("Load failed: " + e.message, true); });
+}
+
+/* ---- drag and drop within the Queued lane ---- */
+var dragId = null;
+function makeDraggable(card){
+  card.setAttribute("draggable","true");
+  card.addEventListener("dragstart", function(e){
+    dragId = card.getAttribute("data-id");
+    card.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", dragId); } catch(_){}
+  });
+  card.addEventListener("dragend", function(){
+    dragId = null;
+    card.classList.remove("dragging");
+    document.querySelectorAll(".card.drag-over").forEach(function(c){
+      c.classList.remove("drag-over");
+    });
+  });
+  card.addEventListener("dragover", function(e){
+    if(dragId === null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    card.classList.add("drag-over");
+  });
+  card.addEventListener("dragleave", function(){ card.classList.remove("drag-over"); });
+  card.addEventListener("drop", function(e){
+    e.preventDefault();
+    card.classList.remove("drag-over");
+    var targetId = card.getAttribute("data-id");
+    if(dragId && targetId && dragId !== targetId){ reorder(dragId, targetId); }
+  });
+}
+
+function reorder(fromId, toId){
+  var ids = (boardData.queued || []).map(function(i){ return i.id; });
+  var from = ids.indexOf(fromId), to = ids.indexOf(toId);
+  if(from < 0 || to < 0) return;
+  ids.splice(from, 1);
+  ids.splice(ids.indexOf(toId) < 0 ? to : ids.indexOf(toId), 0, fromId);
+  // Optimistic reorder of the local model, then persist.
+  var byId = {};
+  (boardData.queued || []).forEach(function(i){ byId[i.id] = i; });
+  boardData.queued = ids.map(function(id){ return byId[id]; });
+  render();
+  api("/api/reorder", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({order: ids})
+  }).then(function(){ toast("Reordered queue"); load(); })
+    .catch(function(e){ toast("Reorder failed: " + e.message, true); load(); });
+}
+
+/* ---- task detail modal ---- */
+function fieldText(label, value){
+  var body;
+  if(value && String(value).trim()){
+    body = el("div",{class:"val",text:value});
+  } else {
+    body = el("div",{class:"missing",text:"none"});
+  }
+  return el("div",{class:"field"},[el("h3",{text:label}), body]);
+}
+function fieldPre(label, value){
+  var body;
+  if(value && String(value).trim()){
+    body = el("pre",{text:value});
+  } else {
+    body = el("div",{class:"missing",text:"not available"});
+  }
+  return el("div",{class:"field"},[el("h3",{text:label}), body]);
+}
+function fieldLinks(label, links, report){
+  var items = [];
+  (links || []).forEach(function(u){
+    items.push(el("li",{},[el("a",{href:u,target:"_blank",rel:"noopener",text:u})]));
+  });
+  if(report){ items.push(el("li",{text:"report: " + report})); }
+  var body = items.length
+    ? el("ul",{class:"linklist"}, items)
+    : el("div",{class:"missing",text:"none"});
+  return el("div",{class:"field"},[el("h3",{text:label}), body]);
+}
+
+var lastFocused = null;
+function openTask(id, isSuggestion){
+  lastFocused = document.activeElement;
+  var body = document.getElementById("modal-body");
+  document.getElementById("modal-title").textContent = "Loading…";
+  document.getElementById("modal-cid").textContent = id;
+  body.innerHTML = "";
+  showOverlay(true);
+  api("/api/task/" + encodeURIComponent(id)).then(function(d){
+    var card = d.card || {};
+    document.getElementById("modal-title").textContent = card.title || id;
+    var meta = d.meta || {};
+    var fields = [];
+    var summary = [];
+    if(card.section){ summary.push("Lane: " + card.section); }
+    if(card.repo){ summary.push("Project: " + card.repo); }
+    if(card.kind){ summary.push("Kind: " + card.kind); }
+    if(d.date){ summary.push("Date: " + d.date); }
+    if((d.blocked_by || []).length){ summary.push("Blocked by: " + d.blocked_by.join(", ")); }
+    if(meta.mode){ summary.push("Mode: " + meta.mode); }
+    fields.push(fieldText("Summary", summary.join("\n")));
+    fields.push(fieldLinks("Links", d.links, d.report_link));
+    fields.push(fieldPre("Current status", d.status));
+    fields.push(fieldPre("Backlog notes", d.backlog_notes));
+    fields.push(fieldPre("Brief", d.brief));
+    fields.push(fieldPre("Plan", d.plan));
+    fields.push(fieldPre("Report", d.report));
+    fields.forEach(function(f){ body.appendChild(f); });
+    if(isSuggestion){ addPromoteButton(id); }
+    if(!d.found){
+      body.insertBefore(el("div",{class:"hint",text:"This task was not found in the backlog or suggestions."}), body.firstChild);
+    }
+    document.getElementById("modal-close").focus();
+  }).catch(function(e){
+    body.appendChild(el("div",{class:"field"},[el("div",{class:"missing",text:"Failed to load: " + e.message})]));
+  });
+}
+
+function showOverlay(open){
+  var ov = document.getElementById("overlay");
+  ov.className = open ? "overlay open" : "overlay";
+  if(!open && lastFocused && lastFocused.focus){ lastFocused.focus(); }
+}
+
+/* ---- suggestion form (reuses the modal shell) ---- */
+function openSuggestForm(){
+  lastFocused = document.activeElement;
+  document.getElementById("modal-title").textContent = "New suggestion";
+  document.getElementById("modal-cid").textContent = "Suggested lane";
+  var body = document.getElementById("modal-body");
+  body.innerHTML = "";
+  var form = el("form",{class:"suggest"});
+  form.innerHTML =
+    '<label for="s-title">Title</label>' +
+    '<input id="s-title" required maxlength="200" placeholder="What should be done?">' +
+    '<div class="row">' +
+      '<div><label for="s-project">Project</label>' +
+      '<input id="s-project" placeholder="repo (optional)"></div>' +
+      '<div><label for="s-kind">Kind</label>' +
+      '<select id="s-kind"><option value="ship">ship</option><option value="scout">scout</option></select></div>' +
+    '</div>' +
+    '<label for="s-note">Note</label>' +
+    '<textarea id="s-note" rows="3" placeholder="optional context"></textarea>' +
+    '<div class="hint">Suggestions live locally until you promote one to Todo.</div>';
+  var actions = el("div",{class:"field"},[
+    el("button",{type:"submit",class:"primary",text:"Add suggestion"})
+  ]);
+  form.appendChild(actions);
+  form.addEventListener("submit", function(e){
+    e.preventDefault();
+    api("/api/suggest", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        title: document.getElementById("s-title").value,
+        project: document.getElementById("s-project").value,
+        kind: document.getElementById("s-kind").value,
+        note: document.getElementById("s-note").value
+      })
+    }).then(function(){ showOverlay(false); toast("Suggestion added"); load(); })
+      .catch(function(err){ toast("Add failed: " + err.message, true); });
+  });
+  body.appendChild(form);
+  showOverlay(true);
+  document.getElementById("s-title").focus();
+}
+
+/* ---- promote button lives in the modal for suggestions ---- */
+function addPromoteButton(id){
+  var body = document.getElementById("modal-body");
+  var btn = el("button",{class:"primary",type:"button",text:"Promote to Todo"});
+  btn.addEventListener("click", function(){
+    api("/api/promote", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({id:id})
+    }).then(function(){ showOverlay(false); toast("Promoted to Todo"); load(); })
+      .catch(function(e){ toast("Promote failed: " + e.message, true); });
+  });
+  body.insertBefore(el("div",{class:"field"},[btn]), body.firstChild);
+}
+
+/* ---- global wiring ---- */
+document.getElementById("refresh").addEventListener("click", load);
+document.getElementById("modal-close").addEventListener("click", function(){ showOverlay(false); });
+document.getElementById("overlay").addEventListener("click", function(e){
+  if(e.target.id === "overlay"){ showOverlay(false); }
+});
+document.addEventListener("keydown", function(e){
+  if(e.key === "Escape"){ showOverlay(false); }
+});
+
+load();
+</script>
+</body>
+</html>

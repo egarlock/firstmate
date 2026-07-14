@@ -47,6 +47,7 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.
 - **At-a-glance fleet dashboard** - `bin/fm-dashboard.sh` renders a read-only HTML view of everything in flight (current state per task, grouped by project, with parked/blocked/needs-decision/PR-ready work surfaced at the top) and opens it via lavish-axi, so you see the whole fleet at once instead of peeking windows one by one.
+- **Local task board** - `bin/fm-board.sh` serves a rudimentary Trello-like web board (Suggested / Todo / In Progress / Completed) over the same `data/backlog.md`, so you can read task context in a modal, drag-and-drop to reprioritize the queue, and jot suggestions; it binds to `127.0.0.1` only and never exposes a write API to the network. See [docs/board.md](docs/board.md).
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind your merge approval.
 - **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected); kill the session anytime and the next one reconciles and carries on.
@@ -155,6 +156,7 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - experimental herdr backend verification notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - experimental cmux backend verification notes and known gaps.
+- [docs/board.md](docs/board.md) - the local task board web UI: launch, lanes, modal, drag-and-drop, and suggestions.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
