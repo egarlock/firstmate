@@ -632,7 +632,11 @@ if [ "$KIND" != secondmate ]; then
   spawn_send_text_line "$T" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
+  # A cold pool must first materialize a fresh worktree; on a large git-LFS monorepo
+  # (e.g. Teamspace-iOS) that smudge/checkout legitimately takes minutes, so the wait
+  # defaults to 300s and is overridable via FM_SPAWN_WORKTREE_TIMEOUT (seconds).
+  WORKTREE_TIMEOUT="${FM_SPAWN_WORKTREE_TIMEOUT:-300}"
+  for _ in $(seq 1 "$WORKTREE_TIMEOUT"); do
     p=$(spawn_current_path "$T" || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
@@ -641,7 +645,7 @@ if [ "$KIND" != secondmate ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${WORKTREE_TIMEOUT}s; inspect window $T" >&2
     exit 1
   fi
 

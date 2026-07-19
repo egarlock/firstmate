@@ -50,7 +50,7 @@
 
 # Minimum verified cmux version (see docs/cmux-backend.md). `cmux version`
 # works without the socket, so the gate never needs auth.
-FM_BACKEND_CMUX_MIN_VERSION="0.64.17"
+FM_BACKEND_CMUX_MIN_VERSION="0.63.1"
 FM_BACKEND_CMUX_SHARED_WORKSPACE="firstmate"
 
 # Every cmux invocation goes through fm_backend_cmux_cli so legacy-alias
@@ -333,6 +333,21 @@ fm_backend_cmux_surface_tty() {  # (uses parsed FM_BACKEND_CMUX_WS/_SURFACE)
   fi
 }
 
+# fm_backend_cmux_screen_cwd: the task terminal's live working directory read
+# from its on-screen shell block-header prompt, or empty when none is present.
+# This is the tty-free ground truth for cwd: cmux renders every command block
+# with a header line "| [<tag>] <ABSOLUTE_CWD> @ <host> (<user>)" and updates it
+# on each `cd`, so the LAST such header is the current directory. Needed because
+# some cmux builds report `tty: null` for every surface (verified on cmux
+# 0.64.17), which starves the tty+ps+lsof path below into a false timeout during
+# fm-spawn.sh worktree discovery. read-screen returns unwrapped logical lines,
+# so an absolute path is never split. Only absolute paths are accepted.
+fm_backend_cmux_screen_cwd() {  # (uses parsed FM_BACKEND_CMUX_WS/_SURFACE)
+  # shellcheck disable=SC2046
+  fm_backend_cmux_cli read-screen $(fm_backend_cmux_target_flags) --lines 200 2>/dev/null \
+    | sed -nE 's/^\| \[[^]]*\] (\/.+) @ [^ ]+ \([^)]*\) *$/\1/p' | tail -1
+}
+
 # fm_backend_cmux_current_path: the task terminal's live working directory,
 # or empty on any error. Mirrors tmux's pane_current_path poll used for
 # worktree-path discovery after `treehouse get`.
@@ -344,14 +359,19 @@ fm_backend_cmux_surface_tty() {  # (uses parsed FM_BACKEND_CMUX_WS/_SURFACE)
 # failed live in the first E2E attempt). Ground truth instead: the surface's
 # tty (from `cmux tree`) plus the OS - the foreground process group on that
 # tty read via `ps`, its cwd via `lsof` - which is exactly the OS-level
-# semantics tmux's #{pane_current_path} provides. The JSON field remains a
-# fallback ONLY in workspace mode, for a terminal that has not started yet;
-# in tab mode there is no per-surface cwd field at all and the container
-# workspace's directory would be the WRONG answer (it could satisfy the
-# discovery poll with a non-worktree path), so tab mode is tty-or-empty.
+# semantics tmux's #{pane_current_path} provides.
+#
+# tty-null fallback: some cmux builds report `tty: null` for every surface
+# (verified on cmux 0.64.17, build 97), which makes the tty+ps+lsof path yield
+# nothing. In that case fall back to the on-screen block-header cwd
+# (fm_backend_cmux_screen_cwd), which is tty-free and correct in both tab and
+# workspace mode. The workspace JSON `current_directory` field remains a last
+# resort ONLY in workspace mode for a terminal that has not started yet; in tab
+# mode it would be the WRONG answer (the container workspace's directory), so it
+# is never used there.
 fm_backend_cmux_current_path() {  # <target>
   fm_backend_cmux_parse_target "$1" || return 0
-  local tty pid cwd list
+  local tty pid cwd screen list
   tty=$(fm_backend_cmux_surface_tty)
   if [ -n "$tty" ]; then
     pid=$(ps -t "$tty" -o pid=,stat= 2>/dev/null | awk '$2 ~ /\+/ { p=$1 } END { if (p) print p }')
@@ -362,6 +382,11 @@ fm_backend_cmux_current_path() {  # <target>
         return 0
       fi
     fi
+  fi
+  screen=$(fm_backend_cmux_screen_cwd)
+  if [ -n "$screen" ]; then
+    printf '%s' "$screen"
+    return 0
   fi
   [ -z "$FM_BACKEND_CMUX_SURFACE" ] || return 0
   list=$(fm_backend_cmux_cli list-workspaces --json --id-format uuids 2>/dev/null) || return 0
