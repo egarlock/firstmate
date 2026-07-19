@@ -5,6 +5,7 @@ It is the cmux equivalent of `docs/herdr-backend.md`, following the same "empiri
 
 Cmux ([cmux.com](https://cmux.com), [manaflow-ai/cmux](https://github.com/manaflow-ai/cmux)) is a native macOS terminal built for running AI coding agents in parallel, controlled through a Unix-socket CLI (`cmux`).
 Verified against the real installed binary: cmux 0.64.17 (build 97), macOS aarch64.
+Caveat: `FM_BACKEND_CMUX_MIN_VERSION` was later lowered to 0.63.1 without re-verification on that build; in particular the screen-cwd fallback (`fm_backend_cmux_screen_cwd`) depends on the block-header screen format only observed on 0.64.17. Re-verify or re-raise the pin before relying on 0.63.x.
 
 ## Status: experimental
 
@@ -64,7 +65,7 @@ Cmux tasks additionally record:
 
 | Operation | Verified cmux call | What was verified |
 |---|---|---|
-| Version gate | `cmux version` -> `cmux 0.64.17 (97) [9ed29d81a]` | Socket-free (works while auth is refused); minimum pinned in `FM_BACKEND_CMUX_MIN_VERSION`. |
+| Version gate | `cmux version` -> `cmux 0.64.17 (97) [9ed29d81a]` | Socket-free (works while auth is refused); minimum pinned in `FM_BACKEND_CMUX_MIN_VERSION` (currently 0.63.1, LOWER than the verified build - see caveat below). |
 | Socket gate | `cmux ping` -> `PONG` | One authenticated round-trip; an auth refusal prints `auth_required`, which the adapter maps to the operator fix. |
 | Create task workspace (workspace mode) | `cmux new-workspace --name fm-<id> --cwd <proj> --focus false` | Prints a TEXT acknowledgment `OK workspace:<n>` carrying only the unstable index-based short ref; `--json` is IGNORED on this command in 0.64.17. The adapter therefore resolves the stable UUID with an immediate `custom_title` lookup, made unambiguous by its own duplicate check (cmux does not enforce workspace-name uniqueness). `--focus false` verified not to steal the captain's focus. |
 | Create task tab (tab mode) | `cmux new-surface --type terminal --workspace <ws> --focus false` | Also acknowledges with short refs only (`OK surface:<n> pane:<m> workspace:<k>`), so the new surface's UUID is resolved by diffing `list-pane-surfaces --json --id-format uuids` around the create. A new tab starts in the container workspace's directory, so the adapter `cd`s it into the task's project before `treehouse get`. |

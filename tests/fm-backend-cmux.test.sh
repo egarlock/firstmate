@@ -72,7 +72,7 @@ test_version_check_accepts_current_version() {
   PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" FM_CMUX_SCRIPT_VERSION=1 \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_version_check' "$ROOT"
   status=$?
-  expect_code 0 "$status" "version_check should accept 0.64.17 (== the verified minimum)"
+  expect_code 0 "$status" "version_check should accept 0.64.17 (>= the pinned minimum, the verified build)"
   assert_contains "$(cat "$log")" $'\x1f''version' "version_check did not call cmux version"
   pass "fm_backend_cmux_version_check: accepts the verified minimum version"
 }
@@ -422,11 +422,13 @@ test_kill_is_best_effort() {
 test_current_path_falls_back_to_workspace_list() {
   local dir log resp fb out
   # Call 1 is the tty probe (`tree`); an empty response means the terminal
-  # has not started (no tty), so current_path falls back to the workspace
-  # list's current_directory. The tty+ps+lsof fast path is real-binary-only
-  # behavior, covered by the live E2E pass in docs/cmux-backend.md.
+  # has not started (no tty). Call 2 is the screen-cwd probe (`read-screen`);
+  # an empty response means no block-header cwd either, so current_path falls
+  # back to the workspace list's current_directory (call 3). The tty+ps+lsof
+  # fast path is real-binary-only behavior, covered by the live E2E pass in
+  # docs/cmux-backend.md.
   dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '%s\n' "$WS_LIST_ONE" > "$resp/2.out"
+  printf '%s\n' "$WS_LIST_ONE" > "$resp/3.out"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_current_path cmux:11111111-aaaa-bbbb-cccc-000000000001' "$ROOT" )
@@ -435,6 +437,21 @@ test_current_path_falls_back_to_workspace_list() {
     "current_path did not probe the surface tty first"
   assert_contains "$(cat "$log")" $'\x1f''list-workspaces'$'\x1f''--json' "current_path did not fall back to the workspace list"
   pass "fm_backend_cmux_current_path: probes the surface tty, falls back to the workspace list cwd"
+}
+
+test_current_path_uses_screen_block_header_cwd() {
+  local dir log resp fb out
+  # Call 1 (`tree`) reports no tty; call 2 (`read-screen`) returns a shell
+  # block header, whose absolute path is the tty-free ground truth for cwd.
+  # The workspace-list fallback must NOT be consulted when the screen answers.
+  dir="$TMP_ROOT/cwd-screen"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '| [arm] /tmp/screen-worktree @ host (user) \n| => \n' > "$resp/2.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_current_path cmux:11111111-aaaa-bbbb-cccc-000000000001' "$ROOT" )
+  [ "$out" = "/tmp/screen-worktree" ] || fail "current_path should read the block-header cwd from the screen, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''read-screen'$'\x1f' "current_path did not probe the screen for a block-header cwd"
+  pass "fm_backend_cmux_current_path: reads the on-screen block-header cwd when the tty probe is empty"
 }
 
 # --- busy_state ----------------------------------------------------------------
@@ -600,6 +617,7 @@ test_send_key_normalizes_and_targets_workspace
 test_send_text_line_composes_send_and_enter
 test_kill_is_best_effort
 test_current_path_falls_back_to_workspace_list
+test_current_path_uses_screen_block_header_cwd
 test_busy_state_maps_agent_status
 test_busy_state_unknown_without_field
 test_send_text_submit_detects_landed_send
