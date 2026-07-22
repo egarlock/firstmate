@@ -195,29 +195,54 @@ test_create_task_refuses_duplicate_name() {
   pass "fm_backend_cmux_create_task (workspace mode): refuses a duplicate workspace name"
 }
 
-test_focused_surface_tolerates_empty_or_unavailable_identify() {
+test_focus_context_tolerates_empty_or_unavailable_identify() {
   local dir log resp fb out status
   dir="$TMP_ROOT/focus-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"focused":{}}\n' > "$resp/1.out"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_focused_surface' "$ROOT" )
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_focus_context' "$ROOT" )
   status=$?
-  expect_code 0 "$status" "focused_surface should tolerate an empty focused object"
-  [ -z "$out" ] || fail "focused_surface should return empty when no surface is focused, got '$out'"
+  expect_code 0 "$status" "focus_context should tolerate an empty focused object"
+  [ -z "$out" ] || fail "focus_context should return empty when no surface is focused, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''identify'$'\x1f''--no-caller' \
-    "focused_surface did not query the globally focused cmux surface"
+    "focus_context did not query the globally focused cmux context"
 
   dir="$TMP_ROOT/focus-unavailable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf 'socket unavailable\n' > "$resp/1.out"
   printf '1\n' > "$resp/1.exit"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_focused_surface' "$ROOT" )
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_focus_context' "$ROOT" )
   status=$?
-  expect_code 0 "$status" "focused_surface should tolerate an unavailable identify call"
-  [ -z "$out" ] || fail "focused_surface should return empty when identify is unavailable, got '$out'"
-  pass "fm_backend_cmux_focused_surface: empty or unavailable focus data is a safe no-op"
+  expect_code 0 "$status" "focus_context should tolerate an unavailable identify call"
+  [ -z "$out" ] || fail "focus_context should return empty when identify is unavailable, got '$out'"
+  pass "fm_backend_cmux_focus_context: empty or unavailable focus data is a safe no-op"
+}
+
+test_focus_context_captures_full_context() {
+  local dir log resp fb out
+  # Full focused context: window, workspace, pane, and surface refs, joined in
+  # that fixed order so restoration can reactivate the whole prior UI, not just
+  # the surface (which alone does not bring back its workspace/window).
+  dir="$TMP_ROOT/focus-full"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"focused":{"window_ref":"window:1","workspace_ref":"workspace:2","pane_ref":"pane:3","surface_ref":"surface:44"}}\n' > "$resp/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_focus_context' "$ROOT" )
+  [ "$out" = "window:1 workspace:2 pane:3 surface:44" ] \
+    || fail "focus_context should capture 'window workspace pane surface', got '$out'"
+
+  # A missing window or pane ref is placeholdered with '-' so the four
+  # positions stay fixed and the surface ref is always positional field 4.
+  dir="$TMP_ROOT/focus-partial"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"focused":{"workspace_ref":"workspace:2","surface_ref":"surface:44"}}\n' > "$resp/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_focus_context' "$ROOT" )
+  [ "$out" = "- workspace:2 - surface:44" ] \
+    || fail "focus_context should placeholder a missing window/pane with '-', got '$out'"
+  pass "fm_backend_cmux_focus_context: captures the full window/workspace/pane/surface context"
 }
 
 test_create_task_tab_mode_full_flow() {
@@ -225,20 +250,23 @@ test_create_task_tab_mode_full_flow() {
   dir="$TMP_ROOT/create-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: duplicate check by tab title -> no match
   printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/1.out"
-  # 2: focused surface before create
-  printf '{"focused":{"surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  # 2: focused context before create -> full window/workspace/pane/surface
+  printf '{"focused":{"window_ref":"window:1","workspace_ref":"workspace:2","pane_ref":"pane:3","surface_ref":"surface:44"}}\n' > "$resp/2.out"
   # 3: surface ids BEFORE create
   printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/3.out"
   # 4: new-surface -> text ack with short refs only
   printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
   # 5: surface ids AFTER create -> diff yields the new uuid
   printf '{"surfaces":[{"id":"sf-old","title":"Terminal"},{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
-  # 6: restore prior focus; 7: rename-tab
-  printf 'OK action=rename tab=tab:9 workspace=workspace:2\n' > "$resp/7.out"
-  # 8: wait_ready wake enter; 9/10: stable screen reads
-  printf 'ready prompt\n' > "$resp/9.out"
-  printf 'ready prompt\n' > "$resp/10.out"
-  # 11: cd send; 12: cd enter
+  # 6: focus-window (best-effort) ; 7: select-workspace ; 8: focus-pane (best-effort)
+  # 9: surface_index lookup of the prior surface -> its OWN current index
+  printf '{"surfaces":[{"id":"sf-old","ref":"surface:44","index":0},{"id":"sf-new","ref":"surface:9","index":1}]}\n' > "$resp/9.out"
+  # 10: reorder-surface (order-preserving focus) ; 11: rename-tab
+  printf 'OK action=rename tab=tab:9 workspace=workspace:2\n' > "$resp/11.out"
+  # 12: wait_ready wake enter; 13/14: stable screen reads
+  printf 'ready prompt\n' > "$resp/13.out"
+  printf 'ready prompt\n' > "$resp/14.out"
+  # 15: cd send; 16: cd enter
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
     FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
@@ -246,60 +274,270 @@ test_create_task_tab_mode_full_flow() {
   [ "$out" = "ws-77 sf-new" ] || fail "tab-mode create_task should echo '<ws> <surface>', got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''new-surface'$'\x1f''--type'$'\x1f''terminal'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--focus'$'\x1f''true' \
     "create_task did not create the tab focused so its renderer initializes"
-  assert_contains "$(cat "$log")" $'\x1f''move-surface'$'\x1f''--surface'$'\x1f''surface:44'$'\x1f''--focus'$'\x1f''true' \
-    "create_task did not restore the previously focused surface"
+  assert_contains "$(cat "$log")" $'\x1f''select-workspace'$'\x1f''--workspace'$'\x1f''workspace:2'$'\x1f''--window'$'\x1f''window:1' \
+    "create_task did not reactivate the previously focused workspace/window"
+  assert_contains "$(cat "$log")" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:44'$'\x1f''--workspace'$'\x1f''workspace:2'$'\x1f''--window'$'\x1f''window:1'$'\x1f''--index'$'\x1f''0'$'\x1f''--focus'$'\x1f''true' \
+    "create_task did not restore focus order-preservingly (reorder at the prior surface's own index)"
+  assert_not_contains "$(cat "$log")" $'\x1f''move-surface' \
+    "create_task must NOT use the reordering (destination-less) move-surface to restore focus"
   assert_contains "$(cat "$log")" $'\x1f''rename-tab'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''fm-newtab' \
     "create_task did not rename the new tab to the task label"
   assert_contains "$(cat "$log")" $'\x1f''send'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''cd "/tmp/proj"' \
     "create_task did not cd the new tab into the project"
-  restore_line=$(grep -nF $'\x1f''move-surface'$'\x1f''--surface'$'\x1f''surface:44' "$log" | head -1 | cut -d: -f1)
+  restore_line=$(grep -nF $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:44' "$log" | head -1 | cut -d: -f1)
   rename_line=$(grep -nF $'\x1f''rename-tab' "$log" | head -1 | cut -d: -f1)
   ready_line=$(grep -nF $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''enter' "$log" | head -1 | cut -d: -f1)
   cwd_line=$(grep -nF $'\x1f''send'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''cd "/tmp/proj"' "$log" | head -1 | cut -d: -f1)
-  [ "$restore_line" -lt "$rename_line" ] && [ "$restore_line" -lt "$ready_line" ] && [ "$restore_line" -lt "$cwd_line" ] \
-    || fail "create_task must restore focus before rename, readiness, and cwd setup"
-  pass "fm_backend_cmux_create_task (tab mode): creates focused, restores prior focus, then renames and initializes"
+  if [ "$restore_line" -lt "$rename_line" ] && [ "$restore_line" -lt "$ready_line" ] && [ "$restore_line" -lt "$cwd_line" ]; then
+    :
+  else
+    fail "create_task must restore focus before rename, readiness, and cwd setup"
+  fi
+  pass "fm_backend_cmux_create_task (tab mode): creates focused, restores prior context order-preservingly, then renames and initializes"
 }
 
-test_create_task_tab_mode_skips_restore_without_focused_surface() {
+test_create_task_tab_mode_cross_window_restore() {
   local dir log resp fb out
+  # A task container in a different window/workspace than the caller's focus:
+  # every restore command must thread the captured --window so the workspace,
+  # pane, and surface refs resolve in the right window.
+  dir="$TMP_ROOT/create-tab-xwin"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[]}\n' > "$resp/1.out"
+  printf '{"focused":{"window_ref":"window:3","workspace_ref":"workspace:5","pane_ref":"pane:7","surface_ref":"surface:99"}}\n' > "$resp/2.out"
+  printf '{"surfaces":[]}\n' > "$resp/3.out"
+  printf 'OK surface:12 pane:4 workspace:8\n' > "$resp/4.out"
+  printf '{"surfaces":[{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
+  # 6 focus-window, 7 select-workspace, 8 focus-pane, 9 surface_index, 10 reorder
+  printf '{"surfaces":[{"id":"sf-prior","ref":"surface:99","index":2}]}\n' > "$resp/9.out"
+  printf 'ready\n' > "$resp/13.out"
+  printf 'ready\n' > "$resp/14.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-8 fm-xwin /tmp/proj' "$ROOT" )
+  [ "$out" = "ws-8 sf-new" ] || fail "cross-window create_task should still echo '<ws> <surface>', got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''focus-window'$'\x1f''--window'$'\x1f''window:3' \
+    "cross-window restore did not bring the prior window to front"
+  assert_contains "$(cat "$log")" $'\x1f''select-workspace'$'\x1f''--workspace'$'\x1f''workspace:5'$'\x1f''--window'$'\x1f''window:3' \
+    "cross-window restore did not reactivate the prior workspace in its window"
+  assert_contains "$(cat "$log")" $'\x1f''focus-pane'$'\x1f''--pane'$'\x1f''pane:7'$'\x1f''--workspace'$'\x1f''workspace:5'$'\x1f''--window'$'\x1f''window:3' \
+    "cross-window restore did not refocus the prior pane in its window"
+  assert_contains "$(cat "$log")" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:99'$'\x1f''--workspace'$'\x1f''workspace:5'$'\x1f''--window'$'\x1f''window:3'$'\x1f''--index'$'\x1f''2'$'\x1f''--focus'$'\x1f''true' \
+    "cross-window restore did not order-preservingly refocus the prior surface in its window"
+  pass "fm_backend_cmux_create_task (tab mode): restores the full context across a different window/workspace"
+}
+
+test_create_task_tab_mode_preserves_pre_existing_order() {
+  local dir log resp fb out
+  # Order preservation: restoration re-places the prior surface at its OWN
+  # current index (a no-op move that only changes focus) and never appends via
+  # a destination-less move-surface; and on the success path NO pre-existing
+  # surface is closed, moved, reordered, or renamed. The only reorder targets
+  # the prior surface; the only rename targets the NEW surface.
+  dir="$TMP_ROOT/create-tab-order"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[{"id":"sf-a","title":"A"},{"id":"sf-b","title":"B"}]}\n' > "$resp/1.out"
+  printf '{"focused":{"window_ref":"window:1","workspace_ref":"workspace:2","pane_ref":"pane:3","surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  printf '{"surfaces":[{"id":"sf-a","title":"A"},{"id":"sf-b","title":"B"}]}\n' > "$resp/3.out"
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
+  printf '{"surfaces":[{"id":"sf-a","title":"A"},{"id":"sf-b","title":"B"},{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
+  printf '{"surfaces":[{"id":"sf-b","ref":"surface:44","index":3}]}\n' > "$resp/9.out"
+  printf 'ready\n' > "$resp/13.out"
+  printf 'ready\n' > "$resp/14.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-order /tmp/proj' "$ROOT" )
+  [ "$out" = "ws-77 sf-new" ] || fail "order-preservation flow should succeed, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:44'$'\x1f''--workspace'$'\x1f''workspace:2'$'\x1f''--window'$'\x1f''window:1'$'\x1f''--index'$'\x1f''3'$'\x1f''--focus'$'\x1f''true' \
+    "restore must reorder the prior surface at its own current index (3), not append it"
+  assert_not_contains "$(cat "$log")" $'\x1f''move-surface' \
+    "restore must never use a destination-less move-surface (it appends/reorders the tab)"
+  assert_not_contains "$(cat "$log")" $'\x1f''close-surface' \
+    "success path must not close any surface"
+  # The sole rename targets the new surface, never a pre-existing one.
+  assert_not_contains "$(cat "$log")" $'\x1f''rename-tab'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-a' \
+    "must never rename a pre-existing surface"
+  assert_not_contains "$(cat "$log")" $'\x1f''rename-tab'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-b' \
+    "must never rename a pre-existing surface"
+  pass "fm_backend_cmux_create_task (tab mode): preserves every pre-existing surface's order and leaves them untouched"
+}
+
+test_create_task_tab_mode_skips_restore_with_empty_focus() {
+  local dir log resp fb out
+  # Empty focus identity: cmux reports no focused surface, so there is nothing
+  # to restore. Creation still succeeds and no restore command is issued.
   dir="$TMP_ROOT/create-tab-no-focus"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"surfaces":[]}\n' > "$resp/1.out"
   printf '{"focused":{}}\n' > "$resp/2.out"
   printf '{"surfaces":[]}\n' > "$resp/3.out"
   printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
   printf '{"surfaces":[{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
-  printf 'OK action=rename tab=tab:9 workspace=workspace:2\n' > "$resp/6.out"
+  # 6 rename-tab, 7 wait_ready enter, 8/9 reads, 10 cd, 11 enter
+  printf 'ready\n' > "$resp/8.out"
+  printf 'ready\n' > "$resp/9.out"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
-    FM_CMUX_READY_ATTEMPTS=1 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
+    FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-no-focus /tmp/proj' "$ROOT" )
   [ "$out" = "ws-77 sf-new" ] || fail "tab-mode create_task should succeed without a reported focused surface, got '$out'"
   assert_not_contains "$(cat "$log")" $'\x1f''move-surface' \
+    "create_task should issue no move-surface when identify reports no focused surface"
+  assert_not_contains "$(cat "$log")" $'\x1f''select-workspace' \
+    "create_task should skip workspace reactivation when identify reports no focused surface"
+  assert_not_contains "$(cat "$log")" $'\x1f''reorder-surface' \
     "create_task should skip focus restoration when identify reports no focused surface"
   pass "fm_backend_cmux_create_task (tab mode): missing focused-surface data safely skips restoration"
 }
 
-test_create_task_tab_mode_surfaces_restore_failure() {
+test_create_task_tab_mode_restore_failure_cleans_up_only_new_surface() {
   local dir log resp fb out status
+  # Restoration failure cleanup: when the prior workspace cannot be
+  # reactivated, the create fails, closes ONLY the just-created surface (no
+  # orphan terminal), and never renames or touches a pre-existing surface.
   dir="$TMP_ROOT/create-tab-restore-fails"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"surfaces":[]}\n' > "$resp/1.out"
-  printf '{"focused":{"surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  printf '{"focused":{"window_ref":"window:1","workspace_ref":"workspace:2","pane_ref":"pane:3","surface_ref":"surface:44"}}\n' > "$resp/2.out"
   printf '{"surfaces":[]}\n' > "$resp/3.out"
   printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
   printf '{"surfaces":[{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
-  printf 'not_found\n' > "$resp/6.out"
-  printf '1\n' > "$resp/6.exit"
+  # 6 focus-window (best-effort, ok) ; 7 select-workspace -> FAIL
+  printf 'not_found\n' > "$resp/7.out"
+  printf '1\n' > "$resp/7.exit"
+  # 8 close-surface cleanup
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-restore-fails /tmp/proj' "$ROOT" 2>&1 )
   status=$?
-  [ "$status" -ne 0 ] || fail "tab-mode create_task should fail when prior focus cannot be restored"
-  assert_contains "$out" "could not restore previously focused surface surface:44" \
-    "create_task did not surface the focus restoration failure"
+  [ "$status" -ne 0 ] || fail "tab-mode create_task should fail when the prior workspace cannot be reactivated"
+  assert_contains "$out" "could not reactivate the previously focused workspace workspace:2" \
+    "create_task did not surface the workspace-reactivation failure"
+  assert_contains "$(cat "$log")" $'\x1f''close-surface'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new' \
+    "create_task did not close ONLY the just-created surface after restore failed"
   assert_not_contains "$(cat "$log")" $'\x1f''rename-tab' \
     "create_task continued after focus restoration failed"
-  pass "fm_backend_cmux_create_task (tab mode): focus restoration failure is explicit and stops setup"
+  pass "fm_backend_cmux_create_task (tab mode): restore failure closes only the new surface and stops"
+}
+
+test_create_task_tab_mode_restore_missing_prior_surface_cleans_up() {
+  local dir log resp fb out status
+  # Restoration failure when the previously focused surface has since vanished:
+  # its index cannot be resolved, so restoration fails explicitly and only the
+  # new surface is closed.
+  dir="$TMP_ROOT/create-tab-prior-gone"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[]}\n' > "$resp/1.out"
+  printf '{"focused":{"window_ref":"window:1","workspace_ref":"workspace:2","pane_ref":"pane:3","surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  printf '{"surfaces":[]}\n' > "$resp/3.out"
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
+  printf '{"surfaces":[{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
+  # 6 focus-window ok, 7 select-workspace ok, 8 focus-pane ok
+  # 9 surface_index -> prior surface:44 absent -> empty index
+  printf '{"surfaces":[{"id":"sf-new","ref":"surface:9","index":0}]}\n' > "$resp/9.out"
+  # 10 close-surface cleanup
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-prior-gone /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "tab-mode create_task should fail when the prior surface is gone"
+  assert_contains "$out" "no longer present to restore" \
+    "create_task did not surface the missing-prior-surface failure"
+  assert_contains "$(cat "$log")" $'\x1f''close-surface'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new' \
+    "create_task did not close ONLY the just-created surface when the prior surface was gone"
+  assert_not_contains "$(cat "$log")" $'\x1f''reorder-surface' \
+    "create_task should not reorder when the prior surface index cannot be resolved"
+  pass "fm_backend_cmux_create_task (tab mode): a vanished prior surface fails restoration and cleans up the new surface"
+}
+
+test_create_task_tab_mode_cwd_failure_cleans_up_exact_surface() {
+  local dir log resp fb out status close_line
+  # Exact-surface cleanup on a post-restore failure: focus is restored fine but
+  # the cwd setup fails; the new surface (and only it) is closed so no orphan
+  # terminal remains, and the pre-existing context is left as restored.
+  dir="$TMP_ROOT/create-tab-cwd-fails"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[]}\n' > "$resp/1.out"
+  printf '{"focused":{"window_ref":"window:1","workspace_ref":"workspace:2","pane_ref":"pane:3","surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  printf '{"surfaces":[]}\n' > "$resp/3.out"
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
+  printf '{"surfaces":[{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
+  # 6 focus-window, 7 select-workspace, 8 focus-pane
+  printf '{"surfaces":[{"id":"sf-old","ref":"surface:44","index":0}]}\n' > "$resp/9.out"
+  # 10 reorder ok, 11 rename ok, 12 wait_ready enter, 13/14 reads
+  printf 'ready\n' > "$resp/13.out"
+  printf 'ready\n' > "$resp/14.out"
+  # 15 send (cd) -> FAIL
+  printf 'send failed\n' > "$resp/15.out"
+  printf '1\n' > "$resp/15.exit"
+  # 16 close-surface cleanup
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-cwd-fails /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "tab-mode create_task should fail when the cwd setup fails"
+  [ "$out" != "ws-77 sf-new" ] || fail "create_task must not report success when the cwd setup fails"
+  assert_contains "$(cat "$log")" $'\x1f''close-surface'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new' \
+    "create_task did not close ONLY the just-created surface after the cwd setup failed"
+  # Cleanup targets exactly the new surface; the prior surface is never closed.
+  assert_not_contains "$(cat "$log")" $'\x1f''close-surface'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-old' \
+    "create_task must never close a pre-existing surface during cleanup"
+  close_line=$(grep -cF $'\x1f''close-surface' "$log")
+  [ "$close_line" -eq 1 ] || fail "cleanup must close exactly one surface, closed $close_line"
+  pass "fm_backend_cmux_create_task (tab mode): a post-restore failure closes exactly the new surface"
+}
+
+test_create_task_tab_mode_unresolvable_uuid_touches_nothing() {
+  local dir log resp fb out status
+  # Failure propagation with no safe cleanup target: the new surface's UUID
+  # cannot be resolved by diff, so restoration never runs and NO surface is
+  # closed (closing blind could hit a pre-existing tab).
+  dir="$TMP_ROOT/create-tab-noresolve"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/1.out"
+  printf '{"focused":{"window_ref":"window:1","workspace_ref":"workspace:2","pane_ref":"pane:3","surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/3.out"
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
+  # AFTER == BEFORE -> diff yields no new uuid
+  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/5.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-noresolve /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "tab-mode create_task should fail when the new surface UUID cannot be resolved"
+  assert_contains "$out" "could not resolve its surface UUID" \
+    "create_task did not surface the unresolved-UUID failure"
+  assert_not_contains "$(cat "$log")" $'\x1f''close-surface' \
+    "create_task must not blind-close a surface when it cannot resolve the new UUID"
+  assert_not_contains "$(cat "$log")" $'\x1f''select-workspace' \
+    "create_task must not run restoration when the new UUID is unresolved"
+  pass "fm_backend_cmux_create_task (tab mode): an unresolvable new UUID fails without closing any surface"
+}
+
+test_create_task_tab_mode_captures_context_before_create() {
+  local dir log resp fb out identify_line create_line restore_line
+  # Setup ordering: the prior context must be captured BEFORE the new surface
+  # is created (creating focused shifts focus), and restoration must run AFTER
+  # the create but before rename/cwd (covered by the full-flow ordering check).
+  dir="$TMP_ROOT/create-tab-order2"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[]}\n' > "$resp/1.out"
+  printf '{"focused":{"window_ref":"window:1","workspace_ref":"workspace:2","pane_ref":"pane:3","surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  printf '{"surfaces":[]}\n' > "$resp/3.out"
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
+  printf '{"surfaces":[{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
+  printf '{"surfaces":[{"id":"sf-old","ref":"surface:44","index":0}]}\n' > "$resp/9.out"
+  printf 'ready\n' > "$resp/13.out"
+  printf 'ready\n' > "$resp/14.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-order2 /tmp/proj' "$ROOT" )
+  [ "$out" = "ws-77 sf-new" ] || fail "setup-ordering flow should succeed, got '$out'"
+  identify_line=$(grep -nF $'\x1f''identify'$'\x1f''--no-caller' "$log" | head -1 | cut -d: -f1)
+  create_line=$(grep -nF $'\x1f''new-surface' "$log" | head -1 | cut -d: -f1)
+  restore_line=$(grep -nF $'\x1f''reorder-surface' "$log" | head -1 | cut -d: -f1)
+  if [ "$identify_line" -lt "$create_line" ] && [ "$create_line" -lt "$restore_line" ]; then
+    :
+  else
+    fail "setup order must be capture-context -> create -> restore (got $identify_line/$create_line/$restore_line)"
+  fi
+  pass "fm_backend_cmux_create_task (tab mode): captures prior context before create, restores after"
 }
 
 test_create_task_tab_mode_refuses_duplicate_title() {
@@ -681,10 +919,17 @@ test_container_ensure_tab_mode_shared_workspace
 test_create_task_refuses_duplicate_name
 test_create_task_creates_and_resolves_uuid
 test_create_task_fails_on_unacknowledged_create
-test_focused_surface_tolerates_empty_or_unavailable_identify
+test_focus_context_tolerates_empty_or_unavailable_identify
+test_focus_context_captures_full_context
 test_create_task_tab_mode_full_flow
-test_create_task_tab_mode_skips_restore_without_focused_surface
-test_create_task_tab_mode_surfaces_restore_failure
+test_create_task_tab_mode_cross_window_restore
+test_create_task_tab_mode_preserves_pre_existing_order
+test_create_task_tab_mode_skips_restore_with_empty_focus
+test_create_task_tab_mode_restore_failure_cleans_up_only_new_surface
+test_create_task_tab_mode_restore_missing_prior_surface_cleans_up
+test_create_task_tab_mode_cwd_failure_cleans_up_exact_surface
+test_create_task_tab_mode_unresolvable_uuid_touches_nothing
+test_create_task_tab_mode_captures_context_before_create
 test_create_task_tab_mode_refuses_duplicate_title
 test_parse_target
 test_ops_route_surface_targets

@@ -60,25 +60,98 @@ fm_backend_cmux_cli() {
   CMUX_QUIET=1 cmux "$@"
 }
 
-# fm_backend_cmux_focused_surface: the currently focused surface ref, or empty
-# when cmux cannot report one (for example from a headless/socket-only caller).
-fm_backend_cmux_focused_surface() {
+# fm_backend_cmux_focus_context: the FULL focused-UI context captured before a
+# task tab is created, as a single space-separated line
+# "<window> <workspace> <pane> <surface>" of cmux short refs. Empty when cmux
+# reports no focused surface or cannot answer (headless/socket-only caller),
+# which callers treat as a supported "skip restoration" no-op.
+#
+# Restoring only the surface is not enough (verified 0.64.20): a surface ref
+# alone does NOT reactivate its workspace or window, so the window, workspace,
+# and pane are captured too. Short refs are stable for a session's lifetime
+# (only the positional index shifts), so they are captured directly from
+# `identify`. A missing window or pane ref is recorded as "-" so the four
+# positions stay fixed; the surface ref is required (its absence yields empty
+# output, the safe skip-restoration signal).
+fm_backend_cmux_focus_context() {
   local snapshot
   snapshot=$(fm_backend_cmux_cli identify --no-caller 2>/dev/null) || return 0
   [ -n "$snapshot" ] || return 0
-  printf '%s' "$snapshot" | jq -r '.focused.surface_ref // empty' 2>/dev/null | head -1
+  printf '%s' "$snapshot" | jq -r '
+    (.focused // {}) as $f
+    | ($f.surface_ref // "") as $s
+    | if $s == "" then empty
+      else [($f.window_ref // "-"), ($f.workspace_ref // "-"), ($f.pane_ref // "-"), $s] | join(" ")
+      end' 2>/dev/null | head -1
 }
 
-# fm_backend_cmux_restore_surface: return focus to a surface captured before a
-# task tab was created. An empty ref is a supported no-op; a reported ref that
-# cmux cannot restore is an explicit spawn failure.
-fm_backend_cmux_restore_surface() {  # <surface-ref>
-  local surface=${1:-}
-  [ -n "$surface" ] || return 0
-  if ! fm_backend_cmux_cli move-surface --surface "$surface" --focus true >/dev/null 2>&1; then
-    echo "error: created cmux task tab but could not restore previously focused surface $surface" >&2
+# fm_backend_cmux_surface_index: the current positional index of surface
+# <surface-ref-or-uuid> within workspace <ws>, or empty when the surface is not
+# present. Read-only. The index is what an order-preserving focus needs:
+# re-placing a surface at its OWN current index is a no-op move that only
+# changes focus (verified 0.64.20), whereas a destination-less `move-surface`
+# APPENDS it to the pane (verified reorder), which is why the latter is never
+# used for restoration.
+fm_backend_cmux_surface_index() {  # <workspace> <surface>
+  fm_backend_cmux_cli list-pane-surfaces --workspace "$1" --json --id-format both 2>/dev/null \
+    | jq -r --arg s "$2" '.surfaces[]? | select(.id == $s or .ref == $s) | .index' 2>/dev/null | head -1
+}
+
+# fm_backend_cmux_restore_focus: return the full UI focus to the context
+# captured by fm_backend_cmux_focus_context before a task tab was created. An
+# empty context is a supported no-op; a reported context that cannot be
+# restored is an explicit failure (the caller closes the new tab and fails the
+# spawn).
+#
+# Verified sequence (cmux 0.64.20):
+#   - `move-surface --surface <s> --focus true` with no destination REORDERS
+#     the tab (appends it to its pane), so it is never used here.
+#   - Focusing a surface alone does NOT reactivate its workspace, so
+#     `select-workspace` is required to bring the prior workspace (and its
+#     window) back to the foreground before the tab is re-selected.
+#   - `reorder-surface --surface <s> --index <its-own-current-index>
+#     --focus true` re-selects the tab WITHOUT moving it (order-preserving).
+# focus-window and focus-pane are best-effort refinements: a missing window or
+# pane ref, or a single-window app, makes them harmless no-ops. Reactivating
+# the workspace and the order-preserving tab focus are the two steps that must
+# succeed for the restoration to count.
+fm_backend_cmux_restore_focus() {  # <context: "window workspace pane surface">
+  local ctx=${1:-} window workspace pane surface idx win_flag=""
+  [ -n "$ctx" ] || return 0
+  # shellcheck disable=SC2086
+  set -- $ctx
+  window=${1:-} workspace=${2:-} pane=${3:-} surface=${4:-}
+  if [ -z "$workspace" ] || [ "$workspace" = "-" ] || [ -z "$surface" ] || [ "$surface" = "-" ]; then
+    echo "error: created cmux task tab but the captured focus context is incomplete ($ctx)" >&2
     return 1
   fi
+  # Reused window context so a workspace/pane/surface ref resolves in the right
+  # window on a multi-window app (refs contain no whitespace, so the unquoted
+  # split is safe).
+  if [ -n "$window" ] && [ "$window" != "-" ]; then
+    win_flag="--window $window"
+    fm_backend_cmux_cli focus-window --window "$window" >/dev/null 2>&1 || true
+  fi
+  # shellcheck disable=SC2086
+  if ! fm_backend_cmux_cli select-workspace --workspace "$workspace" $win_flag >/dev/null 2>&1; then
+    echo "error: created cmux task tab but could not reactivate the previously focused workspace $workspace" >&2
+    return 1
+  fi
+  if [ -n "$pane" ] && [ "$pane" != "-" ]; then
+    # shellcheck disable=SC2086
+    fm_backend_cmux_cli focus-pane --pane "$pane" --workspace "$workspace" $win_flag >/dev/null 2>&1 || true
+  fi
+  idx=$(fm_backend_cmux_surface_index "$workspace" "$surface")
+  if [ -z "$idx" ]; then
+    echo "error: created cmux task tab but the previously focused surface $surface is no longer present to restore" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  if ! fm_backend_cmux_cli reorder-surface --surface "$surface" --workspace "$workspace" $win_flag --index "$idx" --focus true >/dev/null 2>&1; then
+    echo "error: created cmux task tab but could not restore focus to the previously focused surface $surface" >&2
+    return 1
+  fi
+  return 0
 }
 
 # fm_backend_cmux_container_mode: resolve the task-container shape. Precedence:
@@ -250,7 +323,7 @@ fm_backend_cmux_surface_by_title() {  # <workspace-uuid> <title>
 #   workspace mode ("cmux" container)   "<workspace-uuid>"
 #   tab mode (container = ws uuid)      "<workspace-uuid> <surface-uuid>"
 fm_backend_cmux_create_task() {  # <container> <label> <cwd>
-  local container=$1 label=$2 cwd=$3 dup wsid sfid before after out prior_surface
+  local container=$1 label=$2 cwd=$3 dup wsid sfid before after out prior_context
   if [ "$container" = cmux ]; then
     # workspace-per-task: cmux does not enforce workspace-name uniqueness, so
     # the duplicate check is ours.
@@ -273,15 +346,20 @@ fm_backend_cmux_create_task() {  # <container> <label> <cwd>
     return 1
   fi
   # Verified (0.64.20): surfaces created unfocused can remain renderer-
-  # unrealized on cmux 0.64.18+, so create focused and immediately restore the
-  # previously focused surface. `new-surface` still prints only short refs
-  # ("OK surface:<n> pane:<m> workspace:<k>"), so the new surface's stable
-  # UUID is resolved by diffing the surface list around the create.
-  prior_surface=$(fm_backend_cmux_focused_surface)
+  # unrealized on cmux 0.64.18+, so create focused and then restore the full
+  # previously focused context. `new-surface` still prints only short refs
+  # ("OK surface:<n> pane:<m> workspace:<k>"), and it inserts the new tab
+  # ADJACENT to the focused tab rather than at the end, so the new surface's
+  # stable UUID is resolved by diffing the surface list around the create,
+  # never by position.
+  #
+  # Transactional: the new surface's exact UUID is resolved and the create is
+  # acknowledged BEFORE the fallible focus restoration runs, so any pre-return
+  # failure (restoration or the post-create cwd setup) can close ONLY that new
+  # surface, leaving no orphan terminal and never touching a pre-existing tab.
+  prior_context=$(fm_backend_cmux_focus_context)
   before=$(fm_backend_cmux_surface_ids "$wsid")
   out=$(fm_backend_cmux_cli new-surface --type terminal --workspace "$wsid" --focus true 2>/dev/null) || return 1
-  after=$(fm_backend_cmux_surface_ids "$wsid")
-  fm_backend_cmux_restore_surface "$prior_surface" || return 1
   case "$out" in
     *OK\ surface*) : ;;
     *)
@@ -289,13 +367,22 @@ fm_backend_cmux_create_task() {  # <container> <label> <cwd>
       return 1
       ;;
   esac
+  after=$(fm_backend_cmux_surface_ids "$wsid")
   if [ -n "$before" ]; then
     sfid=$(printf '%s\n' "$after" | grep -vxF -f <(printf '%s\n' "$before") | head -1)
   else
     sfid=$(printf '%s\n' "$after" | head -1)
   fi
   if [ -z "$sfid" ]; then
+    # No resolvable new UUID: cannot safely target a cleanup close, so leave
+    # the surface list untouched rather than risk closing a pre-existing tab.
     echo "error: created a cmux tab for '$label' but could not resolve its surface UUID" >&2
+    return 1
+  fi
+  # From here the new surface UUID is known, so every fallible pre-return step
+  # closes ONLY that surface on failure.
+  if ! fm_backend_cmux_restore_focus "$prior_context"; then
+    fm_backend_cmux_cli close-surface --workspace "$wsid" --surface "$sfid" >/dev/null 2>&1 || true
     return 1
   fi
   fm_backend_cmux_cli rename-tab --workspace "$wsid" --surface "$sfid" "$label" >/dev/null 2>&1 \
@@ -303,7 +390,10 @@ fm_backend_cmux_create_task() {  # <container> <label> <cwd>
   fm_backend_cmux_wait_ready "cmux:$wsid:$sfid"
   # A new tab starts in the container workspace's directory, not the task's
   # project, so move it there before fm-spawn.sh's `treehouse get`.
-  fm_backend_cmux_send_text_line "cmux:$wsid:$sfid" "cd \"$cwd\"" || return 1
+  if ! fm_backend_cmux_send_text_line "cmux:$wsid:$sfid" "cd \"$cwd\""; then
+    fm_backend_cmux_cli close-surface --workspace "$wsid" --surface "$sfid" >/dev/null 2>&1 || true
+    return 1
+  fi
   printf '%s %s' "$wsid" "$sfid"
 }
 
