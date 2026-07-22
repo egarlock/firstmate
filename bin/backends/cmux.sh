@@ -60,6 +60,27 @@ fm_backend_cmux_cli() {
   CMUX_QUIET=1 cmux "$@"
 }
 
+# fm_backend_cmux_focused_surface: the currently focused surface ref, or empty
+# when cmux cannot report one (for example from a headless/socket-only caller).
+fm_backend_cmux_focused_surface() {
+  local snapshot
+  snapshot=$(fm_backend_cmux_cli identify --no-caller 2>/dev/null) || return 0
+  [ -n "$snapshot" ] || return 0
+  printf '%s' "$snapshot" | jq -r '.focused.surface_ref // empty' 2>/dev/null | head -1
+}
+
+# fm_backend_cmux_restore_surface: return focus to a surface captured before a
+# task tab was created. An empty ref is a supported no-op; a reported ref that
+# cmux cannot restore is an explicit spawn failure.
+fm_backend_cmux_restore_surface() {  # <surface-ref>
+  local surface=${1:-}
+  [ -n "$surface" ] || return 0
+  if ! fm_backend_cmux_cli move-surface --surface "$surface" --focus true >/dev/null 2>&1; then
+    echo "error: created cmux task tab but could not restore previously focused surface $surface" >&2
+    return 1
+  fi
+}
+
 # fm_backend_cmux_container_mode: resolve the task-container shape. Precedence:
 # FM_CMUX_CONTAINER env, then the first non-empty word of the local gitignored
 # config/cmux-container, then the default "tab". Any unknown value falls back
@@ -229,7 +250,7 @@ fm_backend_cmux_surface_by_title() {  # <workspace-uuid> <title>
 #   workspace mode ("cmux" container)   "<workspace-uuid>"
 #   tab mode (container = ws uuid)      "<workspace-uuid> <surface-uuid>"
 fm_backend_cmux_create_task() {  # <container> <label> <cwd>
-  local container=$1 label=$2 cwd=$3 dup wsid sfid before after out
+  local container=$1 label=$2 cwd=$3 dup wsid sfid before after out prior_surface
   if [ "$container" = cmux ]; then
     # workspace-per-task: cmux does not enforce workspace-name uniqueness, so
     # the duplicate check is ours.
@@ -251,11 +272,16 @@ fm_backend_cmux_create_task() {  # <container> <label> <cwd>
     echo "error: cmux tab '$label' already exists in workspace $wsid ($dup)" >&2
     return 1
   fi
-  # Verified (0.64.17): `new-surface` prints only short refs
+  # Verified (0.64.20): surfaces created unfocused can remain renderer-
+  # unrealized on cmux 0.64.18+, so create focused and immediately restore the
+  # previously focused surface. `new-surface` still prints only short refs
   # ("OK surface:<n> pane:<m> workspace:<k>"), so the new surface's stable
   # UUID is resolved by diffing the surface list around the create.
+  prior_surface=$(fm_backend_cmux_focused_surface)
   before=$(fm_backend_cmux_surface_ids "$wsid")
-  out=$(fm_backend_cmux_cli new-surface --type terminal --workspace "$wsid" --focus false 2>/dev/null) || return 1
+  out=$(fm_backend_cmux_cli new-surface --type terminal --workspace "$wsid" --focus true 2>/dev/null) || return 1
+  after=$(fm_backend_cmux_surface_ids "$wsid")
+  fm_backend_cmux_restore_surface "$prior_surface" || return 1
   case "$out" in
     *OK\ surface*) : ;;
     *)
@@ -263,7 +289,6 @@ fm_backend_cmux_create_task() {  # <container> <label> <cwd>
       return 1
       ;;
   esac
-  after=$(fm_backend_cmux_surface_ids "$wsid")
   if [ -n "$before" ]; then
     sfid=$(printf '%s\n' "$after" | grep -vxF -f <(printf '%s\n' "$before") | head -1)
   else

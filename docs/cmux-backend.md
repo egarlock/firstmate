@@ -4,7 +4,7 @@ This document records the verification behind `bin/backends/cmux.sh`, the cmux s
 It is the cmux equivalent of `docs/herdr-backend.md`, following the same "empirical adapter notes" contract from CONTRIBUTING.md.
 
 Cmux ([cmux.com](https://cmux.com), [manaflow-ai/cmux](https://github.com/manaflow-ai/cmux)) is a native macOS terminal built for running AI coding agents in parallel, controlled through a Unix-socket CLI (`cmux`).
-Verified against the real installed binary: cmux 0.64.17 (build 97), macOS aarch64.
+The original adapter was verified against cmux 0.64.17 (build 97); the tab focus-at-birth workaround below was verified against cmux 0.64.20 (build 100), macOS aarch64.
 Caveat: `FM_BACKEND_CMUX_MIN_VERSION` was later lowered to 0.63.1 without re-verification on that build; in particular the screen-cwd fallback (`fm_backend_cmux_screen_cwd`) depends on the block-header screen format only observed on 0.64.17. Re-verify or re-raise the pin before relying on 0.63.x.
 
 ## Status: experimental
@@ -43,6 +43,18 @@ The shape is configurable via `FM_CMUX_CONTAINER` (env), then the local gitignor
 
 In tab mode, teardown closes only the task's tab; the container workspace (the captain's own, or the shared `firstmate` one) stays, exactly as tmux leaves the session.
 
+## Tab creation requires focus at birth on cmux 0.64.18+
+
+Cmux 0.64.18 introduced a regression in which a terminal surface created with `--focus false` can remain renderer-unrealized and later paint black when selected.
+The live signature is `inWindow=0` with a zero-sized `frame={0.0,0.0 0.0x0.0}` in `cmux debug-terminals`.
+The behavior was not present in 0.64.17; the focus-at-birth workaround was verified on 0.64.20.
+
+Cmux has no mount-without-focus primitive, so tab mode captures `.focused.surface_ref` from `cmux identify --no-caller`, creates the terminal with `--focus true`, then restores the prior surface with `cmux move-surface --surface <prior> --focus true`.
+This causes a brief focus flicker while the new terminal's drawable is realized.
+If cmux reports no focused surface, restoration is skipped; if it reports a surface that cannot be restored, task creation fails explicitly.
+Workspace mode remains unchanged on `new-workspace --focus false`, because the confirmed regression concerns terminal surfaces.
+The CLI can verify the realized in-window frame, but the final painted-versus-black confirmation remains a visual check for the captain after the change is available.
+
 ## Target string and meta fields
 
 A cmux task's `window=` meta field holds `cmux:<workspace-uuid>:<surface-uuid>` in tab mode, or `cmux:<workspace-uuid>` in workspace mode.
@@ -68,7 +80,7 @@ Cmux tasks additionally record:
 | Version gate | `cmux version` -> `cmux 0.64.17 (97) [9ed29d81a]` | Socket-free (works while auth is refused); minimum pinned in `FM_BACKEND_CMUX_MIN_VERSION` (currently 0.63.1, LOWER than the verified build - see caveat below). |
 | Socket gate | `cmux ping` -> `PONG` | One authenticated round-trip; an auth refusal prints `auth_required`, which the adapter maps to the operator fix. |
 | Create task workspace (workspace mode) | `cmux new-workspace --name fm-<id> --cwd <proj> --focus false` | Prints a TEXT acknowledgment `OK workspace:<n>` carrying only the unstable index-based short ref; `--json` is IGNORED on this command in 0.64.17. The adapter therefore resolves the stable UUID with an immediate `custom_title` lookup, made unambiguous by its own duplicate check (cmux does not enforce workspace-name uniqueness). `--focus false` verified not to steal the captain's focus. |
-| Create task tab (tab mode) | `cmux new-surface --type terminal --workspace <ws> --focus false` | Also acknowledges with short refs only (`OK surface:<n> pane:<m> workspace:<k>`), so the new surface's UUID is resolved by diffing `list-pane-surfaces --json --id-format uuids` around the create. A new tab starts in the container workspace's directory, so the adapter `cd`s it into the task's project before `treehouse get`. |
+| Create task tab (tab mode) | `cmux identify --no-caller`; `cmux new-surface --type terminal --workspace <ws> --focus true`; `cmux move-surface --surface <prior> --focus true`; rename, readiness, and cwd setup | Cmux 0.64.18+ can leave a surface created with `--focus false` renderer-unrealized. Creating focused realizes its drawable, then restoring the prior surface avoids leaving focus on the task tab. The create acknowledgment still carries short refs only (`OK surface:<n> pane:<m> workspace:<k>`), so the new surface's UUID is resolved by diffing `list-pane-surfaces --json --id-format uuids` around the create. |
 | Name a task tab | `cmux rename-tab --workspace <ws> --surface <sf> fm-<id>` | Verified sticky: the title survives running commands (unlike auto-titles). Surface titles are not unique either; the adapter's duplicate check runs first. |
 | List / recovery | `cmux list-workspaces --json --id-format uuids`, `cmux list-pane-surfaces --workspace <ws> --json --id-format uuids` | Both honor the flags; per-workspace fields verified: `id` (UUID), `title`, `custom_title`, `current_directory`, `index`, `selected`; per-surface fields: `id`, `title`, `type`, `index`, `selected`. `fm-*` filtering matches workspace `custom_title` and surface `title`, covering both container shapes regardless of the configured mode. |
 | Send literal (unsubmitted) | `cmux send --workspace <ws> <text>` | Verified NOT to auto-submit: a marker command sat unexecuted in the composer until a separate Enter. Behaves exactly like tmux's `send-keys -l`. |

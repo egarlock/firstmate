@@ -195,35 +195,111 @@ test_create_task_refuses_duplicate_name() {
   pass "fm_backend_cmux_create_task (workspace mode): refuses a duplicate workspace name"
 }
 
+test_focused_surface_tolerates_empty_or_unavailable_identify() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/focus-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"focused":{}}\n' > "$resp/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_focused_surface' "$ROOT" )
+  status=$?
+  expect_code 0 "$status" "focused_surface should tolerate an empty focused object"
+  [ -z "$out" ] || fail "focused_surface should return empty when no surface is focused, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''identify'$'\x1f''--no-caller' \
+    "focused_surface did not query the globally focused cmux surface"
+
+  dir="$TMP_ROOT/focus-unavailable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'socket unavailable\n' > "$resp/1.out"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_focused_surface' "$ROOT" )
+  status=$?
+  expect_code 0 "$status" "focused_surface should tolerate an unavailable identify call"
+  [ -z "$out" ] || fail "focused_surface should return empty when identify is unavailable, got '$out'"
+  pass "fm_backend_cmux_focused_surface: empty or unavailable focus data is a safe no-op"
+}
+
 test_create_task_tab_mode_full_flow() {
-  local dir log resp fb out
+  local dir log resp fb out restore_line rename_line ready_line cwd_line
   dir="$TMP_ROOT/create-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: duplicate check by tab title -> no match
   printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/1.out"
-  # 2: surface ids BEFORE create
-  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/2.out"
-  # 3: new-surface -> text ack with short refs only
-  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/3.out"
-  # 4: surface ids AFTER create -> diff yields the new uuid
-  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"},{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/4.out"
-  # 5: rename-tab
-  printf 'OK action=rename tab=tab:9 workspace=workspace:2\n' > "$resp/5.out"
-  # 6: wait_ready wake enter; 7/8: stable screen reads
-  printf 'ready prompt\n' > "$resp/7.out"
-  printf 'ready prompt\n' > "$resp/8.out"
-  # 9: cd send; 10: cd enter
+  # 2: focused surface before create
+  printf '{"focused":{"surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  # 3: surface ids BEFORE create
+  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"}]}\n' > "$resp/3.out"
+  # 4: new-surface -> text ack with short refs only
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
+  # 5: surface ids AFTER create -> diff yields the new uuid
+  printf '{"surfaces":[{"id":"sf-old","title":"Terminal"},{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
+  # 6: restore prior focus; 7: rename-tab
+  printf 'OK action=rename tab=tab:9 workspace=workspace:2\n' > "$resp/7.out"
+  # 8: wait_ready wake enter; 9/10: stable screen reads
+  printf 'ready prompt\n' > "$resp/9.out"
+  printf 'ready prompt\n' > "$resp/10.out"
+  # 11: cd send; 12: cd enter
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
     FM_CMUX_READY_ATTEMPTS=3 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-newtab /tmp/proj' "$ROOT" )
   [ "$out" = "ws-77 sf-new" ] || fail "tab-mode create_task should echo '<ws> <surface>', got '$out'"
-  assert_contains "$(cat "$log")" $'\x1f''new-surface'$'\x1f''--type'$'\x1f''terminal'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--focus'$'\x1f''false' \
-    "create_task did not create the tab without focus-stealing"
+  assert_contains "$(cat "$log")" $'\x1f''new-surface'$'\x1f''--type'$'\x1f''terminal'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--focus'$'\x1f''true' \
+    "create_task did not create the tab focused so its renderer initializes"
+  assert_contains "$(cat "$log")" $'\x1f''move-surface'$'\x1f''--surface'$'\x1f''surface:44'$'\x1f''--focus'$'\x1f''true' \
+    "create_task did not restore the previously focused surface"
   assert_contains "$(cat "$log")" $'\x1f''rename-tab'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''fm-newtab' \
     "create_task did not rename the new tab to the task label"
   assert_contains "$(cat "$log")" $'\x1f''send'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''cd "/tmp/proj"' \
     "create_task did not cd the new tab into the project"
-  pass "fm_backend_cmux_create_task (tab mode): dup-check, create, uuid-diff, rename, readiness, cd to project"
+  restore_line=$(grep -nF $'\x1f''move-surface'$'\x1f''--surface'$'\x1f''surface:44' "$log" | head -1 | cut -d: -f1)
+  rename_line=$(grep -nF $'\x1f''rename-tab' "$log" | head -1 | cut -d: -f1)
+  ready_line=$(grep -nF $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''enter' "$log" | head -1 | cut -d: -f1)
+  cwd_line=$(grep -nF $'\x1f''send'$'\x1f''--workspace'$'\x1f''ws-77'$'\x1f''--surface'$'\x1f''sf-new'$'\x1f''cd "/tmp/proj"' "$log" | head -1 | cut -d: -f1)
+  [ "$restore_line" -lt "$rename_line" ] && [ "$restore_line" -lt "$ready_line" ] && [ "$restore_line" -lt "$cwd_line" ] \
+    || fail "create_task must restore focus before rename, readiness, and cwd setup"
+  pass "fm_backend_cmux_create_task (tab mode): creates focused, restores prior focus, then renames and initializes"
+}
+
+test_create_task_tab_mode_skips_restore_without_focused_surface() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/create-tab-no-focus"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[]}\n' > "$resp/1.out"
+  printf '{"focused":{}}\n' > "$resp/2.out"
+  printf '{"surfaces":[]}\n' > "$resp/3.out"
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
+  printf '{"surfaces":[{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
+  printf 'OK action=rename tab=tab:9 workspace=workspace:2\n' > "$resp/6.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    FM_CMUX_READY_ATTEMPTS=1 FM_CMUX_READY_INTERVAL=0.01 FM_CMUX_READY_SETTLE=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-no-focus /tmp/proj' "$ROOT" )
+  [ "$out" = "ws-77 sf-new" ] || fail "tab-mode create_task should succeed without a reported focused surface, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''move-surface' \
+    "create_task should skip focus restoration when identify reports no focused surface"
+  pass "fm_backend_cmux_create_task (tab mode): missing focused-surface data safely skips restoration"
+}
+
+test_create_task_tab_mode_surfaces_restore_failure() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/create-tab-restore-fails"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"surfaces":[]}\n' > "$resp/1.out"
+  printf '{"focused":{"surface_ref":"surface:44"}}\n' > "$resp/2.out"
+  printf '{"surfaces":[]}\n' > "$resp/3.out"
+  printf 'OK surface:9 pane:2 workspace:2\n' > "$resp/4.out"
+  printf '{"surfaces":[{"id":"sf-new","title":"Terminal"}]}\n' > "$resp/5.out"
+  printf 'not_found\n' > "$resp/6.out"
+  printf '1\n' > "$resp/6.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$log" FM_CMUX_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task ws-77 fm-restore-fails /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "tab-mode create_task should fail when prior focus cannot be restored"
+  assert_contains "$out" "could not restore previously focused surface surface:44" \
+    "create_task did not surface the focus restoration failure"
+  assert_not_contains "$(cat "$log")" $'\x1f''rename-tab' \
+    "create_task continued after focus restoration failed"
+  pass "fm_backend_cmux_create_task (tab mode): focus restoration failure is explicit and stops setup"
 }
 
 test_create_task_tab_mode_refuses_duplicate_title() {
@@ -605,7 +681,10 @@ test_container_ensure_tab_mode_shared_workspace
 test_create_task_refuses_duplicate_name
 test_create_task_creates_and_resolves_uuid
 test_create_task_fails_on_unacknowledged_create
+test_focused_surface_tolerates_empty_or_unavailable_identify
 test_create_task_tab_mode_full_flow
+test_create_task_tab_mode_skips_restore_without_focused_surface
+test_create_task_tab_mode_surfaces_restore_failure
 test_create_task_tab_mode_refuses_duplicate_title
 test_parse_target
 test_ops_route_surface_targets
