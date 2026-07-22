@@ -49,9 +49,29 @@ Cmux 0.64.18 introduced a regression in which a terminal surface created with `-
 The live signature is `inWindow=0` with a zero-sized `frame={0.0,0.0 0.0x0.0}` in `cmux debug-terminals`.
 The behavior was not present in 0.64.17; the focus-at-birth workaround was verified on 0.64.20.
 
-Cmux has no mount-without-focus primitive, so tab mode captures `.focused.surface_ref` from `cmux identify --no-caller`, creates the terminal with `--focus true`, then restores the prior surface with `cmux move-surface --surface <prior> --focus true`.
-This causes a brief focus flicker while the new terminal's drawable is realized.
-If cmux reports no focused surface, restoration is skipped; if it reports a surface that cannot be restored, task creation fails explicitly.
+Cmux has no mount-without-focus primitive, so tab mode creates the terminal with `--focus true`, then restores the full prior focus context.
+
+Restoring only the surface is not enough: focusing a surface does **not** reactivate its workspace or window (verified 0.64.20), so tab mode captures the complete focused context before creating the tab: `.focused.{window_ref, workspace_ref, pane_ref, surface_ref}` from `cmux identify --no-caller`.
+A destination-less `cmux move-surface --surface <prior> --focus true` must **not** be used to restore: with no `--before`/`--after`/`--index` it reorders (appends) the tab within its pane (verified 0.64.20), disturbing the pre-existing tab order.
+
+The verified order-preserving restore sequence (cmux 0.64.20) is:
+
+1. `cmux focus-window --window <window>` (best-effort; harmless no-op on a single-window app or a missing window ref).
+2. `cmux select-workspace --workspace <workspace> [--window <window>]` (essential: brings the prior workspace, and its window, back to the foreground).
+3. `cmux focus-pane --pane <pane> --workspace <workspace> [--window <window>]` (best-effort refinement).
+4. `cmux reorder-surface --surface <surface> --workspace <workspace> [--window <window>] --index <its-own-current-index> --focus true` (essential: re-selects the tab **at the index it currently occupies**, a no-op move that only changes focus, so pre-existing order is preserved).
+
+The surface's current index is re-read (`list-pane-surfaces --json --id-format both`) at restore time because creating the new tab focused shifts indices.
+Reactivating the workspace and the order-preserving refocus are the two steps that must succeed; a missing window/pane ref or a single-window app makes steps 1 and 3 harmless no-ops.
+Restoration causes a brief focus flicker while the new terminal's drawable is realized.
+If cmux reports no focused surface, restoration is skipped; if it reports a context whose workspace cannot be reactivated, or whose surface has since vanished, task creation fails explicitly.
+
+**Never** close, move, reorder, or rename a pre-existing surface: restoration only reactivates/refocuses them in place, and the sole `rename-tab` targets the new surface.
+
+Tab creation is transactional after cmux acknowledges the new surface.
+The new surface's exact UUID is resolved by diffing `list-pane-surfaces --json --id-format uuids` around the create (the `new-surface` acknowledgment carries only short refs, `OK surface:<n> pane:<m> workspace:<k>`, and it inserts the tab adjacent to the focused tab, not at the end, so position cannot identify it), and the create is acknowledged, **before** the fallible focus restoration runs.
+Any pre-return failure after the UUID is known (restoration failure, or the post-create `cd` cwd setup) closes **only** that new surface via `cmux close-surface --workspace <ws> --surface <new>`, so no orphan terminal is left and no pre-existing tab is touched.
+If the new UUID cannot be resolved at all, task creation fails **without** closing anything, because a blind close could hit a pre-existing tab.
 Workspace mode remains unchanged on `new-workspace --focus false`, because the confirmed regression concerns terminal surfaces.
 The CLI can verify the realized in-window frame, but the final painted-versus-black confirmation remains a visual check for the captain after the change is available.
 
@@ -80,7 +100,7 @@ Cmux tasks additionally record:
 | Version gate | `cmux version` -> `cmux 0.64.17 (97) [9ed29d81a]` | Socket-free (works while auth is refused); minimum pinned in `FM_BACKEND_CMUX_MIN_VERSION` (currently 0.63.1, LOWER than the verified build - see caveat below). |
 | Socket gate | `cmux ping` -> `PONG` | One authenticated round-trip; an auth refusal prints `auth_required`, which the adapter maps to the operator fix. |
 | Create task workspace (workspace mode) | `cmux new-workspace --name fm-<id> --cwd <proj> --focus false` | Prints a TEXT acknowledgment `OK workspace:<n>` carrying only the unstable index-based short ref; `--json` is IGNORED on this command in 0.64.17. The adapter therefore resolves the stable UUID with an immediate `custom_title` lookup, made unambiguous by its own duplicate check (cmux does not enforce workspace-name uniqueness). `--focus false` verified not to steal the captain's focus. |
-| Create task tab (tab mode) | `cmux identify --no-caller`; `cmux new-surface --type terminal --workspace <ws> --focus true`; `cmux move-surface --surface <prior> --focus true`; rename, readiness, and cwd setup | Cmux 0.64.18+ can leave a surface created with `--focus false` renderer-unrealized. Creating focused realizes its drawable, then restoring the prior surface avoids leaving focus on the task tab. The create acknowledgment still carries short refs only (`OK surface:<n> pane:<m> workspace:<k>`), so the new surface's UUID is resolved by diffing `list-pane-surfaces --json --id-format uuids` around the create. |
+| Create task tab (tab mode) | `cmux identify --no-caller` (capture full `window/workspace/pane/surface` context); `cmux new-surface --type terminal --workspace <ws> --focus true`; resolve the new UUID by diffing `list-pane-surfaces --json --id-format uuids`; restore focus with `focus-window` (best-effort) + `select-workspace --workspace <ws> [--window <w>]` + `focus-pane` (best-effort) + `reorder-surface --surface <prior> --workspace <ws> [--window <w>] --index <own-index> --focus true`; rename, readiness, and cwd setup | Cmux 0.64.18+ can leave a surface created with `--focus false` renderer-unrealized. Creating focused realizes its drawable, then restoring the **full prior context** returns focus (a bare surface focus does not reactivate its workspace/window). Restoration is order-preserving: `reorder-surface` at the prior surface's own current index refocuses without moving it, whereas a destination-less `move-surface` would reorder (append) it. Creation is transactional: the new UUID is resolved and the create acknowledged before the fallible restore, and any pre-return failure closes only the new surface (`close-surface --surface <new>`), never a pre-existing tab. |
 | Name a task tab | `cmux rename-tab --workspace <ws> --surface <sf> fm-<id>` | Verified sticky: the title survives running commands (unlike auto-titles). Surface titles are not unique either; the adapter's duplicate check runs first. |
 | List / recovery | `cmux list-workspaces --json --id-format uuids`, `cmux list-pane-surfaces --workspace <ws> --json --id-format uuids` | Both honor the flags; per-workspace fields verified: `id` (UUID), `title`, `custom_title`, `current_directory`, `index`, `selected`; per-surface fields: `id`, `title`, `type`, `index`, `selected`. `fm-*` filtering matches workspace `custom_title` and surface `title`, covering both container shapes regardless of the configured mode. |
 | Send literal (unsubmitted) | `cmux send --workspace <ws> <text>` | Verified NOT to auto-submit: a marker command sat unexecuted in the composer until a separate Enter. Behaves exactly like tmux's `send-keys -l`. |
