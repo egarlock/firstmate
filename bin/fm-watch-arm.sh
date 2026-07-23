@@ -47,6 +47,21 @@ GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
 
+# Affirmative structural check that <pid> really is a watcher process, used only
+# where the recorded identity is unverifiable across a format change. Without it,
+# an older-format identity sitting on a RECYCLED pid would be honored: arm would
+# report a dead watcher healthy, and --restart would SIGTERM whatever unrelated
+# process now owns that pid. It is the watcher-lock analogue of fm-lock.sh's
+# holder_is_harness_alive.
+pid_is_watcher_process() {
+  local pid=$1 args
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  case "$args" in
+    *"$WATCH"*) return 0 ;;
+  esac
+  return 1
+}
+
 watch_lock_matches_pid() {
   local pid=$1 lock_home lock_path lock_identity current_identity
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
@@ -56,7 +71,20 @@ watch_lock_matches_pid() {
   [ "$lock_path" = "$WATCH" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+  # Three-valued on purpose (see fm_pid_identity_verdict): an identity recorded
+  # before a firstmate update that changed the identity FORMAT is unverifiable,
+  # not mismatched. Treating that as a mismatch would make every arm report
+  # FAILED against a genuinely live, beating watcher for as long as that
+  # pre-update watcher runs - and --restart would clear its lock instead of
+  # stopping it. Unverifiable therefore falls back to the structural check that
+  # the pid IS a watcher, so a recycled pid is still rejected; a same-format
+  # mismatch (the ordinary reused-pid case) fails outright as before.
+  fm_pid_identity_verdict "$lock_identity" "$current_identity"
+  case $? in
+    0) return 0 ;;
+    2) pid_is_watcher_process "$pid" ;;
+    *) return 1 ;;
+  esac
 }
 
 clear_stale_recorded_watcher_lock() {

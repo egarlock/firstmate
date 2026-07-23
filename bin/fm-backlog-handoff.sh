@@ -37,7 +37,12 @@ secondmate_home() {
   [ -f "$REG" ] || { echo "error: no secondmate registry at $REG" >&2; return 1; }
   line=$(grep -E "^- $id( |$)" "$REG" | tail -1 || true)
   [ -n "$line" ] || { echo "error: secondmate $id is not registered in $REG" >&2; return 1; }
-  printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
+  # Match the (home: ...) field itself; do not require zero parentheses before it.
+  # Summary/scope prose often carries a parenthetical (e.g. "(id is legacy)"), and
+  # ^[^(]* would stop at that one and leave the entry looking like "has no home".
+  # The greedy prefix makes the last (home: ...) on the line win. Empty when the
+  # field is absent, which the caller reports as "has no home".
+  printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//'
 }
 
 resolved_existing_dir() {

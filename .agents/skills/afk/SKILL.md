@@ -80,24 +80,40 @@ The daemon never injects into an in-use pane. Two checks run before every
 injection (shared with `fm-send.sh` via `bin/fm-tmux-lib.sh`):
 
 - **`pane_is_busy`** - the harness shows a busy footer (agent mid-turn).
-- **`pane_input_pending`** - the cursor line holds real unsubmitted text (a
-  human's half-typed line, or a previous injection whose Enter was swallowed).
-  The detector **strips the harness's composer box borders first**, so an idle
-  *bordered* composer (claude draws `│ > … │`) is correctly read as empty, not
-  pending. Without this, every idle claude pane looked like pending input and
-  the daemon deferred 100% of escalations (incident afk-invx-i5).
+- **Composer-state guard** - `inject_msg` reads the full `empty`/`pending`/`unknown`
+  verdict from `fm_tmux_composer_state` and injects **only** when it is
+  affirmatively `empty`. `pending` means real unsubmitted text (a human's
+  half-typed line, or a previous injection whose Enter was swallowed);
+  `unknown` means an unreadable pane **or a bare shell prompt** - the pane whose
+  agent has exited to its login shell. Both defer.
+  The content decision itself lives in `bin/fm-composer-lib.sh`
+  (`fm_composer_classify_content`), the one owner of the rule, after the reader
+  captures the cursor row and identifies its structure. It **strips the
+  harness's composer box borders first**, so an idle *bordered* composer (claude
+  draws `│ > … │`) is correctly read as empty, not pending - without that, every
+  idle claude pane looked like pending input and the daemon deferred 100% of
+  escalations (incident afk-invx-i5) - and it keeps bare agent glyphs (`❯`, `›`)
+  empty. But a bare *shell* glyph (`$`/`%`/`#`/`>`) is `empty` only inside a real
+  bordered box; unbordered it is a dead shell, because typing an escalation there
+  both loses it and hands the digest to a live shell to execute.
   `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after border
   stripping.
+  `pane_input_pending` remains the tested "is there text in the way" predicate,
+  but it is **not** sufficient for an injection-safety decision: a boolean cannot
+  tell `empty` from `unknown`.
 
-Either condition defers the injection; the buffered escalation survives in
+Either condition - a busy pane, or any composer verdict other than `empty` -
+defers the injection; the buffered escalation survives in
 `state/.subsuper-escalations` and is retried on the next housekeeping tick. In
 afk mode the composer guard is belt-and-suspenders (no human is typing), but it
 protects against the race window between the captain returning and their
-message landing, and against the daemon's own previous injection sitting unsent.
+message landing, against a dead shell, and against the daemon's own previous
+injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
-attempts one normal flush, which still requires an idle pane and empty composer.
+attempts one normal flush, which still requires an idle pane and an
+affirmatively empty composer.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
@@ -160,21 +176,26 @@ the marker lets firstmate distinguish it from a real captain message.
   separator before injection, so submission is unambiguous regardless of
   harness.
 - **Composer guard on the supervisor pane** - before injecting, the daemon
-  checks both `pane_is_busy` (harness busy footer means agent mid-turn) and
-  `pane_input_pending` (real unsubmitted text on the cursor line means human
-  mid-typing or previous injection with swallowed Enter). Either condition
-  defers injection and preserves the buffer for retry. The daemon never merges
-  its digest into the captain's half-typed line.
+  checks `pane_is_busy` (harness busy footer means agent mid-turn) and requires
+  the composer verdict to be affirmatively `empty`. `pending` (real unsubmitted
+  text: human mid-typing, or a previous injection with a swallowed Enter) and
+  `unknown` (an unreadable pane, or a bare shell prompt left behind when the
+  agent exited) both defer injection and preserve the buffer for retry. The
+  daemon never merges its digest into the captain's half-typed line, and never
+  types it into a live shell that would execute it.
 - The composer detector, shared with `fm-send.sh` in `bin/fm-tmux-lib.sh`, drops
   dim/faint ghost text, then strips harness composer box borders, so a ghost-only
   or idle bordered composer such as claude's `│ > ... │` reads as empty, not
   pending. Without these filters, idle bordered composers and dim ghost
-  suggestions can look like pending input and stall supervision. `FM_COMPOSER_IDLE_RE`
+  suggestions can look like pending input and stall supervision. The
+  empty/pending/unknown verdict itself is owned by `bin/fm-composer-lib.sh`, so
+  the dead-shell rule has exactly one definition. `FM_COMPOSER_IDLE_RE`
   still overrides empty-composer matching after dim-ghost and border stripping,
   and `FM_BUSY_REGEX` overrides busy footers.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and empty composer. If that
+  normal flush, which still requires an idle pane and an affirmatively empty
+  composer. If that
   cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
   durable `state/.subsuper-inject-wedged` marker, and a status-line flash. A
   composer false-positive surfaces as a visible stall, never an unbounded silent

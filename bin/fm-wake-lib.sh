@@ -23,14 +23,104 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# Every identity string carries a leading FORMAT TAG. Identities are written to
+# disk (state/.lock/pid-identity, state/.watch.lock/pid-identity) by one firstmate
+# version and re-read by another, so the recorded string outlives the code that
+# produced it. Without the tag a FORMAT change (this fork's /proc-based Linux
+# identity, or the LC_ALL=C lstart pinning) is indistinguishable from a genuine
+# identity mismatch - and a genuine mismatch means "this pid was recycled", which
+# reclaims the lock. Tagging lets a reader recognize "written by an older format,
+# UNVERIFIABLE" and take the safe branch instead of stealing a live session's
+# lock. Bump a tag whenever that payload's construction changes.
+#
+# Each payload CONSTRUCTION carries its OWN tag, never a shared one. The two forms
+# below are structurally different strings for the same process, and the SAME pid
+# can flip between them mid-session (a /proc read that stops parsing falls through
+# to ps). Under a shared tag that flip compares as same-format-different-payload -
+# verdict 1, "the pid was recycled" - and the lock is stolen from a live session.
+# Distinct tags make a source change unverifiable-and-safe by construction rather
+# than by luck, which is what lets the /proc path fall through to ps at all.
+FM_PID_IDENTITY_FORMAT_PROC=fmid1p   # Linux /proc/<pid>/{stat,cmdline}
+FM_PID_IDENTITY_FORMAT_PS=fmid1s     # portable `ps lstart + command`
+
+# fm_pid_identity_format <identity-string>: the format tag the string was written
+# with, or `legacy` for an untagged (pre-tag) identity.
+fm_pid_identity_format() {
+  case "${1%% *}" in
+    fmid[0-9]*) printf '%s\n' "${1%% *}" ;;
+    *) printf 'legacy\n' ;;
+  esac
+}
+
+# fm_pid_identity_verdict <stored> <current>: the ONE definition of "does this
+# recorded identity still vouch for this live process". Every lock that records an
+# identity must go through it, because the interesting case is three-valued and a
+# plain string comparison silently collapses it to two:
+#   0  match        - same format, identical: the recorded holder is this process.
+#   1  mismatch     - same format, different: the pid was reused/recycled.
+#   2  unverifiable - written in a DIFFERENT format (a firstmate update landed
+#                     while the holder was running), so the two strings are not
+#                     comparable at all. NOT evidence of reuse; each caller picks
+#                     the safe branch for its lock (refuse, honor, heal).
+fm_pid_identity_verdict() {
+  local stored=$1 current=$2
+  [ -n "$stored" ] && [ -n "$current" ] || return 2
+  if [ "$(fm_pid_identity_format "$stored")" != "$(fm_pid_identity_format "$current")" ]; then
+    return 2
+  fi
+  [ "$stored" = "$current" ]
+}
+
+# fm_pid_identity_proc <pid> <proc-root>: the Linux /proc payload, or 1 when any
+# part of the read fails to PARSE. stat field 22 (starttime, clock ticks since
+# boot) is immune to the wall-clock steps that re-render the ps fallback's lstart
+# date (observed as WSL2 btime drift) and would evict a live watcher; combining
+# the full NUL-separated cmdline keeps PID reuse a mismatch even on a tick
+# collision.
+#
+# Every failure here must FALL THROUGH to the ps path, never become "no identity
+# at all": the readability guards prove the files exist, not that they parse, and
+# a holder whose identity cannot be computed is refused forever (classify_holder
+# reads an empty identity as a live holder). An unreaped ZOMBIE is the realistic
+# trigger - it reports an empty cmdline while `kill -0` still succeeds - and it
+# would otherwise leave the home permanently read-only, and make the contender's
+# own record_holder fail on every one of its bounded acquire tries.
+fm_pid_identity_proc() {
+  local pid=$1 proc_root=$2 stat_line starttime cmdline_hex
+  local -a stat_fields
+  [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ] || return 1
+  stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+  # After the final comm delimiter, array index 19 is proc stat field 22.
+  read -r -a stat_fields <<< "${stat_line##*)}"
+  [ "${#stat_fields[@]}" -ge 20 ] || return 1
+  starttime=${stat_fields[19]}
+  case "$starttime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
+  [ -n "$cmdline_hex" ] || return 1
+  printf '%s linux-starttime=%s cmdline-hex=%s\n' \
+    "$FM_PID_IDENTITY_FORMAT_PROC" "$starttime" "$cmdline_hex"
+}
+
 fm_pid_identity() {
-  local pid=$1 out
+  local pid=$1 out proc_root
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  out=$(ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  # Prefer /proc on Linux. FM_PROC_ROOT_OVERRIDE also enables this branch off
+  # Linux so the parse and fall-through paths stay exercisable from a fixture on
+  # any host; with the variable unset there is no /proc to read there anyway.
+  if [ "$(uname)" = Linux ] || [ -n "${FM_PROC_ROOT_OVERRIDE:-}" ]; then
+    fm_pid_identity_proc "$pid" "$proc_root" && return 0
+  fi
+  # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
+  # written under one locale but re-read under the machine's ambient locale, which
+  # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+  printf '%s %s\n' "$FM_PID_IDENTITY_FORMAT_PS" "$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')"
 }
 
 fm_path_mtime() {

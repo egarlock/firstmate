@@ -104,6 +104,9 @@ fm_copilot_compatible() {
 # fm_harness_efforts <harness>: print the effort values the installed CLI was
 # verified to accept at launch, space-separated; print nothing when the adapter
 # has no verified effort flag. This is the ONE effort matrix.
+# Note: upstream commits 8c0d9eb (grok drops xhigh at 0.2.99) and f8c5941 (pi
+# accepts max at 0.80.6) correct grok's and pi's effort sets, but were NOT
+# adopted here because the installed CLIs could not be verified locally.
 fm_harness_efforts() {
   case "$1" in
     claude|copilot) printf '%s\n' 'low medium high xhigh max' ;;

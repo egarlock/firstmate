@@ -16,6 +16,17 @@
 # firstmate harness process. A holder that fails any of those is stale and is
 # reclaimed atomically, the same way the watcher lock reclaims a dead holder.
 #
+# Identity strings are format-tagged (fm_pid_identity_format), because a recorded
+# identity outlives the firstmate version that wrote it, and because the same live
+# pid can be described by either identity SOURCE (/proc or ps). An identity
+# recorded in a DIFFERENT format is UNVERIFIABLE, not mismatched: a live harness
+# holding it is refused (and its identity healed in place) rather than treated as
+# a recycled pid, since stealing would put two sessions on one home while refusing
+# only delays one. A same-format mismatch is still the reused-pid case and
+# reclaims. Refusing is safe but must not become "refuse forever", so the
+# unverifiable branch still requires a live HARNESS - and a defunct process is not
+# one, so an unreaped holder stays reclaimable instead of wedging the home.
+#
 # Usage: fm-lock.sh           acquire; exit 1 if another live session holds it
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -65,9 +76,26 @@ harness_pid() {  # the session-stable harness ancestor of this invocation
   return 1
 }
 
+# A ZOMBIE is not a live harness, and the process STATE is the portable way to say
+# so. `kill -0` succeeds for an unreaped process, and Linux ps still reports its
+# comm as the harness name (`claude`, args `[claude] <defunct>`), so a name-only
+# check reads a defunct harness as a live holder and refuses the lock until
+# someone reaps it - the home goes permanently read-only. (macOS renders both comm
+# and args as `<defunct>`, which happens not to match, but that is a coincidence
+# of formatting, not a check.) State `Z` is reported by both.
+pid_is_defunct() {
+  local state
+  state=$(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$state" in
+    Z*) return 0 ;;
+  esac
+  return 1
+}
+
 holder_is_harness_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1 comm
   fm_pid_alive "$pid" || return 1
+  pid_is_defunct "$pid" && return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
 }
@@ -75,10 +103,18 @@ holder_is_harness_alive() {  # true if $1 is a live process that looks like a ha
 lock_pid() { cat "$LOCK/pid" 2>/dev/null || true; }
 lock_identity() { cat "$LOCK/pid-identity" 2>/dev/null || true; }
 
+# True when a recorded identity cannot be compared to a freshly computed one
+# because they were written in different formats (fm_pid_identity_verdict 2).
+identity_unverifiable() {  # <stored> <current>
+  fm_pid_identity_verdict "$1" "$2"
+  [ $? -eq 2 ]
+}
+
 # classify_holder <pid>: echo one of live|impostor|wait for the current holder pid.
-#   live     - alive, recorded identity still matches, genuinely a harness: refuse.
-#   impostor - dead, a reused/mismatched pid, no identity past the grace, or not a
-#              harness: safe to reclaim.
+#   live     - alive, recorded identity still matches (or is unverifiable across a
+#              format change), genuinely a harness: refuse.
+#   impostor - dead, a SAME-FORMAT mismatched pid, no identity past the grace, or
+#              not a harness: safe to reclaim.
 #   wait     - alive but no identity recorded yet and the lock is fresh: another
 #              session is mid-acquire; retry rather than steal or refuse.
 classify_holder() {
@@ -93,8 +129,48 @@ classify_holder() {
   # A live pid whose identity cannot be read is treated as a live holder (refuse),
   # never stolen: we only reclaim on a proven-dead or proven-mismatched holder.
   [ -n "$current" ] || { echo live; return; }
-  [ "$current" = "$stored" ] || { echo impostor; return; }   # reused/recycled pid
+  fm_pid_identity_verdict "$stored" "$current"
+  case $? in
+    1) echo impostor; return ;;   # same format, different process: reused pid
+    2)
+      # UNVERIFIABLE: the identity was recorded in an older format, because a
+      # firstmate update landed while this session was live. A format change is
+      # NOT evidence of a reused pid, and comparing across formats would read
+      # every pre-update holder as an impostor and steal the lock - two sessions
+      # on one home, exactly what the identity check exists to prevent. Refusing
+      # at worst delays one session, so a live harness keeps the lock; only a
+      # non-harness process holding it stays reclaimable, so a genuinely recycled
+      # pid still cannot wedge the home.
+      ;;
+  esac
   if holder_is_harness_alive "$pid"; then echo live; else echo impostor; fi
+}
+
+# upgrade_holder_identity <pid>: rewrite a live holder's older-format identity in
+# the current format, so the unverifiable window closes after one contended
+# acquire instead of recurring on every later one. Called for a holder classified
+# `live`; it re-derives the stale-format condition itself rather than trusting a
+# flag, because classify_holder runs in a command substitution and cannot hand
+# state back. It no-ops unless a heal is genuinely needed, so the `.steal` mutex
+# is taken only for the one transitional acquire. The write happens only under
+# that mutex with the pid, the stored identity, and the stale format re-verified
+# there - so a contender that swapped the lock under us never receives our write
+# into ITS owner dir (the split-brain hazard record_holder is built around).
+# Best-effort: a lost mutex or a changed holder simply leaves the identity alone.
+upgrade_holder_identity() {
+  local pid=$1 steal="$LOCK.steal" current stored
+  stored=$(lock_identity)
+  [ -n "$stored" ] || return 0
+  current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  [ -n "$current" ] || return 0
+  identity_unverifiable "$stored" "$current" || return 0
+  fm_lock_try_acquire "$steal" || return 0
+  stored=$(lock_identity)
+  if [ "$(lock_pid)" = "$pid" ] && identity_unverifiable "$stored" "$current" &&
+     holder_is_harness_alive "$pid"; then
+    { printf '%s\n' "$current" > "$LOCK/pid-identity"; } 2>/dev/null || true
+  fi
+  fm_lock_release "$steal"
 }
 
 # Migrate a legacy plain-file lock (the pre-directory format: $STATE/.lock holding
@@ -222,6 +298,8 @@ while [ "$tries" -lt 120 ]; do
   held=${FM_LOCK_HELD_PID:-$(lock_pid)}
   case "$(classify_holder "$held")" in
     live)
+      # Heal a pre-update identity once, while we have the holder confirmed live.
+      upgrade_holder_identity "$held"
       if [ -n "$held" ] && [ "$held" = "$me" ]; then
         echo "lock acquired: harness pid $me (already held by this session)"
         exit 0

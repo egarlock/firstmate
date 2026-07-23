@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-watcher-lock.test.sh - watcher singleton + lock-primitive races +
-# watch-arm liveness + guard warnings. These are safety-critical concurrency
-# invariants (a race bug may not reproduce through an e2e), so they stay as
-# focused real-process units.
+# PID identity stability + watch-arm liveness + guard warnings. These are
+# safety-critical process invariants (a race bug may not reproduce through an
+# e2e), so they stay as focused real-process units.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -463,6 +463,46 @@ test_arm_reports_healthy_for_live_fresh_watcher() {
   pass "arm reports a live fresh watcher as healthy and exits zero"
 }
 
+test_arm_reports_healthy_across_an_identity_format_change() {
+  # The other half of the format-tag transition (the session lock's half lives in
+  # tests/fm-session-lock.test.sh): a firstmate update that changes the identity
+  # FORMAT lands while a watcher is running, so the lock still holds a pre-update
+  # identity string. Comparing formats by string equality would read this live,
+  # beating watcher as a reused pid: every arm would report FAILED against a
+  # perfectly healthy watcher for as long as it runs, and --restart would clear
+  # its lock instead of stopping it. An older-format identity is unverifiable, not
+  # mismatched, so the live watcher must still read healthy.
+  local dir state fakebin out armout i wpid status tagged
+  dir=$(make_case arm-identity-format-change)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  # Rewrite the recorded identity as the PRE-TAG format recorded it: same payload,
+  # no format tag - exactly what an older firstmate left in this file.
+  tagged=$(cat "$state/.watch.lock/pid-identity")
+  printf '%s\n' "${tagged#* }" > "$state/.watch.lock/pid-identity"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" > "$armout" || status=$?
+  [ "$status" -eq 0 ] || fail "arm did not exit zero for a healthy watcher across a format change (status $status): $(cat "$armout")"
+  grep -F "watcher: healthy pid=$wpid" "$armout" >/dev/null \
+    || fail "arm did not report the live watcher as healthy across an identity format change: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a live watcher across an identity format change"
+  ! grep -qF 'watcher: started' "$armout" || fail "arm started a second watcher across an identity format change"
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  pass "arm honors a live watcher whose recorded identity predates an identity format change"
+}
+
 test_arm_starts_and_self_heals() {
   # Arming with no confirmable watcher must FORK one and confirm it live + fresh
   # before reporting 'started' - whether the lock is empty (clean start) or held
@@ -619,7 +659,182 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+test_pid_identity_is_locale_invariant() {
+  # The portable fallback records its process identity under one locale, then
+  # arm/guard re-read it under the machine's ambient locale. ps's lstart date
+  # format follows LC_TIME, so an unpinned read on a non-C locale (e.g. ko_KR)
+  # would reject a genuinely live watcher. The fallback pins LC_ALL=C inside
+  # fm_pid_identity, so its output must be byte-identical regardless of the caller's
+  # exported LC_ALL/LC_TIME. This stays deterministic on CI even where an alternate
+  # locale like ko_KR.UTF-8 is not installed (the equality then holds trivially).
+  local live no_proc baseline via_lc_all via_lc_time
+  sleep 300 &
+  live=$!
+  no_proc="$TMP_ROOT/no-proc"
+  baseline=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_all=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_time=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$baseline" ] || fail "fm_pid_identity produced no baseline identity under LC_ALL=C"
+  [ "$via_lc_all" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_ALL (got '$via_lc_all', want '$baseline')"
+  [ "$via_lc_time" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_TIME (got '$via_lc_time', want '$baseline')"
+  pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
+}
+
+write_fake_proc_identity() {
+  local proc_root=$1 pid=$2 starttime=$3
+  mkdir -p "$proc_root/$pid"
+  printf '%s\n' "$pid (watcher ) with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 $starttime 20 21 22" > "$proc_root/$pid/stat"
+  printf 'bash\0/path with spaces/fm-watch.sh\0--flag\0' > "$proc_root/$pid/cmdline"
+}
+
+test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
+  # The /proc fixture is synthetic, and FM_PROC_ROOT_OVERRIDE enables that branch
+  # on any host, so this runs everywhere rather than only on Linux CI.
+  local dir state proc_root pid before after_time_jump after_pid_reuse
+  dir=$(make_case linux-pid-identity)
+  state="$dir/state"
+  proc_root="$dir/proc"
+  pid=4242
+  mkdir -p "$proc_root"
+  printf 'btime 1784094040\n' > "$proc_root/stat"
+  write_fake_proc_identity "$proc_root" "$pid" 987654
+
+  before=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not read initial fake Linux process identity"
+  printf 'btime 1784094016\n' > "$proc_root/stat"
+  after_time_jump=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not re-read fake Linux process identity after btime change"
+
+  [ "$after_time_jump" = "$before" ] \
+    || fail "Linux process identity changed with btime (before '$before', after '$after_time_jump')"
+  [ "$before" = 'fmid1p linux-starttime=987654 cmdline-hex=62617368002f706174682077697468207370616365732f666d2d77617463682e7368002d2d666c616700' ] \
+    || fail "Linux process identity did not combine the format tag with parsed starttime field 22 and the full cmdline ('$before')"
+  pass "Linux process identity ignores simulated btime changes"
+
+  write_fake_proc_identity "$proc_root" "$pid" 987655
+  after_pid_reuse=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not read reused fake Linux pid identity"
+  [ "$after_pid_reuse" != "$before" ] || fail "Linux process identity missed changed starttime for reused pid"
+  pass "Linux process identity detects pid reuse"
+}
+
+pid_identity() {  # <proc-root> <pid>
+  FM_PROC_ROOT_OVERRIDE="$1" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$2" 2>/dev/null
+}
+
+identity_verdict() {  # <stored> <current> -> 0 match | 1 mismatch | 2 unverifiable
+  local rc=0
+  bash -c '. "$1"; fm_pid_identity_verdict "$2" "$3"' _ "$LIB" "$1" "$2" || rc=$?
+  printf '%s\n' "$rc"
+}
+
+test_proc_identity_parse_failure_falls_back_to_ps() {
+  # The /proc readability guards prove the files EXIST, not that they parse. Each
+  # parse failure must fall through to the portable ps path rather than yielding
+  # no identity at all: classify_holder reads an empty identity as a live holder,
+  # so an unparseable read would refuse the lock forever (the home goes read-only),
+  # and record_holder requires a non-empty identity, so the contender's own
+  # acquire would fail through every one of its bounded tries.
+  #
+  # The empty-cmdline row is the realistic trigger: that is exactly what an
+  # unreaped ZOMBIE reports while `kill -0` still succeeds.
+  local dir proc_root live row ident
+  dir=$(make_case proc-parse-fallthrough)
+  proc_root="$dir/proc"
+  sleep 300 &
+  live=$!
+  for row in empty-cmdline short-stat non-numeric-starttime unreadable-stat unreadable-cmdline; do
+    rm -rf "$proc_root"
+    mkdir -p "$proc_root/$live"
+    case "$row" in
+      empty-cmdline)
+        write_fake_proc_identity "$proc_root" "$live" 987654
+        : > "$proc_root/$live/cmdline"
+        ;;
+      short-stat)
+        write_fake_proc_identity "$proc_root" "$live" 987654
+        printf '%s (comm) S 1 2 3\n' "$live" > "$proc_root/$live/stat"
+        ;;
+      non-numeric-starttime)
+        write_fake_proc_identity "$proc_root" "$live" 'not-a-number'
+        ;;
+      unreadable-stat)
+        # `-r` passes on a directory but `cat` fails: the guard proves existence,
+        # not that the read succeeds.
+        write_fake_proc_identity "$proc_root" "$live" 987654
+        rm -f "$proc_root/$live/stat"
+        mkdir "$proc_root/$live/stat"
+        ;;
+      unreadable-cmdline)
+        # Same shape one step later: od cannot render a directory, so the hex
+        # payload comes back empty.
+        write_fake_proc_identity "$proc_root" "$live" 987654
+        rm -f "$proc_root/$live/cmdline"
+        mkdir "$proc_root/$live/cmdline"
+        ;;
+    esac
+    ident=$(pid_identity "$proc_root" "$live")
+    [ -n "$ident" ] || fail "proc parse failure ($row) produced NO identity instead of falling back to ps"
+    case "$ident" in
+      'fmid1s '*) ;;
+      *) fail "proc parse failure ($row) did not fall through to the ps identity form: '$ident'" ;;
+    esac
+  done
+  # Control: a well-formed fixture still takes the /proc path.
+  rm -rf "$proc_root"
+  write_fake_proc_identity "$proc_root" "$live" 987654
+  ident=$(pid_identity "$proc_root" "$live")
+  case "$ident" in
+    'fmid1p linux-starttime=987654 '*) ;;
+    *) fail "a parseable /proc fixture did not produce the /proc identity form: '$ident'" ;;
+  esac
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "an unparseable /proc read falls through to the ps identity instead of yielding none"
+}
+
+test_identity_source_flip_is_unverifiable_not_reuse() {
+  # The other half of the fall-through, and the reason it is safe. The /proc and
+  # ps payloads are different STRINGS for the same live process, so under a shared
+  # format tag the flip would compare as same-format-different-payload - verdict 1,
+  # "this pid was recycled" - and the lock would be STOLEN from a live session.
+  # Distinct per-source tags make it verdict 2 (unverifiable), whose callers take
+  # the safe branch. A same-format mismatch must stay verdict 1.
+  local dir proc_root live proc_ident ps_ident
+  dir=$(make_case identity-source-flip)
+  proc_root="$dir/proc"
+  sleep 300 &
+  live=$!
+  write_fake_proc_identity "$proc_root" "$live" 987654
+  proc_ident=$(pid_identity "$proc_root" "$live")
+  ps_ident=$(pid_identity "$dir/no-proc" "$live")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  if [ -z "$proc_ident" ] || [ -z "$ps_ident" ]; then
+    fail "could not compute both identity forms for the same pid"
+  fi
+  [ "${proc_ident%% *}" != "${ps_ident%% *}" ] \
+    || fail "the /proc and ps payloads share a format tag ('${proc_ident%% *}'): a source flip would read as a recycled pid"
+  [ "$(identity_verdict "$proc_ident" "$ps_ident")" = 2 ] \
+    || fail "a /proc -> ps source flip for one live pid is not classified unverifiable"
+  [ "$(identity_verdict "$ps_ident" "$proc_ident")" = 2 ] \
+    || fail "a ps -> /proc source flip for one live pid is not classified unverifiable"
+  [ "$(identity_verdict "$proc_ident" "$proc_ident")" = 0 ] \
+    || fail "an identical identity is not classified as a match"
+  [ "$(identity_verdict "$proc_ident" "${proc_ident%% *} linux-starttime=1 cmdline-hex=00")" = 1 ] \
+    || fail "a SAME-format mismatch must stay verdict 1 (the genuine reused-pid case)"
+  [ "$(identity_verdict "${ps_ident#* }" "$ps_ident")" = 2 ] \
+    || fail "an untagged pre-tag identity is not classified unverifiable"
+  pass "an identity SOURCE flip reads unverifiable, while a same-format mismatch stays a reused pid"
+}
+
 test_singleton_start
+test_pid_identity_is_locale_invariant
+test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
+test_proc_identity_parse_failure_falls_back_to_ps
+test_identity_source_flip_is_unverifiable_not_reuse
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
@@ -634,6 +849,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watcher_self_evicts_on_lock_takeover
 test_arm_reports_healthy_for_live_fresh_watcher
+test_arm_reports_healthy_across_an_identity_format_change
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
