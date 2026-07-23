@@ -416,6 +416,8 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalati
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_TEARDOWN_NET_TIMEOUT=30                # seconds bound on fm-teardown.sh's single content-fallback fetch; a timeout makes the check inconclusive and refuses rather than false-allowing
+FM_MARKER_SWEEP_MIN_AGE_MINS=2           # min age before bin/fm-marker-sweep.sh removes an orphaned per-task watcher/daemon marker; <= 0 disables the age guard
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature
@@ -452,6 +454,10 @@ FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher c
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 ```
+
+`fm-teardown.sh`'s landed-work oracle allows teardown on a recorded `landed=<sha>` that covers HEAD, on HEAD being reachable from a publishing remote-tracking branch (the local `no-mistakes` gate remote excluded), or on the branch's content already being present in the default branch.
+Only that last content fallback reaches the network, as a single default-branch fetch bounded by `FM_TEARDOWN_NET_TIMEOUT` seconds (default 30); a timeout or any inconclusive result refuses rather than false-allowing, and the content check itself needs Git 2.38+ for `merge-tree --write-tree`.
+`bin/fm-marker-sweep.sh`, run best-effort and quiet by bootstrap, removes orphaned per-task watcher/daemon marker sidecars left by tasks that died without teardown; it only considers markers older than `FM_MARKER_SWEEP_MIN_AGE_MINS` minutes (default 2, `<= 0` disables the guard) and never touches a live task's markers or a global runtime sidecar.
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.
