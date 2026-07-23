@@ -4,13 +4,15 @@
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub, an
+# arbitrarily nested group/subgroup/project namespace on GitLab, and
+# org/project/_git/repository on Azure DevOps (project/_git/repository on the
+# legacy <org>.visualstudio.com host, whose org lives in the host label). A
+# GitLab project can sit at any depth, so no owner/repository pair can address
+# one and the sidecar carries the whole path instead. GitLab also runs on
+# self-hosted instances, so the host is part of that identity rather than a
+# constant. Every consumer re-derives the identity from the stored URL and
+# refuses any record whose parts do not reconstruct that exact URL.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -18,6 +20,10 @@ FM_PR_HOST=
 FM_PR_PATH=
 FM_PR_OWNER=
 FM_PR_REPO=
+FM_PR_ADO_ORG=
+FM_PR_ADO_PROJECT=
+FM_PR_ADO_REPO=
+FM_PR_ADO_ORG_URL=
 FM_PR_NUMBER=
 FM_PR_DATA_PROVIDER=
 FM_PR_DATA_URL=
@@ -83,13 +89,19 @@ fm_task_id_creation_valid() {
 # github.com is refused here even though its shape is otherwise valid: it is
 # GitHub's own host and never a GitLab instance, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a GitLab watch that can never succeed.
+# would otherwise be armed as a GitLab watch that can never succeed. The Azure
+# DevOps hosts (dev.azure.com and any <org>.visualstudio.com) are refused for
+# the same reason.
 fm_pr_gitlab_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
   [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
   [ "$host" != github.com ] || return 1
+  [ "$host" != dev.azure.com ] || return 1
+  case "$host" in
+    *.visualstudio.com) return 1 ;;
+  esac
   case "$host" in
     .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
   esac
@@ -124,17 +136,44 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# An Azure DevOps organization: 1-50 characters, letters, digits, and inner
+# hyphens, matching the names dev.azure.com/<org> and <org>.visualstudio.com
+# accept.
+fm_pr_ado_org_valid() {
+  local org=${1-}
+  local LC_ALL=C
+  [ "${#org}" -ge 1 ] && [ "${#org}" -le 50 ] || return 1
+  case "$org" in
+    -*|*-|*[!A-Za-z0-9-]*) return 1 ;;
+  esac
+}
+
+# An Azure DevOps project or repository segment. ADO URLs keep the forge's
+# percent-encoding (e.g. My%20Project) so the stored URL reconstructs
+# byte-for-byte from the sidecar components; every % must therefore introduce
+# a well-formed %XX escape, keeping exactly one encoded spelling per segment.
+# "." and ".." never name a real project or repository and are refused.
+fm_pr_ado_segment_valid() {
+  local segment=${1-}
+  local LC_ALL=C
+  [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
+  case "$segment" in
+    .|..|*[!A-Za-z0-9._%-]*) return 1 ;;
+  esac
+  [[ "$segment" =~ ^([A-Za-z0-9._-]|%[0-9A-Fa-f]{2})+$ ]]
+}
+
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, and GitLab and Azure DevOps get their own host and namespace
+# rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
 # bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
 # them empty; teaching the merge path about GitLab is a separate change, and
 # until then it refuses a GitLab URL rather than merging anything.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path ado_org ado_project ado_repo ado_number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -142,6 +181,10 @@ fm_pr_url_parse() {
   FM_PR_PATH=
   FM_PR_OWNER=
   FM_PR_REPO=
+  FM_PR_ADO_ORG=
+  FM_PR_ADO_PROJECT=
+  FM_PR_ADO_REPO=
+  FM_PR_ADO_ORG_URL=
   FM_PR_NUMBER=
   pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
@@ -157,6 +200,65 @@ fm_pr_url_parse() {
     # shellcheck disable=SC2034
     FM_PR_REPO=${BASH_REMATCH[2]}
     FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Azure DevOps pull requests: the modern dev.azure.com organization host and
+  # the legacy <org>.visualstudio.com host, which names the same organization.
+  # Each accepted spelling is its own exact identity - host and path
+  # reconstruct the stored URL byte-for-byte, percent-encoding included -
+  # while consumers derive the az CLI's canonical https://dev.azure.com/<org>
+  # organization URL from FM_PR_ADO_ORG_URL, so the legacy host still
+  # addresses the modern organization.
+  pattern='^https://dev\.azure\.com/([A-Za-z0-9-]{1,50})/([A-Za-z0-9._%-]{1,255})/_git/([A-Za-z0-9._%-]{1,255})/pullrequest/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    # The helper validators run [[ =~ ]] themselves, which resets
+    # BASH_REMATCH, so every group is captured before the first helper call.
+    ado_org=${BASH_REMATCH[1]}
+    ado_project=${BASH_REMATCH[2]}
+    ado_repo=${BASH_REMATCH[3]}
+    ado_number=${BASH_REMATCH[4]}
+    fm_pr_ado_org_valid "$ado_org" || return 1
+    fm_pr_ado_segment_valid "$ado_project" || return 1
+    fm_pr_ado_segment_valid "$ado_repo" || return 1
+    FM_PR_PROVIDER=azuredevops
+    FM_PR_URL=$raw
+    FM_PR_HOST=dev.azure.com
+    FM_PR_PATH="$ado_org/$ado_project/_git/$ado_repo"
+    FM_PR_NUMBER=$ado_number
+    # Consumed by bin/fm-pr-check.sh and bin/fm-pr-merge.sh, which address the
+    # az CLI by organization URL and PR number.
+    # shellcheck disable=SC2034
+    FM_PR_ADO_ORG=$ado_org
+    # shellcheck disable=SC2034
+    FM_PR_ADO_PROJECT=$ado_project
+    # shellcheck disable=SC2034
+    FM_PR_ADO_REPO=$ado_repo
+    # shellcheck disable=SC2034
+    FM_PR_ADO_ORG_URL="https://dev.azure.com/$ado_org"
+    return 0
+  fi
+  pattern='^https://([A-Za-z0-9-]{1,50})\.visualstudio\.com/([A-Za-z0-9._%-]{1,255})/_git/([A-Za-z0-9._%-]{1,255})/pullrequest/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    ado_org=${BASH_REMATCH[1]}
+    ado_project=${BASH_REMATCH[2]}
+    ado_repo=${BASH_REMATCH[3]}
+    ado_number=${BASH_REMATCH[4]}
+    fm_pr_ado_org_valid "$ado_org" || return 1
+    fm_pr_ado_segment_valid "$ado_project" || return 1
+    fm_pr_ado_segment_valid "$ado_repo" || return 1
+    FM_PR_PROVIDER=azuredevops
+    FM_PR_URL=$raw
+    FM_PR_HOST="$ado_org.visualstudio.com"
+    FM_PR_PATH="$ado_project/_git/$ado_repo"
+    FM_PR_NUMBER=$ado_number
+    # shellcheck disable=SC2034
+    FM_PR_ADO_ORG=$ado_org
+    # shellcheck disable=SC2034
+    FM_PR_ADO_PROJECT=$ado_project
+    # shellcheck disable=SC2034
+    FM_PR_ADO_REPO=$ado_repo
+    # shellcheck disable=SC2034
+    FM_PR_ADO_ORG_URL="https://dev.azure.com/$ado_org"
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -179,6 +281,21 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+# Verify the az CLI plus its azure-devops extension before an Azure DevOps PR
+# flow starts. The static poll is silent on every error by design, so arming
+# and merging are the points where a missing tool can still be reported; both
+# call this and it prints an actionable remedy to stderr.
+fm_ado_preflight() {
+  if ! command -v az >/dev/null 2>&1; then
+    echo "error: Azure DevOps PR URLs need the az CLI; install azure-cli, then run: az extension add --name azure-devops && az login" >&2
+    return 1
+  fi
+  if ! az extension show --name azure-devops >/dev/null 2>&1; then
+    echo "error: az CLI is missing the azure-devops extension; run: az extension add --name azure-devops (and az login if not signed in)" >&2
+    return 1
+  fi
 }
 
 fm_pr_file_mode() {

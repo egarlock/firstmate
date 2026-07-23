@@ -87,10 +87,29 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # az with its azure-devops extension, reproducing the real CLI's contract:
+  # tsv field output on stdout and exit 0 on success, a non-zero exit with no
+  # stdout on any failure, and `extension show` answering the preflight.
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_AZ_LOG"
+case " $* " in
+  *" extension show "*) exit "${FM_TEST_AZ_EXT_RC:-0}" ;;
+  *" lastMergeSourceCommit.commitId "*)
+    [ "${FM_TEST_AZ_FAIL:-0}" = 0 ] || exit 1
+    printf '%s\n' "${FM_TEST_AZ_HEAD:-fedcba9876543210fedcba9876543210fedcba98}"
+    ;;
+  *" --query status "*)
+    [ "${FM_TEST_AZ_FAIL:-0}" = 0 ] || exit 1
+    printf '%s\n' "${FM_TEST_AZ_STATUS:-active}"
+    ;;
+esac
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/az"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/az.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -237,6 +256,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_AZ_LOG="$dir/az.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -247,6 +267,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_AZ_LOG="$dir/az.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -340,6 +361,37 @@ INVALID_URLS=(
   'https://github.com/o/'\''"r"'\''/pull/1'
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
+  'https://dev.azure.com/o/p/pullrequest/1'
+  'https://dev.azure.com/o/p/_git/r/pullrequest/0'
+  'https://dev.azure.com/o/p/_git/r/pullrequest/01'
+  'https://dev.azure.com/o/p/_git/r/pullrequest/1/'
+  'https://dev.azure.com/o/p/_git/r/pullrequest/1?x=1'
+  'https://dev.azure.com/o/p/_git/r/pullrequest/1#f'
+  'https://dev.azure.com/-o/p/_git/r/pullrequest/1'
+  'https://dev.azure.com/o-/p/_git/r/pullrequest/1'
+  'https://dev.azure.com/o/./_git/r/pullrequest/1'
+  'https://dev.azure.com/o/../_git/r/pullrequest/1'
+  'https://dev.azure.com/o/p%2/_git/r/pullrequest/1'
+  'https://dev.azure.com/o/p%GG/_git/r/pullrequest/1'
+  'https://dev.azure.com/o/p/_git/r%/pullrequest/1'
+  'https://dev.azure.com//p/_git/r/pullrequest/1'
+  'https://dev.azure.com/o//_git/r/pullrequest/1'
+  'https://dev.azure.com/o/p/_git//pullrequest/1'
+  'https://dev.azure.com/o/p/_git/r/pull/1'
+  'https://dev.azure.com/o/p/_Git/r/pullrequest/1'
+  'https://dev.azure.com/g/p/-/merge_requests/1'
+  'https://o.visualstudio.com/g/p/-/merge_requests/1'
+  'https://user@dev.azure.com/o/p/_git/r/pullrequest/1'
+  'https://dev.azure.com:443/o/p/_git/r/pullrequest/1'
+  'http://dev.azure.com/o/p/_git/r/pullrequest/1'
+  'https://dev.azure.com.evil/o/p/_git/r/pullrequest/1'
+  'https://sub.o.visualstudio.com/p/_git/r/pullrequest/1'
+  'https://.visualstudio.com/p/_git/r/pullrequest/1'
+  'https://o.visualstudio.com/p/_git/r/pullrequest/1/'
+  'https://dev.azure.com/o$/p/_git/r/pullrequest/1'
+  'https://dev.azure.com/o/p$(x)/_git/r/pullrequest/1'
+  'https://dev.azure.com/o/p`x`/_git/r/pullrequest/1'
+  "https://dev.azure.com/o/'p'/_git/r/pullrequest/1"
 )
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
@@ -406,10 +458,35 @@ https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/s
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
 EOF
+  while IFS='|' read -r url host path number org_url; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Azure DevOps PR URL"
+    [ "$FM_PR_PROVIDER" = azuredevops ] || fail "parser did not tag an Azure DevOps PR URL as azuredevops"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Azure DevOps PR URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Azure DevOps host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Azure DevOps project path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Azure DevOps PR number"
+    [ "$FM_PR_ADO_ORG_URL" = "$org_url" ] \
+      || fail "parser did not derive the canonical az organization URL"
+    [ "https://$FM_PR_HOST/$FM_PR_PATH/pullrequest/$FM_PR_NUMBER" = "$url" ] \
+      || fail "Azure DevOps identity components did not reconstruct the stored URL"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for an Azure DevOps PR URL"
+  done <<'EOF'
+https://dev.azure.com/exampleorg/Example.Project/_git/example-repo/pullrequest/42|dev.azure.com|exampleorg/Example.Project/_git/example-repo|42|https://dev.azure.com/exampleorg
+https://dev.azure.com/my-org/My%20Project/_git/my_repo/pullrequest/1|dev.azure.com|my-org/My%20Project/_git/my_repo|1|https://dev.azure.com/my-org
+https://exampleorg.visualstudio.com/My%20Project/_git/example-repo/pullrequest/7|exampleorg.visualstudio.com|My%20Project/_git/example-repo|7|https://dev.azure.com/exampleorg
+EOF
+  fm_pr_url_parse https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/9 \
+    || fail "parser rejected a canonical Azure DevOps PR URL"
+  [ "$FM_PR_ADO_ORG" = exampleorg ] || fail "parser returned wrong Azure DevOps organization"
+  [ "$FM_PR_ADO_PROJECT" = proj ] || fail "parser returned wrong Azure DevOps project"
+  [ "$FM_PR_ADO_REPO" = repo ] || fail "parser returned wrong Azure DevOps repository"
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
   [ "$FM_PR_PATH" = a/b ] || fail "parser returned wrong GitHub project path"
+  [ -z "$FM_PR_ADO_ORG_URL" ] || fail "parser kept Azure DevOps state on a GitHub URL"
   for row in "${INVALID_URLS[@]}"; do
     ! fm_pr_url_parse "$row" || fail "parser accepted a rejected raw-byte URL class"
   done
@@ -693,6 +770,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_AZ_LOG="$dir/az.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -2839,8 +2917,147 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+# The Azure DevOps arm of the same static-poll model: an ADO pull request is
+# followed through the validated sidecar and the az CLI, wakes only on the
+# terminal completed status, and the identity (percent-encoding included)
+# round-trips the sidecar byte-for-byte.
+test_ado_merge_watch() {
+  local dir state out rc url vurl value noaz entry bindir name
+  dir=$(make_case ado-merge-watch)
+  state="$dir/home/state"
+  url='https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo/pullrequest/42'
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a azuredevops "$url" dev.azure.com \
+    'exampleorg/Example%20Project/_git/example-repo' 42 "$POLL" \
+    || fail "could not prepare an Azure DevOps poll"
+  fm_pr_poll_publish_prepared || fail "could not publish an Azure DevOps poll"
+  # This walks the whole validated chain (sidecar, registration, and the
+  # metadata identity parse the migrator reuses), so the new provider is
+  # proven to ride the existing model rather than a parallel path.
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Azure DevOps poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "azuredevops
+$url
+dev.azure.com
+exampleorg/Example%20Project/_git/example-repo
+42" ] || fail "published Azure DevOps sidecar bytes were not exact"
+
+  # Only ADO's terminal completed status wakes firstmate. Active and abandoned
+  # pull requests, unreadable lookups, and changed formats stay silent, so an
+  # abandoned PR surfaces through supervision rather than a false merge.
+  for value in active abandoned '' notReady COMPLETED completed-not; do
+    out=$(FM_TEST_AZ_STATUS="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Azure DevOps poll emitted for a non-completed status"
+  done
+  out=$(FM_TEST_AZ_STATUS=completed run_poll "$dir")
+  [ "$out" = merged ] || fail "Azure DevOps poll did not emit exactly one merged line"
+  out=$(FM_TEST_AZ_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted after an az failure"
+
+  # az is addressed by the canonical organization URL and PR number derived
+  # from the validated identity, never by the stored URL itself.
+  grep -qF -- "repos pr show --id 42 --organization https://dev.azure.com/exampleorg --query status -o tsv" "$dir/az.log" \
+    || fail "Azure DevOps poll did not address az by organization URL and PR number"
+  ! grep -qF -- "$url" "$dir/az.log" \
+    || fail "Azure DevOps poll passed a pull request URL to az"
+
+  # An absent CLI must produce no wake rather than a false merge.
+  noaz="$dir/noaz"
+  mkdir -p "$noaz"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = az ] && continue
+      [ -e "$noaz/$name" ] || ln -s "$entry" "$noaz/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$noaz" command -v az >/dev/null 2>&1 \
+    || fail "the az-free search path still resolved az"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_LOG="$dir/az.log" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$noaz" \
+    bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted with az absent from PATH"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' azuredevops "$url" other.example \
+    'exampleorg/Example%20Project/_git/example-repo' 42 > "$state/task-a.pr-poll"
+  out=$(FM_TEST_AZ_STATUS=completed run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' azuredevops "$url" dev.azure.com \
+    'exampleorg/Example%20Project/_git/other-repo' 42 > "$state/task-a.pr-poll"
+  out=$(FM_TEST_AZ_STATUS=completed run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for a sidecar whose repository was swapped"
+
+  # Arming refuses with a remedy when az is absent or the azure-devops
+  # extension is missing; the poll's silence makes arming the only point where
+  # either can be reported.
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$noaz" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming an Azure DevOps watch succeeded with az absent"
+  case "$out" in
+    *"need the az CLI"*) ;;
+    *) fail "arming an Azure DevOps watch with az absent did not report the missing CLI" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Azure DevOps arming left a poll armed"
+  set +e
+  out=$(FM_TEST_AZ_EXT_RC=1 run_check_entry "$dir" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming an Azure DevOps watch succeeded without the azure-devops extension"
+  case "$out" in
+    *"missing the azure-devops extension"*) ;;
+    *) fail "arming without the azure-devops extension did not report the remedy" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused extension-less arming left a poll armed"
+
+  # Successful arming records pr= plus pr_head= from the PR's source-branch
+  # head, and the armed check is the byte-identical static template.
+  run_check_entry "$dir" task-b "$url" >/dev/null 2>&1 \
+    || fail "arming an Azure DevOps watch failed with az present"
+  grep -qxF "pr=$url" "$state/task-b.meta" \
+    || fail "Azure DevOps arming did not record pr="
+  grep -qxF "pr_head=fedcba9876543210fedcba9876543210fedcba98" "$state/task-b.meta" \
+    || fail "Azure DevOps arming did not record pr_head= from lastMergeSourceCommit"
+  cmp -s "$POLL" "$state/task-b.check.sh" \
+    || fail "armed Azure DevOps check was not the byte-identical static poll"
+
+  # The legacy visualstudio.com spelling keeps its own exact identity while az
+  # is still addressed by the modern dev.azure.com organization URL.
+  vurl='https://exampleorg.visualstudio.com/Example%20Project/_git/example-repo/pullrequest/7'
+  write_task_meta "$dir" task-d
+  run_check_entry "$dir" task-d "$vurl" >/dev/null 2>&1 \
+    || fail "arming a legacy visualstudio.com watch failed"
+  [ "$(cat "$state/task-d.pr-poll")" = "azuredevops
+$vurl
+exampleorg.visualstudio.com
+Example%20Project/_git/example-repo
+7" ] || fail "legacy visualstudio.com sidecar bytes were not exact"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_LOG="$dir/az.log" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$state/task-d.check.sh")
+  [ "$out" = merged ] || fail "legacy visualstudio.com poll did not wake on completed"
+  grep -qF -- "repos pr show --id 7 --organization https://dev.azure.com/exampleorg --query status -o tsv" "$dir/az.log" \
+    || fail "legacy visualstudio.com poll did not normalize the az organization URL"
+  pass "Azure DevOps pull requests ride the validated static-poll model end to end"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
+test_ado_merge_watch
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
