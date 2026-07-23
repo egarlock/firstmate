@@ -949,16 +949,27 @@ EOF
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
-    fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
-    read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
+    # fm_backend_cmux_container_ensure echoes the container token: the
+    # literal "workspace" (workspace-per-task, the default) or the container
+    # workspace's UUID (tab mode - firstmate's own workspace inside cmux, or
+    # the shared per-home one; config/cmux-container, docs/cmux-backend.md
+    # "Task container shape"). create_task echoes "<workspace> <surface>" in
+    # both modes, so everything downstream is mode-agnostic.
+    CMUX_CONTAINER=$(fm_backend_cmux_container_ensure "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$CMUX_CONTAINER" "$W" "$PROJ_ABS") || exit 1
+    # _TASK-suffixed names, never bare CMUX_WORKSPACE_ID: that is the ambient
+    # env marker cmux injects into its own terminals, which container_ensure
+    # reads (tab mode joins firstmate's own workspace) and the cmux CLI
+    # itself consults as an ambient-target fallback - overwriting it
+    # mid-script would silently repoint both.
+    read -r CMUX_WORKSPACE_ID_TASK CMUX_SURFACE_ID_TASK <<EOF
 $CMUX_TASK_IDS
 EOF
-    if [ -z "$CMUX_WORKSPACE_ID" ] || [ -z "$CMUX_SURFACE_ID" ]; then
+    if [ -z "$CMUX_WORKSPACE_ID_TASK" ] || [ -z "$CMUX_SURFACE_ID_TASK" ]; then
       echo "error: cmux did not return a workspace/surface id for $W" >&2
       exit 1
     fi
-    T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    T="$CMUX_WORKSPACE_ID_TASK:$CMUX_SURFACE_ID_TASK"
     ;;
   orca)
     set +e
@@ -1293,8 +1304,8 @@ META_WINDOW=$T
     echo "terminal=$ORCA_TERMINAL"
   fi
   if [ "$BACKEND" = cmux ]; then
-    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
-    echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID_TASK"
+    echo "cmux_surface_id=$CMUX_SURFACE_ID_TASK"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

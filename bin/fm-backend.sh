@@ -604,7 +604,11 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 # fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
 # native agent-state (herdr-addendum "busy state" row - the first backend
 # where this gets real semantics beyond pane-regex). Backends with no such
-# primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
+# primitive (tmux) report unknown. cmux has a FORWARD-COMPATIBLE probe only:
+# no verified cmux version exposes a machine-readable agent-state field yet,
+# so fm_backend_cmux_busy_state reports unknown everywhere today and starts
+# reporting real state if a future cmux adds the probed `agent_status` field
+# (bin/backends/cmux.sh). Callers own the fallback policy: fm-watch.sh
 # uses unknown as the cue for its pane-hash + FM_BUSY_REGEX detection, while
 # fm-crew-state.sh also corroborates native idle verdicts before treating a
 # no-run crew as not busy.
@@ -614,6 +618,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    cmux) fm_backend_cmux_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
