@@ -229,11 +229,15 @@ hash_file() {
 }
 
 pi_extension_loaded() {
-  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
-  [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
+  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid lock_file
+  # bin/fm-lock.sh's session lock is a symlink to an owner directory holding the
+  # holder pid; a legacy plain-file lock still holds the pid directly until this
+  # home's first acquire migrates it.
+  if [ -f "$lock/pid" ]; then lock_file="$lock/pid"; else lock_file="$lock"; fi
+  [ -f "$marker" ] && [ -f "$lock_file" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
   marker_pid=$(sed -n '2p' "$marker")
-  lock_pid=$(sed -n '1p' "$lock")
+  lock_pid=$(sed -n '1p' "$lock_file")
   [ -n "$marker_pid" ] || return 1
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }

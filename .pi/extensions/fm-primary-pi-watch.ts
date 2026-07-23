@@ -105,10 +105,16 @@ function pidAlive(pid: string): boolean {
 
 function lockOwnership(): LockOwnership {
   let lockPid = "";
+  // bin/fm-lock.sh's session lock is a symlink to an owner directory holding the
+  // holder pid; the plain-file read is the pre-migration fallback.
   try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+    lockPid = readFileSync(`${state}/.lock/pid`, "utf8").trim();
   } catch {
-    return "missing";
+    try {
+      lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+    } catch {
+      return "missing";
+    }
   }
   if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
   let pid = String(process.pid);

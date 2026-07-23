@@ -108,10 +108,16 @@ function shouldArm(paths) {
 
 async function sessionOwnsLock(paths) {
   let lockPid = "";
+  // bin/fm-lock.sh's session lock is a symlink to an owner directory holding the
+  // holder pid; the plain-file read is the pre-migration fallback.
   try {
-    lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
+    lockPid = readFileSync(`${paths.state}/.lock/pid`, "utf8").trim();
   } catch {
-    return false;
+    try {
+      lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
+    } catch {
+      return false;
+    }
   }
   if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false;
   let pid = String(process.pid);

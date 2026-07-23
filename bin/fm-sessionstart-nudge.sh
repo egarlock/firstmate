@@ -22,8 +22,16 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 lock_is_in_ancestry() {
   local lock_pid pid=$$ _
-  [ -f "$STATE/.lock" ] || return 1
-  IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
+  # bin/fm-lock.sh's session lock is a symlink to an owner directory holding the
+  # holder pid; the plain-file fallback covers the pre-migration window before a
+  # home's first acquire converts a legacy lock.
+  if [ -f "$STATE/.lock/pid" ]; then
+    IFS= read -r lock_pid < "$STATE/.lock/pid" 2>/dev/null || return 1
+  elif [ -f "$STATE/.lock" ]; then
+    IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
+  else
+    return 1
+  fi
   case "$lock_pid" in
     ''|*[!0-9]*|1) return 1 ;;
   esac

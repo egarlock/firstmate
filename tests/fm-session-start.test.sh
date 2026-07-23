@@ -146,7 +146,19 @@ make_fake_ps_harness() {
 #!/usr/bin/env bash
 set -u
 harness=${FM_FAKE_HARNESS:-claude}
+pid=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "-p" ] && pid="$arg"
+  prev="$arg"
+done
 case "$*" in
+  # fm_pid_identity's non-Linux probe (`ps -p <pid> -o lstart= -o command=`).
+  # bin/fm-lock.sh records this identity at acquire and re-verifies it on every
+  # contended read, so the fake must answer with a stable per-pid string; an
+  # unanswered probe leaves the identity empty and acquisition never completes.
+  # On Linux fm_pid_identity reads /proc instead and never reaches this arm.
+  *"lstart="*) printf 'Mon Jan  1 00:00:00 2024 /usr/local/bin/%s --fm-fake-pid %s\n' "$harness" "$pid"; exit 0 ;;
   *"comm="*) printf '/usr/local/bin/%s\n' "$harness"; exit 0 ;;
   *"args="*) printf '%s\n' "$harness"; exit 0 ;;
 esac
@@ -168,6 +180,9 @@ for arg in "\$@"; do
   prev="\$arg"
 done
 case "\$*" in
+  # See make_fake_ps_harness: fm_pid_identity's non-Linux probe must answer with
+  # a stable per-pid string or bin/fm-lock.sh can never record a holder identity.
+  *"lstart="*) printf 'Mon Jan  1 00:00:00 2024 /usr/local/bin/holder --fm-fake-pid %s\n' "\$pid"; exit 0 ;;
   *"comm="*)
     if [ "\$pid" = "$holder_pid" ]; then
       printf '/usr/local/bin/pi\n'
