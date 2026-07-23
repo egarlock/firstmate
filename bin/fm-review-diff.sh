@@ -5,11 +5,15 @@
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
-# side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
-# current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
-# only a fallback when fetch fails (stale recorded SHAs must never win over a
-# reachable remote PR head). If neither PR head can be resolved, fall back to
-# the local branch with a warning. Without pr=, compare the local branch.
+# side is ALWAYS a freshly fetched PR head by default so review stays current
+# after no-mistakes fix rounds push to the PR. The fetch is provider-aware,
+# keyed off the recorded pr= URL: GitHub publishes refs/pull/<n>/head, while
+# Azure DevOps publishes only refs/pull/<n>/merge (the merge preview, whose
+# second parent is the PR source head), so the ADO head is resolved as that
+# ref's ^2. A recorded pr_head= is only a fallback when fetch fails (stale
+# recorded SHAs must never win over a reachable remote PR head). If neither PR
+# head can be resolved, fall back to the local branch with a warning. Without
+# pr=, compare the local branch.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -19,6 +23,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
+
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
   echo "usage: fm-review-diff.sh <task-id> [--stat]" >&2
@@ -103,14 +110,48 @@ fetch_pull_head() {
   printf '%s' "$resolved"
 }
 
+# Azure DevOps publishes no refs/pull/<n>/head; its refs/pull/<n>/merge is
+# the merge preview commit whose second parent is the PR source head. Fetch
+# that ref into the same private namespace and resolve ^2; any fetch or
+# parent-resolution failure (e.g. a preview the server fast-forwarded) falls
+# through to the recorded pr_head, then the local branch, exactly like the
+# GitHub path.
+fetch_ado_pr_head() {
+  local n=$1 resolved
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin \
+    "+refs/pull/$n/merge:refs/fm-review/pull/$n/merge" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/merge^2" 2>/dev/null) || return 1
+  [ -n "$resolved" ] || return 1
+  printf '%s' "$resolved"
+}
+
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
-  n=$(pr_number_from_target "$pr_url") || true
+  local pr_url=$1 recorded_head=$2 n resolved provider=
+  # Provider-aware resolution keyed off the recorded pr= URL. A bare recorded
+  # number (historical metas) has no provider and keeps the GitHub refspec; a
+  # GitLab URL gets no per-MR fetch here yet and uses the fallbacks below.
+  if fm_pr_url_parse "$pr_url"; then
+    provider=$FM_PR_PROVIDER
+    n=$FM_PR_NUMBER
+  else
+    n=$(pr_number_from_target "$pr_url") || n=
+  fi
   if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
-      printf '%s' "$resolved"
-      return 0
-    fi
+    case "$provider" in
+      azuredevops)
+        if resolved=$(fetch_ado_pr_head "$n"); then
+          printf '%s' "$resolved"
+          return 0
+        fi
+        ;;
+      github|'')
+        if resolved=$(fetch_pull_head "$n"); then
+          printf '%s' "$resolved"
+          return 0
+        fi
+        ;;
+    esac
   fi
   # Offline / unreachable remote: recorded pr_head is better than the local
   # branch, but never preferred over a successful pull-head fetch above.

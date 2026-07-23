@@ -11,6 +11,11 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) ADO pr= URL -> fetch refs/pull/<n>/merge and diff its ^2 (the PR source
+#       head); ADO publishes no refs/pull/<n>/head, so the GitHub refspec must
+#       not be assumed for it
+#   (g) ADO pr= URL with no reachable merge ref -> recorded pr_head fallback,
+#       then local branch with the warning
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -169,8 +174,82 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# Publish the ADO-shaped merge preview ref: refs/pull/<n>/merge is a merge
+# commit whose first parent is the target branch and whose second parent is
+# the PR source head. --no-ff forces the merge commit even though main is an
+# ancestor of the PR branch in this fixture.
+push_ado_merge_ref() {
+  local case_dir=$1 n=$2
+  git -C "$case_dir/wt" checkout -q -b ado-merge-tmp main
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t merge -q --no-ff -m "merge preview" pr-head-tmp
+  git -C "$case_dir/wt" push -q origin "ado-merge-tmp:refs/pull/$n/merge"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" branch -qD ado-merge-tmp
+}
+
+test_ado_pr_meta_fetches_merge_ref_second_parent() {
+  local case_dir out
+  case_dir=$(make_case ado-merge-ref)
+  stale_and_pr_commits "$case_dir"
+  push_ado_merge_ref "$case_dir" 9
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo/pullrequest/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' \
+    "ado-merge-ref: diff should use the merge ref's second parent (the PR source head)"
+  assert_not_contains "$out" 'stale-local' \
+    "ado-merge-ref: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "ado-merge-ref: should not warn when the ADO merge ref resolves"
+  pass "fm-review-diff resolves an ADO PR head from refs/pull/<n>/merge^2"
+}
+
+test_ado_pr_meta_falls_back_to_recorded_head() {
+  local case_dir out
+  case_dir=$(make_case ado-recorded-fallback)
+  stale_and_pr_commits "$case_dir"
+  # No refs/pull/<n>/merge on origin: the recorded head is the offline fallback.
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo/pullrequest/9" \
+    "pr_head=$PR_SHA"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' \
+    "ado-recorded-fallback: diff should show the recorded PR head content"
+  assert_not_contains "$out" 'stale-local' \
+    "ado-recorded-fallback: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "ado-recorded-fallback: should not warn when recorded pr_head is reachable"
+  pass "fm-review-diff falls back to recorded pr_head when the ADO merge ref cannot be fetched"
+}
+
+test_ado_unresolvable_head_warns_and_uses_local_branch() {
+  local case_dir out err
+  case_dir=$(make_case ado-warn-fallback)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo/pullrequest/9"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  assert_contains "$err" 'warning: PR head unavailable; diff may lag the open PR' \
+    "ado-warn-fallback: must warn loudly when no ADO PR head can be resolved"
+  assert_contains "$out" '+stale-local' \
+    "ado-warn-fallback: should fall back to the local branch diff"
+  pass "fm-review-diff warns and uses the local branch when an ADO PR head is unresolvable"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_ado_pr_meta_fetches_merge_ref_second_parent
+test_ado_pr_meta_falls_back_to_recorded_head
+test_ado_unresolvable_head_warns_and_uses_local_branch
