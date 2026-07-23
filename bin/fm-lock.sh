@@ -17,11 +17,15 @@
 # reclaimed atomically, the same way the watcher lock reclaims a dead holder.
 #
 # Identity strings are format-tagged (fm_pid_identity_format), because a recorded
-# identity outlives the firstmate version that wrote it. An identity recorded in
-# an OLDER format is UNVERIFIABLE, not mismatched: a live harness holding it is
-# refused (and its identity healed in place) rather than treated as a recycled
-# pid, since stealing would put two sessions on one home while refusing only
-# delays one. A same-format mismatch is still the reused-pid case and reclaims.
+# identity outlives the firstmate version that wrote it, and because the same live
+# pid can be described by either identity SOURCE (/proc or ps). An identity
+# recorded in a DIFFERENT format is UNVERIFIABLE, not mismatched: a live harness
+# holding it is refused (and its identity healed in place) rather than treated as
+# a recycled pid, since stealing would put two sessions on one home while refusing
+# only delays one. A same-format mismatch is still the reused-pid case and
+# reclaims. Refusing is safe but must not become "refuse forever", so the
+# unverifiable branch still requires a live HARNESS - and a defunct process is not
+# one, so an unreaped holder stays reclaimable instead of wedging the home.
 #
 # Usage: fm-lock.sh           acquire; exit 1 if another live session holds it
 #        fm-lock.sh status    print holder and liveness; always exits 0
@@ -72,9 +76,26 @@ harness_pid() {  # the session-stable harness ancestor of this invocation
   return 1
 }
 
+# A ZOMBIE is not a live harness, and the process STATE is the portable way to say
+# so. `kill -0` succeeds for an unreaped process, and Linux ps still reports its
+# comm as the harness name (`claude`, args `[claude] <defunct>`), so a name-only
+# check reads a defunct harness as a live holder and refuses the lock until
+# someone reaps it - the home goes permanently read-only. (macOS renders both comm
+# and args as `<defunct>`, which happens not to match, but that is a coincidence
+# of formatting, not a check.) State `Z` is reported by both.
+pid_is_defunct() {
+  local state
+  state=$(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$state" in
+    Z*) return 0 ;;
+  esac
+  return 1
+}
+
 holder_is_harness_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1 comm
   fm_pid_alive "$pid" || return 1
+  pid_is_defunct "$pid" && return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
 }

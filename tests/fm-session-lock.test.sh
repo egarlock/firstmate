@@ -20,8 +20,14 @@ TMP_ROOT=$(fm_test_tmproot fm-session-lock-tests)
 # process EXCEPT the fm-lock.sh invocation itself is reported as a "claude"
 # harness, while the fm-lock.sh process keeps its real command (a plain shell,
 # which the harness regex does not match) so harness_pid() walks past it to its
-# ancestor. lstart/command (pid-identity) and ppid pass straight through to the
-# real ps, so identities are genuine and differ per pid.
+# ancestor. lstart/command (pid-identity), state and ppid pass straight through to
+# the real ps, so identities are genuine and differ per pid.
+#
+# FM_TEST_ZOMBIE_PID makes one pid render the way LINUX procps renders an unreaped
+# process: state Z, comm still the harness name, args `[claude] <defunct>`. That
+# shape is the point - a name-only liveness check MATCHES it, so a defunct harness
+# would read as a live holder. (macOS happens to render both comm and args as
+# `<defunct>`, so the real local ps cannot exercise the hazard.)
 write_delegating_ps() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/ps" <<'SH'
@@ -32,7 +38,7 @@ for p in /bin/ps /usr/bin/ps; do
   [ -x "$p" ] && { realps=$p; break; }
 done
 [ -n "$realps" ] || exit 1
-pid=""; want_comm=0; want_args=0; want_ppid=0; want_ident=0
+pid=""; want_comm=0; want_args=0; want_ppid=0; want_ident=0; want_state=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -p) pid="${2:-}"; shift 2 ;;
@@ -41,6 +47,7 @@ while [ "$#" -gt 0 ]; do
         comm=) want_comm=1 ;;
         args=) want_args=1 ;;
         ppid=) want_ppid=1 ;;
+        state=) want_state=1 ;;
         lstart=) want_ident=1 ;;
         command=) want_ident=1 ;;
       esac
@@ -49,10 +56,20 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$pid" ] || exit 1
+zombie=0
+[ -n "${FM_TEST_ZOMBIE_PID:-}" ] && [ "$pid" = "$FM_TEST_ZOMBIE_PID" ] && zombie=1
 if [ "$want_ppid" = 1 ]; then "$realps" -o ppid= -p "$pid"; exit $?; fi
+if [ "$want_state" = 1 ]; then
+  [ "$zombie" = 1 ] && { printf 'Z\n'; exit 0; }
+  "$realps" -o state= -p "$pid"; exit $?
+fi
 if [ "$want_ident" = 1 ]; then "$realps" -p "$pid" -o lstart= -o command=; exit $?; fi
 if [ "$want_comm" = 1 ] || [ "$want_args" = 1 ]; then
   ra=$("$realps" -o args= -p "$pid" 2>/dev/null) || exit 1
+  if [ "$zombie" = 1 ]; then
+    [ "$want_comm" = 1 ] && printf 'claude\n' || printf '[claude] <defunct>\n'
+    exit 0
+  fi
   case "$ra" in
     *fm-lock.sh*) "$realps" -o comm= -p "$pid"; exit $? ;;   # the fm-lock process itself
     *) [ "$want_comm" = 1 ] && printf 'claude\n' || printf 'claude --session\n'; exit 0 ;;
@@ -63,21 +80,30 @@ SH
   chmod +x "$fakebin/ps"
 }
 
+# A /proc entry whose cmdline is EMPTY: what an unreaped process reports while
+# `kill -0` still succeeds, so fm_pid_identity's /proc parse fails for that pid
+# and must fall through to ps.
+write_unparseable_proc_entry() {  # <proc-root> <pid>
+  mkdir -p "$1/$2"
+  printf '%s (claude) Z 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20 21 22\n' "$2" > "$1/$2/stat"
+  : > "$1/$2/cmdline"
+}
+
 # fm_pid_identity for <pid> as fm-lock.sh will compute it (via the delegating ps).
 seed_identity() {  # <fakebin> <pid>
   local fakebin=$1 pid=$2
   PATH="$fakebin:$PATH" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid"
 }
 
-identity_format_tag() {  # the current format tag, read from the lib itself
-  bash -c '. "$1"; printf "%s\n" "$FM_PID_IDENTITY_FORMAT"' _ "$LIB"
-}
-
 # A NON-matching identity in the CURRENT format: the genuine reused/recycled-pid
-# case, which must still be reclaimable. Tagged from the lib so the fixture can
-# never drift from the format it is exercising.
-current_format_identity() {  # <payload>
-  printf '%s %s\n' "$(identity_format_tag)" "$1"
+# case, which must still be reclaimable. The tag is taken from a REAL identity for
+# the same pid rather than from a constant, because the tag names the payload
+# SOURCE (/proc or ps) as well as the version - so the fixture can never drift
+# from the form fm-lock.sh will actually compute for that pid on this host.
+current_format_identity() {  # <fakebin> <pid> <payload>
+  local fakebin=$1 pid=$2 payload=$3 ident
+  ident=$(seed_identity "$fakebin" "$pid")
+  printf '%s %s\n' "${ident%% *}" "$payload"
 }
 
 test_atomic_single_winner_under_concurrency() {
@@ -148,7 +174,7 @@ test_atomic_single_winner_vs_live_impostor() {
   impostor=$!
   mkdir "$lock"
   printf '%s\n' "$impostor" > "$lock/pid"
-  current_format_identity "identity of a since-exited process" > "$lock/pid-identity"
+  current_format_identity "$fakebin" "$impostor" "identity of a since-exited process" > "$lock/pid-identity"
   cat > "$sim" <<'SH'
 #!/usr/bin/env bash
 "$FMLOCK" >> "$RESULTS" 2>&1
@@ -220,7 +246,7 @@ test_reused_pid_holder_is_reclaimed() {
   holder=$!
   mkdir "$lock"
   printf '%s\n' "$holder" > "$lock/pid"
-  current_format_identity "stale identity of a since-exited process" > "$lock/pid-identity"
+  current_format_identity "$fakebin" "$holder" "stale identity of a since-exited process" > "$lock/pid-identity"
   status=0
   out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" 2>&1) || status=$?
   newpid=$(cat "$lock/pid" 2>/dev/null || true)
@@ -300,6 +326,73 @@ test_legacy_format_identity_on_non_harness_is_reclaimed() {
   [ "$status" -eq 0 ] || fail "acquire did not reclaim an older-format lock held by a non-harness process (status $status): $out"
   [ "$newpid" != "$holder" ] || fail "reclaimed lock still names the non-harness holder ($holder)"
   pass "an older-format identity on a non-harness holder is still reclaimable"
+}
+
+test_zombie_holder_does_not_wedge_the_home() {
+  # An unreaped harness must never make a home permanently read-only. Two things
+  # have to hold at once, and both are on the /proc identity path:
+  #
+  #  (1) The HOLDER stays reclaimable. Its /proc cmdline is empty, so the /proc
+  #      parse fails and the identity falls through to ps - a DIFFERENT payload
+  #      source than the recorded /proc-form string, hence unverifiable rather
+  #      than "recycled pid". Unverifiable then leans on the harness check, and a
+  #      defunct process is not a live harness (Linux still reports its comm as
+  #      `claude`), so it reclaims. Without the fall-through the identity would be
+  #      empty and classify_holder would read it as a live holder forever.
+  #  (2) The ACQUIRER can still record itself. Its own /proc read is unparseable
+  #      too, and record_holder demands a non-empty identity - so before the
+  #      fall-through every one of the 120 bounded tries failed and the acquire
+  #      ended in "could not acquire the session lock under contention".
+  local dir state fakebin proc_root lock zombie sim results simpid i status newpid
+  dir="$TMP_ROOT/zombie-holder"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  proc_root="$dir/proc"
+  lock="$state/.lock"
+  results="$dir/results"
+  sim="$dir/harness-sim.sh"
+  mkdir -p "$state" "$fakebin" "$proc_root"
+  write_delegating_ps "$fakebin"
+  : > "$results"
+  sleep 300 &
+  zombie=$!
+  write_unparseable_proc_entry "$proc_root" "$zombie"
+  mkdir "$lock"
+  printf '%s\n' "$zombie" > "$lock/pid"
+  # What a Linux home records for a live harness: the /proc-form identity.
+  printf 'fmid1p linux-starttime=987654 cmdline-hex=636c61756465\n' > "$lock/pid-identity"
+  # The acquirer sleeps first so its own unparseable /proc entry can be planted
+  # under its (now known) pid before fm-lock.sh computes its identity.
+  cat > "$sim" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+"$FMLOCK" >> "$RESULTS" 2>&1
+sleep 10
+SH
+  chmod +x "$sim"
+  FMLOCK="$FMLOCK" RESULTS="$results" PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_ZOMBIE_PID="$zombie" "$sim" &
+  simpid=$!
+  write_unparseable_proc_entry "$proc_root" "$simpid"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -q 'lock acquired\|^error:' "$results" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  newpid=$(cat "$lock/pid" 2>/dev/null || true)
+  status=$(cat "$results")
+  kill "$simpid" "$zombie" 2>/dev/null || true
+  wait "$simpid" 2>/dev/null || true
+  wait "$zombie" 2>/dev/null || true
+  assert_not_contains "$status" 'another live firstmate session holds the lock' \
+    "a defunct holder read as a live session: the home would stay read-only until it is reaped"
+  assert_not_contains "$status" 'could not acquire the session lock under contention' \
+    "the acquirer could not record its own identity from an unparseable /proc read"
+  assert_contains "$status" 'lock acquired: harness pid' \
+    "acquire did not reclaim a zombie-held lock"
+  [ "$newpid" = "$simpid" ] || fail "zombie-held lock was not reclaimed by the acquirer (pid '$newpid', want '$simpid')"
+  pass "an unreaped harness holder is reclaimable and does not wedge the home read-only"
 }
 
 test_dead_holder_is_reclaimed() {
@@ -503,7 +596,7 @@ test_status_verifies_identity() {
   out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" status)
   assert_contains "$out" "lock: held by live harness pid $holder" "status did not report a verified live holder"
   # (3) same live pid, same-format mismatched identity (reused) -> stale, not held.
-  current_format_identity "some other identity" > "$lock/pid-identity"
+  current_format_identity "$fakebin" "$holder" "some other identity" > "$lock/pid-identity"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" status)
   assert_contains "$out" "lock: stale" "status treated a reused pid as a live holder"
   kill "$holder" 2>/dev/null || true
@@ -517,6 +610,7 @@ test_live_holder_refuses
 test_reused_pid_holder_is_reclaimed
 test_legacy_format_identity_is_not_reclaimed_and_self_heals
 test_legacy_format_identity_on_non_harness_is_reclaimed
+test_zombie_holder_does_not_wedge_the_home
 test_dead_holder_is_reclaimed
 test_legacy_plainfile_lock_is_migrated
 test_stalled_winner_never_splits_brain_with_stealer

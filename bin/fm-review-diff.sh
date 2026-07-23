@@ -22,7 +22,12 @@
 #                recorded and nothing refreshes it, so preferring it would review
 #                a pre-fix SHA. A recorded pr_head= is the fallback for when az is
 #                absent or the query fails. Either way the resolved commit is
-#                fetched when it is not already local.
+#                fetched when it is not already local - by bare object name first,
+#                then via the PR's source branch ref, because Azure Repos only
+#                honours a `want` for an advertised ref tip. A live head that still
+#                cannot be fetched warns on its own, distinctly from the
+#                nothing-resolved case: reviewing a different SHA than the one
+#                firstmate just learned is live must never be silent.
 # If neither can be resolved, fall back to the local branch WITH a warning.
 # Without pr=, compare the local branch as before.
 # The resolved compare side is always printed alongside the base, so an approval
@@ -118,6 +123,31 @@ ado_live_head() {
   printf '%s' "$head"
 }
 
+# ado_fetch_source_ref <n>: make the PR's source-branch history available locally.
+# Azure Repos only honours a `want` for an ADVERTISED ref tip, so fetching the
+# live head by bare object name is refused whenever the branch has moved past it -
+# exactly the fix-round case the live query exists to catch. Fetching the source
+# BRANCH ref brings that commit down as part of the branch history. Uses the same
+# private-ref discipline as the GitHub path (never FETCH_HEAD, deleted once the
+# objects are local) so a later base-branch fetch cannot clobber the compare tip
+# and the long-lived pooled clone accumulates nothing.
+ado_fetch_source_ref() {
+  local n=$1 src ref rc=1
+  src=$(az repos pr show --id "$n" --organization "$FM_PR_ADO_ORG_URL" \
+    --query sourceRefName -o tsv 2>/dev/null) || return 1
+  case "$src" in
+    refs/heads/*) ;;
+    *) return 1 ;;
+  esac
+  ref="refs/fm-review/pr/$n/source"
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1 &&
+     git -C "$WT" fetch --quiet origin "+$src:$ref" >/dev/null 2>&1; then
+    rc=0
+  fi
+  git -C "$WT" update-ref -d "$ref" >/dev/null 2>&1 || true
+  return "$rc"
+}
+
 # recorded_head_commit <sha>: resolve a recorded pr_head= to a usable commit.
 # Local objects win (cheap, and keeps the offline path exact); otherwise try to
 # fetch that one commit directly, which is how an ADO PR head becomes available
@@ -158,9 +188,19 @@ resolve_pr_head() {
         fi
         ;;
       azuredevops)
-        if live=$(ado_live_head) && resolved=$(recorded_head_commit "$live"); then
-          printf '%s az lastMergeSourceCommit' "$resolved"
-          return 0
+        # Two outcomes that must NOT collapse into one silent fallback: az cannot
+        # answer at all (the ordinary offline case), versus az answering with a
+        # head that cannot be materialized. In the second case firstmate KNOWS the
+        # live head and is about to review a different one, so it says so - that is
+        # the silently-stale approval this resolver exists to prevent.
+        if live=$(ado_live_head); then
+          if resolved=$(recorded_head_commit "$live") ||
+             { ado_fetch_source_ref "$FM_PR_NUMBER" && resolved=$(recorded_head_commit "$live"); }; then
+            printf '%s az lastMergeSourceCommit' "$resolved"
+            return 0
+          fi
+          printf 'warning: live Azure DevOps PR head %s could not be fetched; falling back to the recorded pr_head= (the diff may lag the open PR)\n' \
+            "$live" >&2
         fi
         ;;
     esac

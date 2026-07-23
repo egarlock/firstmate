@@ -70,15 +70,15 @@ for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-
 shellcheck bin/*.sh bin/backends/*.sh tests/*.sh   # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
-tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
-tests/fm-session-lock.test.sh             # session lock (fm-lock.sh, state/.lock): atomic single-winner under concurrency and against a live reused-pid impostor, live-holder refusal, reused-pid/dead-holder/legacy-plain-file reclaim, and identity-verifying status tests
+tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, guard-warning, and pid-identity tests (locale invariance, /proc vs ps payloads carrying distinct format tags, and an unparseable /proc read falling through to ps rather than yielding no identity)
+tests/fm-session-lock.test.sh             # session lock (fm-lock.sh, state/.lock): atomic single-winner under concurrency and against a live reused-pid impostor, live-holder refusal, reused-pid/dead-holder/defunct-holder/legacy-plain-file reclaim, and identity-verifying status tests
 tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale wedge threshold, heartbeat backstop, afk one-shot coherence, whitespace-state fail-fast guard, and corrupt-counter (.heartbeat-streak/.count-*) resilience
 tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, fm-send submit, and whitespace-state fail-fast guard tests
 tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
 tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands and codex $skill invocations
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
 tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
-tests/fm-review-diff.test.sh              # review-diff compare-ref resolution: GitHub refs/pull/<n>/head refetch beats a stale recorded pr_head=, ADO falls back to recorded pr_head= and never touches a pull ref, unresolvable warns and uses the local branch
+tests/fm-review-diff.test.sh              # review-diff compare-ref resolution: GitHub refs/pull/<n>/head refetch beats a stale recorded pr_head=, ADO re-queries the live head and materializes it through the PR source branch ref, never touches a pull ref, and warns rather than falling back silently; unresolvable warns and uses the local branch
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
 tests/fm-composer-lib.test.sh             # the shared composer-content classifier: bare shell glyph reads unknown (dead-shell injection safety), bordered shell glyph and agent glyphs read empty, idle-placeholder and pending cases
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)

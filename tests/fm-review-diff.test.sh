@@ -20,6 +20,12 @@
 #       `az repos pr show ... lastMergeSourceCommit` wins over a stale recorded
 #       pr_head= (the recorded value is a one-shot snapshot nothing refreshes,
 #       so preferring it reviews a pre-fix SHA); an az failure falls back to it.
+#   (h) Azure DevOps live head that is not local and not an advertised ref tip ->
+#       Azure Repos refuses a `want` by bare object name, so the head is
+#       materialized through the PR's source BRANCH ref. When even that fails,
+#       the recorded pr_head= fallback must WARN: firstmate knows the live head
+#       and is about to review a different one, which is precisely the silently
+#       stale approval this resolver exists to prevent.
 # Two cross-cutting invariants ride along on every case: the resolved COMPARE side
 # is reported next to the base (an approval under yolo=on is unattended, so it must
 # say what it reviewed), and the private refs/fm-review/ ref the GitHub path
@@ -100,13 +106,15 @@ assert_no_private_review_refs() {
   [ -z "$left" ] || fail "$label: private review refs were left behind: $left"
 }
 
-# add_az_mock <case_dir> <head|fail>: a fake az answering the azure-devops
-# extension probe plus the lastMergeSourceCommit query. `fail` makes the query
-# exit non-zero, which is the "az cannot answer" fallback path. az is NOT
-# installed in this environment, so every case without this mock exercises the
-# no-az fallback for real.
+# add_az_mock <case_dir> <head|fail> [source-ref]: a fake az answering the
+# azure-devops extension probe, the lastMergeSourceCommit query, and the
+# sourceRefName query. `fail` makes the head query exit non-zero, which is the
+# "az cannot answer" fallback path; an empty source-ref makes the sourceRefName
+# query answer nothing, which is the "live head known but unfetchable" path.
+# az is NOT installed in this environment, so every case without this mock
+# exercises the no-az fallback for real.
 add_az_mock() {
-  local case_dir=$1 head=$2
+  local case_dir=$1 head=$2 source_ref=${3:-}
   mkdir -p "$case_dir/fakebin"
   cat > "$case_dir/fakebin/az" <<SH
 #!/usr/bin/env bash
@@ -117,6 +125,10 @@ case "\${1:-} \${2:-} \${3:-}" in
       *" --query lastMergeSourceCommit.commitId "*)
         [ '$head' = fail ] && exit 1
         printf '%s\n' '$head'
+        exit 0 ;;
+      *" --query sourceRefName "*)
+        [ -n '$source_ref' ] || exit 1
+        printf '%s\n' '$source_ref'
         exit 0 ;;
     esac
     exit 0 ;;
@@ -308,6 +320,113 @@ test_ado_failed_az_query_falls_back_to_recorded_head() {
   pass "fm-review-diff falls back to recorded pr_head= when the live az query fails"
 }
 
+# refuse_bare_sha_fetches <case_dir>: a fake `git` that fails any fetch naming a
+# bare object name and delegates everything else to the real git. Azure Repos only
+# honours a `want` for an ADVERTISED ref tip, so fetching a live head by SHA is
+# refused there - but git's LOCAL transport always allows it, so a file-backed
+# fixture cannot reproduce the refusal on its own and the source-branch-ref path
+# would never be reached.
+refuse_bare_sha_fetches() {
+  local case_dir=$1 realgit
+  realgit=$(command -v git)
+  mkdir -p "$case_dir/fakebin"
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+saw_fetch=0
+for a in "\$@"; do
+  if [ "\$a" = fetch ]; then saw_fetch=1; continue; fi
+  [ "\$saw_fetch" = 1 ] || continue
+  case "\$a" in
+    *[!0-9a-f]*) continue ;;
+  esac
+  [ "\${#a}" -ge 7 ] && exit 1
+done
+exec '$realgit' "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+# push_ado_source_branch <case_dir>: build the PR's source branch OUTSIDE the
+# review worktree and push it to origin, then advance it one commit. Sets
+# ADO_LIVE_SHA to the first commit - the live head az reports, which is NOT a ref
+# tip on origin and NOT present locally, so a bare-object-name fetch is refused
+# exactly as Azure Repos refuses a `want` for an unadvertised object.
+push_ado_source_branch() {
+  local case_dir=$1
+  local clone="$case_dir/_ado"
+  git clone -q "$case_dir/origin.git" "$clone"
+  git -C "$clone" checkout -q -b ado-source
+  printf 'pr-fixed\n' > "$clone/feature.txt"
+  git -C "$clone" add feature.txt
+  git -C "$clone" -c user.email=t@t -c user.name=t commit -qm "pipeline fix on ADO PR"
+  ADO_LIVE_SHA=$(git -C "$clone" rev-parse HEAD)
+  printf 'branch-moved-on\n' > "$clone/later.txt"
+  git -C "$clone" add later.txt
+  git -C "$clone" -c user.email=t@t -c user.name=t commit -qm "branch advanced past the PR head"
+  git -C "$clone" push -q origin ado-source
+  rm -rf "$clone"
+}
+
+test_ado_live_head_is_fetched_through_the_source_branch_ref() {
+  local case_dir out
+  case_dir=$(make_case ado-source-ref-fetch)
+  stale_and_pr_commits "$case_dir"
+  push_ado_source_branch "$case_dir"
+  refuse_bare_sha_fetches "$case_dir"
+  # az reports a live head the clone does not have and cannot `want` by name.
+  # Falling back to the recorded pr_head= here would silently review a pre-fix
+  # snapshot - unattended under yolo=on - so the source branch ref is fetched to
+  # materialize the live commit instead.
+  add_az_mock "$case_dir" "$ADO_LIVE_SHA" refs/heads/ado-source
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/acme/Widgets/_git/repo/pullrequest/9" \
+    "pr_head=$PR_SHA"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" "compare: PR head $ADO_LIVE_SHA (via az lastMergeSourceCommit)" \
+    "ado-source-ref-fetch: the live head must win once it can be materialized"
+  assert_contains "$out" '+pr-fixed' "ado-source-ref-fetch: diff should show the live ADO head content"
+  assert_not_contains "$out" 'branch-moved-on' \
+    "ado-source-ref-fetch: must diff the live PR head, not the advanced branch tip"
+  assert_not_contains "$out" 'stale-local' "ado-source-ref-fetch: must not review the lagging local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'could not be fetched' \
+    "ado-source-ref-fetch: should not warn once the live head resolves"
+  assert_no_private_review_refs "$case_dir" ado-source-ref-fetch
+  pass "fm-review-diff materializes an unfetchable ADO live head through the PR source branch ref"
+}
+
+test_ado_unfetchable_live_head_warns_before_falling_back() {
+  local case_dir out err
+  case_dir=$(make_case ado-live-head-unfetchable)
+  stale_and_pr_commits "$case_dir"
+  push_ado_source_branch "$case_dir"
+  refuse_bare_sha_fetches "$case_dir"
+  # az answers the head query but not sourceRefName (an older extension, a
+  # policy-restricted ref), so the live head cannot be materialized at all. The
+  # recorded pr_head= is still the best available compare side, but firstmate
+  # KNOWS it is reviewing something other than the live head, so it must say so:
+  # this is the silently-stale approval the live lookup exists to prevent.
+  add_az_mock "$case_dir" "$ADO_LIVE_SHA" ''
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/acme/Widgets/_git/repo/pullrequest/9" \
+    "pr_head=$PR_SHA"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  err=$(cat "$case_dir/stderr")
+
+  assert_contains "$err" "warning: live Azure DevOps PR head $ADO_LIVE_SHA could not be fetched" \
+    "ado-live-head-unfetchable: an unmaterializable live head must warn, not fall back silently"
+  assert_contains "$err" 'recorded pr_head=' \
+    "ado-live-head-unfetchable: the warning must name what it fell back to"
+  assert_contains "$out" "compare: PR head $PR_SHA (via recorded pr_head=)" \
+    "ado-live-head-unfetchable: the compare line must name the path that actually produced the SHA"
+  assert_contains "$out" '+pr-fixed' "ado-live-head-unfetchable: should still diff the recorded head"
+  assert_no_private_review_refs "$case_dir" ado-live-head-unfetchable
+  [ "$ADO_LIVE_SHA" != "$PR_SHA" ] || fail "ado-live-head-unfetchable: fixture did not diverge live vs recorded head"
+  pass "fm-review-diff warns when a known-live ADO head cannot be fetched instead of falling back silently"
+}
+
 test_ado_pr_ignores_pull_merge_ref() {
   local case_dir out merge_sha
   case_dir=$(make_case ado-ignores-merge-ref)
@@ -365,5 +484,7 @@ test_unreachable_pr_head_falls_back_with_warning
 test_ado_pr_uses_recorded_pr_head
 test_ado_live_head_beats_stale_recorded_pr_head
 test_ado_failed_az_query_falls_back_to_recorded_head
+test_ado_live_head_is_fetched_through_the_source_branch_ref
+test_ado_unfetchable_live_head_warns_before_falling_back
 test_ado_pr_ignores_pull_merge_ref
 test_ado_pr_without_recorded_head_warns
