@@ -36,6 +36,11 @@
 # FM_DISPATCH_RANDOM_SOURCE overrides /dev/urandom for deterministic tests only.
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Verified-adapter allowlist + per-adapter effort matrix (single policy source).
+# shellcheck source=bin/fm-harness-policy.sh
+. "$SCRIPT_DIR/fm-harness-policy.sh"
+
 STALE_CLEAR_MARGIN=${FM_DISPATCH_STALE_CLEAR_MARGIN:-20}
 SELECT_OVERRIDE=
 QUOTA_JSON_FILE=
@@ -113,16 +118,17 @@ profiles_json=$(printf '%s\n' "$SPEC_JSON" | jq -ec '
     end
 ' 2>/dev/null) || { echo "error: dispatch input must be a rule, profile, or profile array" >&2; exit 2; }
 
-validation_error=$(printf '%s\n' "$profiles_json" | jq -r '
-  def verified($h): ["claude", "codex", "opencode", "pi", "grok"] | index($h);
-  def effort_ok($h; $e):
-    if $h == "claude" then ["low", "medium", "high", "xhigh", "max"] | index($e)
-    elif $h == "codex" then ["low", "medium", "high", "xhigh"] | index($e)
-    elif $h == "grok" then ["low", "medium", "high"] | index($e)
-    elif $h == "pi" then ["low", "medium", "high", "xhigh", "max"] | index($e)
-    elif $h == "opencode" then false
-    else false
-    end;
+policy_adapters_json=$(printf '['; sep=; for a in $FM_VERIFIED_ADAPTERS; do printf '%s"%s"' "$sep" "$a"; sep=,; done; printf ']')
+policy_efforts_json=$(printf '{'; sep=; for a in $FM_VERIFIED_ADAPTERS; do
+  inner=; isep=
+  for e in $(fm_harness_efforts "$a"); do inner="$inner$isep\"$e\""; isep=,; done
+  printf '%s"%s":[%s]' "$sep" "$a" "$inner"; sep=,
+done; printf '}')
+
+validation_error=$(printf '%s\n' "$profiles_json" | jq -r \
+  --argjson verified "$policy_adapters_json" --argjson efforts "$policy_efforts_json" '
+  def verified($h): $verified | index($h);
+  def effort_ok($h; $e): (($efforts[$h] // []) | index($e)) != null;
   if length == 0 then "dispatch profile array must not be empty"
   elif any(.[]; type != "object") then "each dispatch profile must be an object"
   elif any(.[]; ((.harness? | type) != "string") or (.harness | length) == 0) then "each dispatch profile needs a non-empty harness"

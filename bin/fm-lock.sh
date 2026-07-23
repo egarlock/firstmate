@@ -33,27 +33,11 @@ fm_env_init            # FM_ROOT, FM_HOME, STATE
 LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
-# Known harness command names, as one extended regex for process recognition.
-# This is a minimal local stand-in for fm_harness_process_re: wave B introduces
-# bin/fm-harness-policy.sh as the SINGLE source of harness policy (the verified
-# adapter allowlist, the per-adapter model/effort matrix, and this regex) and
-# replaces the helper below with a source of that file. Until then the list is
-# duplicated here and in bin/fm-harness.sh's own adapter enumeration; keep the
-# two in step when verifying a new adapter. copilot is included ahead of its
-# adapter so a copilot primary is never mistaken for a non-harness holder.
-# pi is anchored because a two-letter substring false-positives everywhere;
-# every other adapter name is distinctive enough for substring matching.
-FM_LOCK_HARNESS_NAMES='claude codex opencode pi grok copilot'
-fm_harness_process_re() {
-  local name out=
-  for name in $FM_LOCK_HARNESS_NAMES; do
-    case "$name" in
-      pi) name='^pi$' ;;
-    esac
-    out="${out:+$out|}$name"
-  done
-  printf '%s\n' "$out"
-}
+# Known harness command names, as one extended regex for process recognition,
+# from bin/fm-harness-policy.sh (the single policy source; a newly verified
+# adapter is added there, never here).
+# shellcheck source=bin/fm-harness-policy.sh
+. "$SCRIPT_DIR/fm-harness-policy.sh"
 HARNESS_RE=$(fm_harness_process_re)
 
 # Grace for a holder that is mid-acquire (lock present, identity not yet written).
