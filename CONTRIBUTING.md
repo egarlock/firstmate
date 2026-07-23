@@ -76,6 +76,7 @@ tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tu
 tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands and codex $skill invocations
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
 tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
+tests/fm-review-diff.test.sh              # review-diff compare-ref resolution: GitHub refs/pull/<n>/head refetch beats a stale recorded pr_head=, ADO falls back to recorded pr_head= and never touches a pull ref, unresolvable warns and uses the local branch
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
 tests/fm-composer-lib.test.sh             # the shared composer-content classifier: bare shell glyph reads unknown (dead-shell injection safety), bordered shell glyph and agent glyphs read empty, idle-placeholder and pending cases
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)

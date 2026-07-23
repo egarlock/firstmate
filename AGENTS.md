@@ -510,6 +510,9 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
+It also fixes the other half of that staleness: once `pr=` is recorded, the *compare* side is the PR's current head rather than the local branch, because a no-mistakes fix round pushes to the open PR and leaves the local worktree behind - approving that diff would approve a change missing fixes that already landed, unattended under `yolo=on`.
+GitHub re-fetches `refs/pull/<n>/head` every run and treats a recorded `pr_head=` as offline fallback only; Azure DevOps publishes no such ref, so it uses the `pr_head=` that `bin/fm-pr-check.sh` recorded.
+If neither resolves, the helper diffs the local branch and says so on stderr - a warning to take seriously, because the review may lag the PR.
 
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge.
 With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `bin/fm-pr-merge.sh <id> <full GitHub or Azure DevOps PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
