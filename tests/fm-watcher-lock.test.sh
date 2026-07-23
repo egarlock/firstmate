@@ -812,7 +812,9 @@ test_identity_source_flip_is_unverifiable_not_reuse() {
   ps_ident=$(pid_identity "$dir/no-proc" "$live")
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
-  [ -n "$proc_ident" ] && [ -n "$ps_ident" ] || fail "could not compute both identity forms for the same pid"
+  if [ -z "$proc_ident" ] || [ -z "$ps_ident" ]; then
+    fail "could not compute both identity forms for the same pid"
+  fi
   [ "${proc_ident%% *}" != "${ps_ident%% *}" ] \
     || fail "the /proc and ps payloads share a format tag ('${proc_ident%% *}'): a source flip would read as a recycled pid"
   [ "$(identity_verdict "$proc_ident" "$ps_ident")" = 2 ] \
