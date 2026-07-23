@@ -60,10 +60,20 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
-# Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# Busy footers per harness - the ONE consolidated busy-signature literal,
+# consumed by fm-watch.sh, the away-mode daemon, and this lib's fm_pane_is_busy
+# so the set cannot drift. claude/codex: "esc to interrupt"; opencode: "esc
+# interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel" (grok's mid-turn cancel
+# hint, shown iff a turn is running - verified grok 0.2.73); copilot: "esc
+# interrupt" on current CLIs (working footer "◉ Working esc interrupt",
+# verified GitHub Copilot CLI 1.0.72 - already covered by the shared
+# "esc (to )?interrupt" alternative) and "esc cancel" on 1.0.68-1.0.71
+# (working footer "◉ Working · 275 B esc cancel", recorded at the fork's
+# 2026-07-02 verification of 1.0.68), kept because the spawn version gate
+# floor is 1.0.68. ASCII hints are matched, never the Unicode ◉/· glyphs,
+# to avoid locale fragility; copilot's idle footer is
+# "/ commands · ? help · tab next tab" and must never match.
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|esc cancel'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised

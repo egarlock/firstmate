@@ -19,8 +19,10 @@
 # container - a bordered composer box, where the harness draws its own prompt
 # glyph (e.g. claude's older `| > ... |`). On a bare, unstructured row it is a
 # dead-shell prompt and is NEVER "empty"; it classifies as `unknown` (not a safe
-# injection target). The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a
-# genuine empty agent composer either way, bordered or bare.
+# injection target). The AGENT prompt glyphs `❯` (claude, and copilot - GitHub
+# Copilot CLI's idle composer is a bare `❯` between horizontal rules, verified
+# 1.0.72) and `›` (codex) are a genuine empty agent composer either way,
+# bordered or bare.
 #
 # GHOST/PLACEHOLDER TEXT is the other half of this owner (task
 # afk-herdr-false-pending): a harness fills an otherwise-empty composer with
@@ -28,7 +30,10 @@
 # suggestion, grok's placeholder - which a plain capture cannot tell apart from
 # text a human typed, so the away-mode injector reads the idle pane as "pending
 # input" and defers every escalation (the overnight wedge that motivated this
-# consolidation). fm_composer_strip_ghost is the ONE ANSI-aware extractor of
+# consolidation). copilot renders NO composer ghost text (its idle composer is
+# a bare, normally-styled `❯`; verified GitHub Copilot CLI 1.0.72), so it needs
+# no idle-placeholder override and the generic strip is a no-op there.
+# fm_composer_strip_ghost is the ONE ANSI-aware extractor of
 # "real typed content": it drops every de-emphasized run - dim/faint (SGR 2, how
 # claude and codex render ghost text) AND a dark/muted TRUECOLOR foreground (how
 # grok renders placeholder/hint text) - and keeps only normal-intensity,
