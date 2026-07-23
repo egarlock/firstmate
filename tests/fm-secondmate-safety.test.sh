@@ -1658,6 +1658,63 @@ EOF
   pass "fm-backlog-handoff aborts atomically on unmatched, in-flight, and unregistered targets"
 }
 
+# A registry line's summary or scope prose may carry its own parenthetical before
+# the structured (home: ...) field. The home extractor must still find that field;
+# the old ^[^(]* anchor stopped at the first parenthesis and reported a perfectly
+# well-formed entry as "has no home", so its whole backlog handoff was blocked.
+test_backlog_handoff_parses_home_after_earlier_parenthetical() {
+  local home subhome subhome_abs
+  home="$TMP_ROOT/handoff-parens-main"
+  subhome="$TMP_ROOT/handoff-parens-sub"
+  mkdir -p "$home/data" "$home/state"
+  seed_secondmate_home_marker "$subhome" triage
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  printf -- '- triage - issue triage (id is legacy) (home: %s; scope: issue triage; projects: alpha; added 2026-07-09)\n' \
+    "$subhome_abs" > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] paren-item - should hand off (repo: alpha)
+
+## Done
+EOF
+
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" triage paren-item >/dev/null \
+    || fail "handoff failed for a registry entry with parentheses before (home: ...)"
+  assert_grep 'paren-item' "$subhome/data/backlog.md" \
+    "item did not arrive when the registry summary had a pre-home parenthetical"
+  assert_no_grep 'paren-item' "$home/data/backlog.md" \
+    "item still in the main backlog after handoff with a pre-home parenthetical"
+  pass "fm-backlog-handoff parses (home: ...) after an earlier parenthetical"
+}
+
+# The looser regex must not start matching prose. An entry with no structured
+# (home: ...) field still has to fail cleanly rather than mis-parse a mention.
+test_backlog_handoff_missing_home_field_fails_cleanly() {
+  local home subhome out rc=0
+  home="$TMP_ROOT/handoff-nohome-main"
+  subhome="$TMP_ROOT/handoff-nohome-sub"
+  mkdir -p "$home/data" "$home/state"
+  seed_secondmate_home_marker "$subhome" no-home-mate
+  printf -- '- no-home-mate - charter only (scope prose mentions home: /tmp/ignored-path)\n' \
+    > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] orphan-item - never moves (repo: alpha)
+
+## Done
+EOF
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" no-home-mate orphan-item 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "handoff succeeded for a registry entry with no (home: ...) field"
+  assert_contains "$out" "has no home" \
+    "a missing (home: ...) field did not report the clean 'has no home' error"
+  assert_grep 'orphan-item' "$home/data/backlog.md" \
+    "the main backlog was mutated despite the missing home"
+  [ ! -e "$subhome/data/backlog.md" ] || ! grep -F 'orphan-item' "$subhome/data/backlog.md" >/dev/null \
+    || fail "item appeared in the secondmate backlog despite the missing home"
+  pass "fm-backlog-handoff without a (home: ...) field fails cleanly with has no home"
+}
+
 test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
   local home subhome subhome_abs projhome projhome_abs markerhome markerhome_abs symlinkhome symlinkhome_abs outside
   home="$TMP_ROOT/handoff-safety-main"
@@ -1875,4 +1932,6 @@ test_secondmate_teardown_path_boundary_matrix
 test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely
+test_backlog_handoff_parses_home_after_earlier_parenthetical
+test_backlog_handoff_missing_home_field_fails_cleanly
 test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home
