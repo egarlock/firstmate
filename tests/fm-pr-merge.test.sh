@@ -14,6 +14,10 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) an Azure DevOps PR completes via az repos pr update --status completed,
+#       addressed by the canonical organization URL (legacy visualstudio.com
+#       spelling included), records pr=/pr_head= first, refuses extra args,
+#       propagates az failures, and records no landed= (that is wave D's seam)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -84,11 +88,30 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# az mock answering fm-pr-check.sh's preflight (extension show) and pr_head
+# lookup (lastMergeSourceCommit) plus the merge-path pr update call, recording
+# every invocation. Args: case_dir [head_sha]
+add_az_mocks() {
+  local case_dir=$1 head=${2:-}
+  cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_AZ_LOG"
+case " \$* " in
+  *" extension show "*) exit 0 ;;
+  *" lastMergeSourceCommit.commitId "*) printf '%s\n' '$head' ;;
+  *" pr update "*) exit "\${FM_TEST_AZ_UPDATE_RC:-0}" ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/az"
+}
+
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_AZ_LOG="$case_dir/az.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -301,6 +324,97 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_ado_merge_completes_and_records() {
+  local case_dir rc url
+  case_dir=$(make_case ado-completes)
+  mkdir -p "$case_dir/wt"
+  add_az_mocks "$case_dir" 0123456789abcdef0123456789abcdef01234567
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/az.log"
+  url='https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo/pullrequest/9'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ado-completes: fm-pr-merge should succeed"
+  assert_grep "pr=$url" "$case_dir/state/task-x1.meta" \
+    "ado-completes: pr= was not recorded"
+  assert_grep 'pr_head=0123456789abcdef0123456789abcdef01234567' "$case_dir/state/task-x1.meta" \
+    "ado-completes: pr_head= was not recorded from lastMergeSourceCommit"
+  grep -qxF 'repos pr update --id 9 --status completed --organization https://dev.azure.com/exampleorg' "$case_dir/az.log" \
+    || fail "ado-completes: az repos pr update was not invoked with number, completed status, and organization URL"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "ado-completes: the GitHub CLI was invoked for an ADO URL"
+  assert_grep 'completed: ADO PR 9' "$case_dir/stdout" \
+    "ado-completes: completion was not reported"
+  # landed= recording is wave D's seam; pin that this merge records none yet.
+  assert_no_grep 'landed=' "$case_dir/state/task-x1.meta" \
+    "ado-completes: landed= must not be recorded before the wave D oracle"
+  pass "fm-pr-merge completes an ADO PR via az after recording pr= and pr_head="
+}
+
+test_ado_legacy_host_normalizes_organization() {
+  local case_dir url
+  case_dir=$(make_case ado-legacy-host)
+  mkdir -p "$case_dir/wt"
+  add_az_mocks "$case_dir"
+  : > "$case_dir/az.log"
+  url='https://exampleorg.visualstudio.com/Example%20Project/_git/example-repo/pullrequest/7'
+
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "ado-legacy-host: fm-pr-merge failed"
+
+  grep -qxF 'repos pr update --id 7 --status completed --organization https://dev.azure.com/exampleorg' "$case_dir/az.log" \
+    || fail "ado-legacy-host: legacy visualstudio.com URL was not completed through the modern organization URL"
+  pass "fm-pr-merge completes a legacy visualstudio.com PR through dev.azure.com"
+}
+
+test_ado_extra_args_refused_before_recording() {
+  local case_dir rc url
+  case_dir=$(make_case ado-extra-args)
+  mkdir -p "$case_dir/wt"
+  add_az_mocks "$case_dir"
+  : > "$case_dir/az.log"
+  url='https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/11'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ado-extra-args: fm-pr-merge should refuse extra args for an ADO URL"
+  assert_grep 'governed by ADO branch policy' "$case_dir/stderr" \
+    "ado-extra-args: refusal did not explain why the merge method is not honored"
+  assert_no_grep "pr=$url" "$case_dir/state/task-x1.meta" \
+    "ado-extra-args: PR URL was recorded before the refusal"
+  [ ! -s "$case_dir/az.log" ] || fail "ado-extra-args: az was invoked despite the refusal"
+  pass "fm-pr-merge refuses extra merge args for ADO PRs before recording state"
+}
+
+test_ado_update_failure_propagates_after_recording() {
+  local case_dir rc url
+  case_dir=$(make_case ado-update-fails)
+  mkdir -p "$case_dir/wt"
+  add_az_mocks "$case_dir"
+  : > "$case_dir/az.log"
+  url='https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/13'
+
+  set +e
+  FM_TEST_AZ_UPDATE_RC=1 run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ado-update-fails: fm-pr-merge should propagate the az completion failure"
+  assert_grep "pr=$url" "$case_dir/state/task-x1.meta" \
+    "ado-update-fails: pr= should already be recorded even though the completion failed"
+  assert_no_grep 'landed=' "$case_dir/state/task-x1.meta" \
+    "ado-update-fails: a failed completion must not record landed="
+  pass "fm-pr-merge propagates an az completion failure without silently succeeding"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +425,7 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_ado_merge_completes_and_records
+test_ado_legacy_host_normalizes_organization
+test_ado_extra_args_refused_before_recording
+test_ado_update_failure_propagates_after_recording
