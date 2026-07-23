@@ -1061,8 +1061,15 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  # The wait is bounded by FM_SPAWN_WORKTREE_TIMEOUT (seconds, default 300):
+  # `treehouse get` on a large or cold project pool (first clone into the
+  # pool, a slow disk) can legitimately take well over the old fixed 60s, and
+  # a timeout here aborts the spawn with the endpoint already created. A
+  # non-numeric or empty override falls back to the default.
+  WORKTREE_TIMEOUT="${FM_SPAWN_WORKTREE_TIMEOUT:-300}"
+  case "$WORKTREE_TIMEOUT" in ''|*[!0-9]*) WORKTREE_TIMEOUT=300 ;; esac
   candidate=""
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$WORKTREE_TIMEOUT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -1081,7 +1088,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${WORKTREE_TIMEOUT}s; inspect window $T" >&2
     exit 1
   fi
 

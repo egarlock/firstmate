@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 "$WORKTREE_TIMEOUT")` loop
+# after `treehouse get`; FM_SPAWN_WORKTREE_TIMEOUT seconds, default 300).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -94,7 +95,7 @@ run_settle_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
+    FM_FAKE_PANE_PATH="${FM_FAKE_PANE_PATH_OVERRIDE:-$WT_DIR}" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" 2>&1
@@ -141,7 +142,46 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# The wait is bounded by FM_SPAWN_WORKTREE_TIMEOUT (seconds, default 300 -
+# the old fixed 60s starved slow first-clone treehouse pools). A small
+# override must be honored: a pane that never leaves the project times out
+# after that many polls with the bound named in the error.
+test_worktree_timeout_is_configurable() {
+  local rec id out status start end elapsed
+  id=settle-timeout-z3
+  rec=$(make_settle_case settle-timeout "$id" 0)
+  read_settle_record "$rec"
+
+  start=$(date +%s)
+  out=$(FM_SPAWN_WORKTREE_TIMEOUT=2 FM_FAKE_PANE_PATH_OVERRIDE="$PROJ_DIR" run_settle_spawn "$id")
+  status=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+  [ "$status" -ne 0 ] || fail "spawn should fail when the pane never enters a worktree"
+  assert_contains "$out" "within 2s" "the timeout error should name the configured FM_SPAWN_WORKTREE_TIMEOUT bound"
+  [ "$elapsed" -le 15 ] || fail "FM_SPAWN_WORKTREE_TIMEOUT=2 still waited ${elapsed}s - the override was not honored"
+  pass "FM_SPAWN_WORKTREE_TIMEOUT bounds the worktree wait and is named in the timeout error"
+}
+
+# A non-numeric override falls back to the 300s default instead of breaking
+# the loop: a normally settling pane still spawns fine under it.
+test_worktree_timeout_bad_value_falls_back() {
+  local rec id out status
+  id=settle-timeout-bad-z4
+  rec=$(make_settle_case settle-timeout-bad "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(FM_SPAWN_WORKTREE_TIMEOUT=bogus run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a non-numeric FM_SPAWN_WORKTREE_TIMEOUT must fall back to the default, not break the spawn"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the settled worktree under the fallback timeout"
+  pass "a non-numeric FM_SPAWN_WORKTREE_TIMEOUT falls back to the default bound"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_worktree_timeout_is_configurable
+test_worktree_timeout_bad_value_falls_back
 
 echo "# all fm-spawn-worktree-settle tests passed"
