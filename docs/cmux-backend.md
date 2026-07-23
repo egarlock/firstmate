@@ -4,7 +4,7 @@ This document records the empirical verification behind `bin/backends/cmux.sh`, 
 It is the cmux equivalent of the tmux facts recorded in the `harness-adapters` skill and of `docs/herdr-backend.md`'s/`docs/zellij-backend.md`'s/`docs/orca-backend.md`'s facts for those backends.
 
 cmux is [a Ghostty-based macOS terminal](https://cmux.com) built for AI coding agents, with vertical tabs, notifications, and a CLI/socket JSON-RPC control API (`cmux <verb> ...`).
-Verified against the real installed app: cmux 0.64.17 (build 97), macOS aarch64.
+Verified against the real installed app: cmux 0.64.17 (build 97), macOS aarch64; the tab container mode, its focus-at-birth workaround, the passive cwd tiers, and the lazy-terminal findings below were verified against cmux 0.64.20 (build 100).
 The feasibility investigation that preceded this build (`data/cmux-backend-feasibility-c7/report.md`) verified the app's CLI surface from source only, flagging a live install-and-poke pass as the remaining gate; that pass is what this document and `tests/fm-backend-cmux-smoke.test.sh` record.
 All real-cmux verification here and in the smoke test creates only `fm-test-`-prefixed task workspaces, with one documented exception: the manual last-in-window verification also creates the unnamed default sibling cmux requires to close that task workspace.
 It never enumerates-and-closes, touches no existing workspace, closes only its own `fm-test-` task workspaces, and never quits or relaunches the app - the same discipline `tests/herdr-test-safety.sh`/`tests/zellij-test-safety.sh` established for their backends, adapted in `tests/cmux-test-safety.sh` to cmux's shape (there is no isolated, throwaway session to spin up - cmux is one shared, GUI-first app instance, the same posture as Orca).
@@ -137,32 +137,64 @@ cmux is a session provider only, exactly like herdr and zellij (unlike Orca, whi
 Treehouse remains the worktree provider.
 The feasibility report searched cmux's source for a shipped git-worktree-owning feature and found only a prototype (`Sources/ExtensionWorktreePrototype.swift`) that is not wired into any CLI verb - `workspace.create --cwd <path>` just opens a terminal at an existing directory with no opinion about how that directory came to exist.
 
-## Task container shape: one workspace per task, one surface
+## Task container shape: configurable, default one workspace per task
 
 cmux's hierarchy is macOS window -> workspace (a vertical-tab entry, cmux's rough analogue of a herdr/zellij tab) -> surface (a pane/split within that workspace).
 There is no "session" concept to multiplex the way tmux/herdr/zellij have - there is just "the app" (one running GUI instance, optionally split across native macOS windows).
-firstmate uses **one cmux workspace per task**, keyed by the caller-facing `fm-<id>` label, with exactly one surface inside it - mirroring tmux's one-window-per-task and zellij's one-tab-per-task shape.
-The caller-facing task label stays `fm-<id>`, but the visible cmux workspace title is `fm-<home-label>-<id>`.
+The container shape is configurable per home via `FM_CMUX_CONTAINER`, then the first word of the local gitignored `config/cmux-container`, then the default (`fm_backend_cmux_container_mode`; an unknown value warns and falls back to the default):
+
+- **`workspace` (default)** - **one cmux workspace per task**, keyed by the caller-facing `fm-<id>` label, with exactly one surface inside it - mirroring tmux's one-window-per-task and zellij's one-tab-per-task shape. Each task gets its own sidebar row with cmux's native per-workspace status (cwd, git branch, notifications).
+- **`tab`** - **one cmux surface (tab) per task** inside a container workspace: the workspace firstmate itself is running in (`CMUX_WORKSPACE_ID`) when firstmate runs inside cmux, else a find-or-create shared per-home workspace titled `fm-<home-label>` (`fm_backend_cmux_shared_container_title`; created unfocused). This mirrors the tmux adapter's shape - crewmate windows join YOUR session when firstmate runs inside tmux, else a detached "firstmate" session - so the captain watches every task as a tab in the workspace they already have open. Restores the fork's tab container mode on the upstream-based adapter (re-fork wave E).
+
+The caller-facing task label stays `fm-<id>` in both modes; the visible scoped title `fm-<home-label>-<id>` lands on the workspace (workspace mode) or on the task's tab via a sticky `rename-tab` (tab mode; verified 0.64.20: a running shell's own cwd auto-retitling does not overwrite a custom tab title).
 The home label keeps the same readable identity as herdr's workspace split - `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id - and appends a short stable hash of the resolved `FM_ROOT` path.
-That yields labels like `firstmate-<8hex>` or `2ndmate-<id>-<8hex>`, making the visible workspace title `fm-firstmate-<8hex>-<id>` or `fm-2ndmate-<id>-<8hex>-<task>`.
+That yields labels like `firstmate-<8hex>` or `2ndmate-<id>-<8hex>`, making the visible scoped title `fm-firstmate-<8hex>-<id>` or `fm-2ndmate-<id>-<8hex>-<task>`.
 This was hardened in two captain-directed no-mistakes review gate follow-ups: first by adding the home tag for primary-vs-secondmate collisions, then by adding the `FM_ROOT` hash so two distinct primary installations cannot collide either.
-Physically moving or relocating a firstmate installation changes its tag, so workspaces titled under the old tag stop matching after a move.
+The shared tab-mode container title `fm-<home-label>` carries no trailing task segment, so it can never match the task prefix `fm-<home-label>-` that recovery, `list_live`, and kill's mode detection key on.
+Physically moving or relocating a firstmate installation changes its tag, so titles created under the old tag stop matching after a move.
 That is acceptable because a task's own recorded worktree path in `state/<id>.meta` does not survive a repo relocation either, so this is consistent with an existing, already accepted limitation, not a new one.
-There is still no per-home cmux container split (unlike herdr's later refinement); the home tag is a title discriminator only.
+The tab-mode shared container is a per-home title split only, not a secondmate design: `--secondmate` spawns stay refused (see "Known gaps").
+Which mode a LIVE task is in is always derived from where its scoped title sits (workspace title = workspace mode; surface title = tab mode), never from a stored mode flag, so recovery and teardown keep working across a container-mode config change.
 
 ## Target string and meta fields
 
 A cmux task's `window=` meta field holds `<workspace_uuid>:<surface_uuid>`, for example `F28BB910-E42C-40F6-AC5C-D92635581EED:A3E9D3A8-BE1D-4055-A567-3525320D2ABF`.
 Both are bare UUIDs with no embedded colon, so splitting on the first colon is trivially correct (mirrors herdr's/zellij's target-string convention).
+The SAME target shape serves both container modes: in workspace mode the workspace is task-owned and the surface is its single default surface; in tab mode the workspace is the container and the surface is the task's tab.
 The meta target is still the UUID pair, not the human title.
-The human title is reconstructed internally from the caller-facing `fm-<id>` label as `fm-<home-label>-<id>` whenever cmux needs to create, recover, or list a workspace.
+The human title is reconstructed internally from the caller-facing `fm-<id>` label as `fm-<home-label>-<id>` whenever cmux needs to create, recover, or list a task endpoint; `fm_backend_cmux_target_ready` matches it against the workspace's title first (workspace mode) and the surfaces' titles second (tab mode, including an app-global re-resolve for a relaunch-stale container workspace id).
 `<home-label>` includes the readable home prefix and the short `FM_ROOT` path hash described above.
 cmux tasks additionally record:
 
-- `cmux_workspace_id=` - the task's workspace UUID (same value as the `window=` field's first component).
-- `cmux_surface_id=` - the task's surface UUID (same value as the `window=` field's second component).
+- `cmux_workspace_id=` - the task's workspace UUID (same value as the `window=` field's first component; the container workspace in tab mode).
+- `cmux_surface_id=` - the task's surface UUID (same value as the `window=` field's second component; the task's tab in tab mode).
 
 No session field is needed - unlike herdr/zellij there is no session layer to record.
+
+## Tab creation requires focus at birth on cmux 0.64.18+
+
+cmux 0.64.18 introduced a regression in which a terminal surface created with `--focus false` can remain renderer-unrealized and later paint black when selected.
+The behavior was not present in 0.64.17; the focus-at-birth workaround was verified on 0.64.20 (build 100), and the same build is what this port's own live pass ran against - at the CLI level an unfocused-created surface still starts its terminal and reads fine after a wake (re-verified), so the regression is renderer/paint-level only and the final painted-versus-black confirmation remains a visual check.
+Workspace mode is unaffected and keeps `new-workspace --focus false`: the confirmed regression concerns surfaces created into an existing workspace's tab bar, not a fresh workspace's default surface (wave E item-3 verdict: zero code change for workspace mode).
+
+cmux has no mount-without-focus primitive, so tab mode creates the terminal with `new-surface --focus true`, then restores the full prior focus context.
+Restoring only the surface is not enough: focusing a surface does **not** reactivate its workspace or window (verified 0.64.20), so tab mode captures the complete focused context before creating the tab: `.focused.{window_ref, workspace_ref, pane_ref, surface_ref}` from `cmux identify --no-caller` (`fm_backend_cmux_focus_context`).
+A destination-less `cmux move-surface --surface <prior> --focus true` must **not** be used to restore: with no destination it reorders (appends) the tab within its pane (verified 0.64.20), disturbing the pre-existing tab order.
+The verified order-preserving restore sequence (`fm_backend_cmux_restore_focus`) is:
+
+1. `cmux focus-window --window <window>` (best-effort; harmless no-op on a single-window app or a missing window ref).
+2. `cmux select-workspace --workspace <workspace> [--window <window>]` (essential: reactivates the prior workspace and its window).
+3. `cmux focus-pane --pane <pane> --workspace <workspace> [--window <window>]` (best-effort refinement).
+4. `cmux reorder-surface --surface <surface> --workspace <workspace> [--window <window>] --index <its-own-current-index> --focus true` (essential: re-selects the tab **at the index it currently occupies**, a no-op move that only changes focus, so pre-existing order is preserved).
+
+The surface's current index is re-read (`list-pane-surfaces --json --id-format both`) at restore time because creating the new tab focused shifts indices.
+If cmux reports no focused surface, restoration is skipped; a reported context whose workspace cannot be reactivated, or whose surface has since vanished, fails task creation explicitly.
+Restoration causes a brief focus flicker while the new terminal's drawable is realized.
+
+Creation is transactional: the new surface's exact UUID is resolved by diffing `list-pane-surfaces --json --id-format uuids` around the create (the `new-surface` acknowledgment carries only short refs, `OK surface:<n> pane:<m> workspace:<k>`, and it inserts the tab adjacent to the focused tab, not at the end, so position cannot identify it), and the create is acknowledged, **before** the fallible focus restoration runs.
+Any pre-return failure - the restoration, the scoped-title rename, or the post-create cwd setup - closes ONLY that new surface (`close-surface --surface <new>`), never a pre-existing tab; an unresolvable new UUID fails without closing anything.
+The rename is fatal on failure (a divergence from the fork's non-fatal warning): every later operation verifies the task by that scoped surface title, so an untitled tab would fail every send/capture/kill anyway - better to fail the spawn while cleanup is still one targeted close.
+**Never** close, move, reorder, or rename a pre-existing surface: restoration only reactivates/refocuses them in place, and the sole `rename-tab` targets the new surface.
 
 ## Verified CLI facts
 
@@ -219,6 +251,10 @@ The moment a single `send` actually writes to that same surface, `read-screen` b
 This ruled out `read-screen` as the liveness/readiness probe: the very first `send_literal` call on a freshly created task's surface would fail its own pre-flight readiness check before ever getting to write anything, making every task un-spawnable.
 `cmux list-panes --workspace <id> --json --id-format uuids`, checking the target surface id appears in `.panes[].surface_ids`, has no such gap - verified correct and immediate on a completely untouched fresh surface - so `fm_backend_cmux_target_ready` uses that instead, mirroring zellij's own structural `pane_exists` check rather than Orca's read-based liveness pattern.
 
+The underlying mechanism is a LAZY terminal start: an unfocused fresh workspace or tab does not start its terminal process at all - `read-screen` fails as above and `cmux tree` reports no `tty=` - until the surface first receives input or is viewed.
+Re-verified on 0.64.20 (build 100): a `send` to a never-started surface is **queued into the pty and executes once the terminal starts** - it is not lost - so upstream's send-straight-after-create spawn sequence is correct as-is (wave E item-7 verdict: no first-send loss).
+`fm_backend_cmux_wait_ready` (`FM_CMUX_READY_ATTEMPTS`/`FM_CMUX_READY_INTERVAL`/`FM_CMUX_READY_SETTLE`) still exists for the tab-mode create: it sends one harmless wake Enter and polls for stable screen content, so the tab's `cd <cwd>` setup lands at a visible prompt instead of being echoed raw above the login banner in the captain-visible tab, and so the immediately following read-screen-based steps see a readable surface.
+
 ## Worktree-path discovery: `current_directory` does not track a subshell (zellij-shape, not herdr-shape)
 
 Verified live, step by step, mirroring the exact test that caught this for zellij:
@@ -227,8 +263,15 @@ Verified live, step by step, mirroring the exact test that caught this for zelli
 2. Running a nested subshell as a foreground command (`bash -c 'cd /Users && exec bash'`, standing in for `treehouse get`'s own nested interactive subshell) and confirming on-screen (via `pwd` typed inside the now-interactive nested shell) that it truly is in the new directory - `current_directory` stays **frozen** at `/var`, the directory the TOP-LEVEL shell was in when it launched the subshell. It never updates once a subshell has taken over as the surface's foreground process.
 
 This is the same shape zellij's `pane_cwd` has, not herdr's live-tracking `foreground_cwd`.
-**Workaround, `fm_backend_cmux_current_path`:** reuses zellij's own active pwd-marker-probe technique verbatim in spirit - submit a begin marker, `pwd`, and an end marker via `send_text_line`, briefly settle, capture, and read only the lines between the markers.
-Verified against the real binary in both shapes: a direct `cd` in the surface's own shell, and a nested subshell's own `cd` (the load-bearing case matching `treehouse get`'s actual shape) - both confirmed correct in `tests/fm-backend-cmux-smoke.test.sh`.
+
+**`fm_backend_cmux_current_path` reads PASSIVE tiers first (re-fork wave E, from the fork's cwd-discovery work), with the active probe kept as the fallback**, so the common case never types into the captain-visible task terminal:
+
+1. **tty + ps + lsof**: the surface's tty from `cmux tree --id-format both` (`fm_backend_cmux_surface_tty`), the foreground process group on that tty via `ps`, its cwd via `lsof` - exactly the OS-level semantics tmux's `#{pane_current_path}` provides. Verified on 0.64.20 (build 100): `tree` DOES report `tty=` once the terminal has started; the fork had found some builds (0.64.17 build 97) reporting `tty: null` for every surface, which is why the later tiers stay.
+2. **On-screen block-header cwd** (`fm_backend_cmux_screen_cwd`): cmux renders every command block with a header line `| [<tag>] <ABSOLUTE_CWD> @ <host> (<user>)` and updates it on each `cd`, so the LAST header is the current directory (shape re-verified on 0.64.20, trailing space included). tty-free and correct in both container modes; `read-screen` returns unwrapped logical lines, so an absolute path is never split; only absolute paths are accepted.
+3. **Workspace `current_directory`** - ONLY when the workspace's title proves it is task-owned (workspace mode, expected label required). In tab mode it would be the WRONG answer (the container workspace's directory), so it is skipped there.
+4. **The active pwd-marker probe** (upstream's original strategy, zellij's own workaround technique): submit a begin marker, `pwd`, and an end marker via `send_text_line`, briefly settle, capture, and read only the lines between the markers.
+
+Verified against the real binary in both shapes: a direct `cd` in the surface's own shell, and a nested subshell's own `cd` (the load-bearing case matching `treehouse get`'s actual shape) - both confirmed correct in `tests/fm-backend-cmux-smoke.test.sh`, which also covers the tab-mode leg's passive-tier read.
 
 ## Closing the last surface: a third shape (unanticipated finding)
 
@@ -237,8 +280,9 @@ Neither turned out to be correct: cmux implements a **third** shape.
 Verified live: `cmux close-surface --workspace <id> --surface <id>` against a workspace's LAST remaining surface **refuses outright** with a typed error, `Error: invalid_state: Cannot close the last surface`, leaving both the surface and the workspace completely untouched - no partial state, no ghost.
 `cmux close-workspace --workspace <id>` against that same workspace succeeds cleanly, removing the whole workspace (surface included) in one call, only when it is not the last workspace in its window.
 
-Since every firstmate cmux task uses exactly one owned workspace, `close-workspace` remains the correct teardown primitive.
-The next section ("Closing the last workspace in a window") owns the last-in-window exception and `fm_backend_cmux_kill`'s best-effort workaround, which still reclaims every surface in the task workspace.
+For a workspace-mode task (one owned workspace), `close-workspace` remains the correct teardown primitive; the next section ("Closing the last workspace in a window") owns the last-in-window exception and the sibling workaround, which still reclaims every surface in the task workspace.
+For a tab-mode task, `fm_backend_cmux_kill` closes only the task's surface - the container workspace is not the task's to reclaim - and this last-surface refusal is exactly why the tab arm has its own workaround: when the task tab is the ONLY surface left, either the container is this home's own shared container workspace (`fm-<home-label>`), in which case the whole now-task-free container is reclaimed via the workspace path, or it is the captain's own workspace, in which case a throwaway default surface is created first so the close lands, leaving the captain's workspace a fresh tab rather than a dead task tab.
+Which arm runs is derived from the workspace's title: an exact scoped-title match for the expected label (or, with no label, this home's task-title prefix) means the task owns the workspace; anything else is a container (`fm_backend_cmux_kill`'s mode detection).
 
 ## Closing the last workspace in a window (the selected-workspace teardown fix)
 
@@ -364,7 +408,7 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
 
 ## Known gaps left for a follow-up
 
-- **No event push at all**, not even herdr's semantic busy-state: cmux has agent-awareness elsewhere (Claude Code hooks, session-resume) but nothing exposed over the socket API for generic busy/idle classification, so `fm-watch.sh`'s existing pane-hash + `FM_BUSY_REGEX` poll loop is the ONLY event source for this backend, identical to the tmux/zellij/Orca path.
+- **No event push at all**, not even herdr's semantic busy-state: cmux has agent-awareness elsewhere (Claude Code hooks, session-resume) but nothing exposed over the socket API for generic busy/idle classification - re-checked on 0.64.20 (build 100): `workspace list --json` still has no agent-state field - so `fm-watch.sh`'s existing pane-hash + `FM_BUSY_REGEX` poll loop is the ONLY event source for this backend, identical to the tmux/zellij/Orca path. `fm_backend_cmux_busy_state` (re-fork wave E) probes a forward-compatible `agent_status` field so a future cmux that exposes one starts classifying without an adapter change; on every verified version it reports `unknown`, and for a tab-mode target it always reports `unknown` because a workspace-level field would describe the container, not the task's tab.
 - **GUI-first, macOS-only, requires the app running** - identical posture to Orca.
   Never a candidate for a headless/CI firstmate instance, because runtime auto-detection (cmux runtime signals; see "Runtime auto-detection" above) can only fire from inside a live cmux terminal in the first place.
   The one-time socket-access setup remains an unavoidable manual step regardless of how the backend was selected.

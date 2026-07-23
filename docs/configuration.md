@@ -78,10 +78,11 @@ Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](her
 For normal zellij operations, `FM_ZELLIJ_SESSION` selects the named session and defaults to `firstmate`.
 Zellij has no per-home workspace split: primary and secondmate tasks share that one session, and visible tab titles are scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
 Use the guarded cleanup path described in [`docs/zellij-backend.md`](zellij-backend.md) instead of `kill-all-sessions` or `delete-all-sessions`.
-cmux has no session layer at all - one workspace per task, in whatever cmux window is open - and its socket password (when configured) is read from local, gitignored `config/cmux-socket-password` under the effective config directory, never committed.
-The caller-facing label remains `fm-<id>`, but the actual cmux workspace title is scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
+cmux has no session layer at all, and its socket password (when configured) is read from local, gitignored `config/cmux-socket-password` under the effective config directory, never committed.
+The cmux task-container shape is configurable via `FM_CMUX_CONTAINER` or the first word of local, gitignored `config/cmux-container`: absent or `workspace` (the default) gives one fm-titled workspace per task, while `tab` puts each task in its own tab inside firstmate's own cmux workspace (or a shared per-home workspace when firstmate is not itself running inside cmux) - see [`docs/cmux-backend.md`](cmux-backend.md)'s "Task container shape".
+The caller-facing label remains `fm-<id>`, but the actual cmux title - on the task workspace, or on the task's tab in tab mode - is scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
 Test cleanup must use the guarded path described in [`docs/cmux-backend.md`](cmux-backend.md)'s "Test safety" section, never enumerate-and-close every workspace.
-The `config/backend` file is not inherited by secondmate homes.
+The `config/backend` and `config/cmux-container` files are not inherited by secondmate homes.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
@@ -160,8 +161,8 @@ When `FM_HOME` is unset, it also behaves as the old whole-root override.
 For the herdr backend, `FM_HOME` also determines the workspace label used by the adapter.
 For the zellij backend, `FM_HOME` does not split containers, but it determines the readable home prefix embedded in visible tab titles; use `FM_ZELLIJ_SESSION` when a separate zellij session is needed.
 The full zellij home label also includes a short hash of the resolved `FM_ROOT` path.
-For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
-The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
+For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` and `config/cmux-container` are read from, while `FM_HOME` determines the default config path and readable home prefix embedded in scoped titles.
+The full cmux home label also includes a short hash of the resolved `FM_ROOT` path; tab mode's shared container workspace (`fm-<home-label>`) is a per-home title split only, not a secondmate container design.
 
 ## Harness support
 
@@ -371,7 +372,12 @@ FM_BACKEND_ORCA_IDLE_RE='^Type a message\.\.\.$'  # orca-only: empty-composer pl
 FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops and test isolation (docs/zellij-backend.md)
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
+FM_CMUX_CONTAINER=      # cmux-only: task-container shape override (workspace|tab); wins over config/cmux-container; absent = workspace
+FM_CMUX_READY_ATTEMPTS=30    # cmux-only: wait_ready stable-screen polls after waking a lazily-started tab terminal
+FM_CMUX_READY_INTERVAL=0.5   # cmux-only: seconds between wait_ready polls
+FM_CMUX_READY_SETTLE=1       # cmux-only: settle sleep after wait_ready sees a stable screen
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
+FM_SPAWN_WORKTREE_TIMEOUT=300  # fm-spawn: seconds to wait for `treehouse get` to enter the task worktree (any backend); non-numeric falls back to 300
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
