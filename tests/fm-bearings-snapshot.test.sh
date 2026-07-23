@@ -1664,9 +1664,12 @@ EOF
         and (.reason | contains("unreadable-child"))))
   ' >/dev/null || fail "end-to-end mixed-domain projection was wrong: $json"
 
+  # The a\ text must end with a newline inside the script: stock macOS sed
+  # emits unterminated append text without its trailing newline, gluing it to
+  # the next input line and corrupting the fixture's section headers.
   sed '/unreadable-child/a\
-- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)' \
-    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)
+' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
@@ -1703,9 +1706,10 @@ EOF
       and .landed == []
       and .endpoints == []
   ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
+  # Newline-terminated a\ text for stock macOS sed; see the note above.
   sed '/## In flight/a\
-- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
-    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)
+' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
 
   fm_write_meta "$wheel/state/production-observation.meta" \
