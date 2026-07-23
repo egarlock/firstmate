@@ -28,6 +28,11 @@ TMP_ROOT=$(fm_test_tmproot fm-session-lock-tests)
 # shape is the point - a name-only liveness check MATCHES it, so a defunct harness
 # would read as a live holder. (macOS happens to render both comm and args as
 # `<defunct>`, so the real local ps cannot exercise the hazard.)
+#
+# FM_TEST_REAL_PID passes ONE pid's comm/args straight through to the real ps, so
+# it keeps its genuine (non-harness) command while every other process still reads
+# as a "claude" harness. That lets a test give the acquirer a resolvable harness
+# ancestry while holding the lock with a live but non-harness process.
 write_delegating_ps() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/ps" <<'SH'
@@ -69,6 +74,10 @@ if [ "$want_comm" = 1 ] || [ "$want_args" = 1 ]; then
   if [ "$zombie" = 1 ]; then
     [ "$want_comm" = 1 ] && printf 'claude\n' || printf '[claude] <defunct>\n'
     exit 0
+  fi
+  if [ -n "${FM_TEST_REAL_PID:-}" ] && [ "$pid" = "$FM_TEST_REAL_PID" ]; then
+    [ "$want_comm" = 1 ] && { "$realps" -o comm= -p "$pid"; exit $?; }
+    "$realps" -o args= -p "$pid"; exit $?
   fi
   case "$ra" in
     *fm-lock.sh*) "$realps" -o comm= -p "$pid"; exit $? ;;   # the fm-lock process itself
@@ -311,15 +320,18 @@ test_legacy_format_identity_on_non_harness_is_reclaimed() {
   fakebin="$dir/fakebin"
   lock="$state/.lock"
   mkdir -p "$state" "$fakebin"
-  # No delegating ps here: the real ps reports `sleep`, which the harness regex
-  # does not match, so the holder is live but not a firstmate harness.
+  # The delegating ps gives the ACQUIRER a resolvable harness ancestry, but
+  # FM_TEST_REAL_PID passes the holder's own command straight through: the real ps
+  # reports `sleep`, which the harness regex does not match, so the holder is live
+  # but not a firstmate harness.
+  write_delegating_ps "$fakebin"
   sleep 300 &
   holder=$!
   mkdir "$lock"
   printf '%s\n' "$holder" > "$lock/pid"
   printf '%s\n' "untagged identity of the recycled pid" > "$lock/pid-identity"
   status=0
-  out=$(FM_HOME="$dir" "$FMLOCK" 2>&1) || status=$?
+  out=$(PATH="$fakebin:$PATH" FM_TEST_REAL_PID="$holder" FM_HOME="$dir" "$FMLOCK" 2>&1) || status=$?
   newpid=$(cat "$lock/pid" 2>/dev/null || true)
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
