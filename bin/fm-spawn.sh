@@ -1213,6 +1213,13 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# The trailing `|| exit 1` is load-bearing, not belt-and-braces: stock macOS bash
+# 3.2 does NOT apply `set -e` to a redirection failure on a COMPOUND command
+# ({ }, if, while), only on a simple command or subshell. Without the explicit
+# check, an unwritable metadata path let spawn continue on 3.2 - it launched the
+# agent with no recorded metadata AND disarmed the backend abort cleanup on the
+# next line, leaking the worktree and terminal. Keep any new compound-command
+# redirection in this repo explicitly status-checked for the same reason.
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1251,7 +1258,7 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || exit 1
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

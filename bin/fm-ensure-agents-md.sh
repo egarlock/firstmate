@@ -74,10 +74,13 @@ ensure_maintenance_section() {
       sep=$eol
     fi
   fi
+  # Explicitly status-checked because stock macOS bash 3.2 does not apply
+  # `set -e` to a redirection failure on a compound command; without it a failed
+  # append would still report MAINT_INJECTED=1 on the captain's machine.
   {
     printf '%s' "$sep"
     write_maintenance_section_with_eol "$eol"
-  } >> "$AGENTS"
+  } >> "$AGENTS" || return 1
   MAINT_INJECTED=1
 }
 
