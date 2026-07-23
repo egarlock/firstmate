@@ -292,6 +292,28 @@ test_grok_omits_invalid_max_reasoning_effort() {
   pass "grok omits unsupported max reasoning effort"
 }
 
+# grok's reasoning-effort ceiling dropped to `high` at 0.2.99: xhigh is rejected
+# alongside max ("use one of: high, medium, low"). A dispatch profile pairing
+# grok with xhigh must therefore launch WITHOUT an effort flag rather than
+# failing at spawn.
+test_grok_omits_invalid_xhigh_reasoning_effort() {
+  local rec id out status launch
+  id=profile-grok-xhigh-z9
+  rec=$(make_spawn_case profile-grok-xhigh grok "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$(cat " \
+    "grok launch did not preserve the model flag when xhigh effort was omitted"
+  assert_not_contains "$launch" "--reasoning-effort" \
+    "grok launch must omit xhigh, which 0.2.99 rejects"
+  pass "grok omits xhigh reasoning effort (0.2.99 ceiling is high)"
+}
+
 test_opencode_threads_model_and_ignores_effort_axis() {
   local rec id out status launch
   id=profile-opencode-z7
@@ -311,7 +333,9 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
-test_pi_omits_invalid_max_effort() {
+# Pi 0.80.6 accepts the full low..max --thinking set; 0.80.2 warned that `max`
+# was invalid, so firstmate used to drop it. It must now be passed through.
+test_pi_threads_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
   rec=$(make_spawn_case profile-pi pi "$id")
@@ -319,12 +343,12 @@ test_pi_omits_invalid_max_effort() {
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet --effort max)
   status=$?
-  expect_code 0 "$status" "pi spawn with max effort should not pass an invalid flag"
+  expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi sonnet max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --model 'sonnet' -e" "pi launch did not thread model"
-  assert_not_contains "$launch" "--thinking" "pi launch must omit --thinking max because the CLI rejects it"
-  pass "pi threads model and omits unsupported max effort"
+  assert_contains "$launch" "pi --model 'sonnet' --thinking 'max' -e" \
+    "pi launch did not thread model and max thinking effort"
+  pass "pi threads --thinking max (accepted as of 0.80.6)"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -375,8 +399,9 @@ test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
+test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
-test_pi_omits_invalid_max_effort
+test_pi_threads_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
