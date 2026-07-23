@@ -31,6 +31,44 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# The space-delimited signal: wake format cannot safely encode a state path that
+# contains whitespace; a spaced path silently corrupts wake parsing, which is a
+# quiet safety failure on orchestration infra. Both the always-on watcher and the
+# away-mode daemon call this at startup and refuse to run rather than degrade
+# silently. Returns 1 and prints guidance on a whitespace-bearing path; the caller
+# exits on a non-zero return.
+fm_assert_state_space_safe() {  # <state-dir>
+  local state=$1
+  case "$state" in
+    *[[:space:]]*)
+      printf 'fatal: firstmate state path contains whitespace: %s\n' "$state" >&2
+      printf '       the supervision signal path is space-delimited and cannot safely\n' >&2
+      printf '       encode spaced paths; move FM_HOME to a path without spaces and retry.\n' >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Read a non-negative integer sidecar file (.heartbeat-streak, .count-*,
+# .subsuper-*-since epochs), degrading to <default> (0 when omitted) for a
+# missing, empty, or NON-NUMERIC value. These values are fed straight into
+# arithmetic ($(( x + 1 )), 1 << streak, now - epoch); under `set -u` a corrupt
+# value (a stray word from a truncated/garbled write, or filesystem damage)
+# aborts the arithmetic on an "unbound variable" and silently kills the reader
+# mid-cycle - and non-numeric content in $(( )) is the classic
+# arithmetic-injection surface. Sanitizing on read makes a corrupt sidecar reset
+# to the default instead. Shared here so the always-on watcher and the away-mode
+# daemon read sidecars through ONE hardened path rather than per-file copies.
+fm_read_counter() {  # <file> [<default>]
+  local v d=${2:-0}
+  v=$(cat "$1" 2>/dev/null || true)
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$d" ;;
+    *)           printf '%s' "$v" ;;
+  esac
+}
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses

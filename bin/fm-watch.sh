@@ -253,13 +253,28 @@ recorded_windows() {
   done
 }
 
+# Reset the heartbeat backoff to the base cadence. A SURFACED non-heartbeat wake
+# resets it here (via wake()), but so must every ABSORBED wake: an absorbed wake
+# still proves the fleet was active this poll, so without a reset a busy fleet whose
+# wakes are all absorbed keeps backing off to the 2h cap and slows genuine heartbeat
+# scans. Called at each absorb site below.
+reset_heartbeat_streak() { echo 0 > "$STATE/.heartbeat-streak"; }
+
+# Log an absorbed fleet-activity wake AND reset the heartbeat backoff: the fleet was
+# active this poll (a signal or stale that got absorbed), so the heartbeat cadence
+# must reset just as a surfaced wake resets it. NOT used for the heartbeat-absorb
+# itself, whose whole purpose is to back the cadence off.
+absorb_note() { reset_heartbeat_streak; triage_log "$1"; }
+
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
+# Counter reads go through fm_read_counter so a corrupt sidecar resets to 0 rather
+# than aborting the arithmetic under set -u.
 wake() {
   case "$1" in
-    heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
-    *) echo 0 > "$STATE/.heartbeat-streak" ;;
+    heartbeat*) echo $(( $(fm_read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak" ;;
+    *) reset_heartbeat_streak ;;
   esac
   echo "$1"
   exit 0
@@ -291,12 +306,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   case "$since" in
     ''|*[!0-9]*)
       date +%s > "$since_file"
-      triage_log "absorbed $label timer reset: $win"
+      absorb_note "absorbed $label timer reset: $win"
       ;;
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        n=$(( $(fm_read_counter "$escalation_file") + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
@@ -338,7 +353,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+  absorb_note "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -681,7 +696,7 @@ handle_push_transition() {  # <backend> <session> <record>
   window="$session:$pane_id"
   task=$(window_to_task "$window" "$STATE")
   if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-    triage_log "absorbed push $to (declared pause, awaiting external): $window"
+    absorb_note "absorbed push $to (declared pause, awaiting external): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi
@@ -698,6 +713,10 @@ handle_push_transition() {  # <backend> <session> <record>
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
+
+# The space-delimited signal: wake format cannot safely encode a whitespace-bearing
+# state path; refuse loudly at startup rather than corrupt wake parsing silently.
+fm_assert_state_space_safe "$STATE" || exit 1
 
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
@@ -876,7 +895,7 @@ EOF
       done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+      absorb_note "absorbed benign $reason"
     fi
   fi
 
@@ -908,7 +927,7 @@ EOF
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
-      n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
+      n=$(( $(fm_read_counter "$cf") + 1 ))
       echo "$n" > "$cf"
       # Busy match: a backend's native semantic state when available (herdr),
       # else the last 6 non-blank lines only (the TUI footer area, where every
@@ -948,7 +967,7 @@ EOF
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+              absorb_note "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
@@ -988,7 +1007,7 @@ EOF
                 clear_pause_tracking "$w"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
-                triage_log "absorbed non-terminal stale (provably working): $w"
+                absorb_note "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
@@ -1005,7 +1024,7 @@ EOF
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
-                         triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                         absorb_note "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
@@ -1040,7 +1059,7 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
-  streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
+  streak=$(fm_read_counter "$STATE/.heartbeat-streak")
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
@@ -1064,7 +1083,7 @@ EOF
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
-      echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
+      echo $(( $(fm_read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi

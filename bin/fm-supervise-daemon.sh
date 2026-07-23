@@ -918,7 +918,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
   [ -s "$f" ] || { echo 999999; return; }
   since="${f}.since"
   if [ -r "$since" ]; then
-    echo $(( $(_now) - $(cat "$since" 2>/dev/null || echo 0) ))
+    echo $(( $(_now) - $(fm_read_counter "$since") ))
   else
     echo 999999
   fi
@@ -990,7 +990,7 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    age=$(( now - $(fm_read_counter "$marker" "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
@@ -1021,7 +1021,7 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    age=$(( now - $(fm_read_counter "$marker" "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
@@ -1279,6 +1279,11 @@ fm_super_main() {
   local STATE
   STATE="$(_state_root)"
   mkdir -p "$STATE"
+
+  # The space-delimited signal: wake format cannot safely encode a whitespace-bearing
+  # state path; refuse loudly rather than corrupt wake parsing silently (shared guard
+  # with the always-on watcher, from fm-classify-lib.sh).
+  fm_assert_state_space_safe "$STATE" || exit 1
 
   # Source the portable lock helpers (works on macOS where flock is absent).
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
