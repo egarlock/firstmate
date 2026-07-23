@@ -711,7 +711,8 @@ policy_adapters_json() {
   printf '[%s]\n' "${out#,}"
 }
 policy_efforts_json() {
-  local a e out= inner
+  local a e inner out
+  out=
   for a in $FM_VERIFIED_ADAPTERS; do
     inner=
     for e in $(fm_harness_efforts "$a"); do inner="$inner,\"$e\""; done
