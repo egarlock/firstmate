@@ -90,6 +90,26 @@ test_idle_placeholder_is_empty() {
   pass "fm_composer_classify_content: a known idle placeholder reads empty, before and after glyph stripping"
 }
 
+test_idle_placeholder_matches_under_c_locale() {
+  # The leading-glyph strip must remove exactly one GLYPH, not one byte: the
+  # agent glyphs are three UTF-8 bytes each, so a `?`-based strip leaves a stray
+  # continuation byte under LC_ALL=C, the anchored post-strip idle match misses,
+  # and an idle composer reads `pending` - the daemon would then defer every
+  # escalation to the max-defer wedge alarm.
+  local idle='^Type a message\.\.\.$' out g
+  for g in '❯' '›'; do
+    out=$(LC_ALL=C bash -c '. "$1"; fm_composer_classify_content 0 "$2 Type a message..." "$3"' \
+      _ "$ROOT/bin/fm-composer-lib.sh" "$g" "$idle")
+    [ "$out" = empty ] \
+      || fail "under LC_ALL=C, '$g Type a message...' should read empty, got '$out'"
+  done
+  # And the same row is still pending when it carries real text after the glyph.
+  out=$(LC_ALL=C bash -c '. "$1"; fm_composer_classify_content 0 "❯ fix findings 1 and 3" "$2"' \
+    _ "$ROOT/bin/fm-composer-lib.sh" "$idle")
+  [ "$out" = pending ] || fail "under LC_ALL=C, real text after a glyph should be pending, got '$out'"
+  pass "fm_composer_classify_content: the glyph strip is locale-independent (LC_ALL=C post-strip idle match lands)"
+}
+
 test_idle_placeholder_case_mode_is_explicit() {
   local idle='^Type a message\.\.\.$' out
   out=$(classify 1 'type a message...' "$idle")
@@ -116,5 +136,6 @@ test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
+test_idle_placeholder_matches_under_c_locale
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending

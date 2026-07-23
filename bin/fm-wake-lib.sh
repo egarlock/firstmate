@@ -23,6 +23,45 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# Every identity string carries a leading FORMAT TAG. Identities are written to
+# disk (state/.lock/pid-identity, state/.watch.lock/pid-identity) by one firstmate
+# version and re-read by another, so the recorded string outlives the code that
+# produced it. Without the tag a FORMAT change (this fork's /proc-based Linux
+# identity, or the LC_ALL=C lstart pinning) is indistinguishable from a genuine
+# identity mismatch - and a genuine mismatch means "this pid was recycled", which
+# reclaims the lock. Tagging lets a reader recognize "written by an older format,
+# UNVERIFIABLE" and take the safe branch instead of stealing a live session's
+# lock. Bump the tag whenever the payload's construction changes.
+FM_PID_IDENTITY_FORMAT=fmid1
+
+# fm_pid_identity_format <identity-string>: the format tag the string was written
+# with, or `legacy` for an untagged (pre-tag) identity.
+fm_pid_identity_format() {
+  case "${1%% *}" in
+    fmid[0-9]*) printf '%s\n' "${1%% *}" ;;
+    *) printf 'legacy\n' ;;
+  esac
+}
+
+# fm_pid_identity_verdict <stored> <current>: the ONE definition of "does this
+# recorded identity still vouch for this live process". Every lock that records an
+# identity must go through it, because the interesting case is three-valued and a
+# plain string comparison silently collapses it to two:
+#   0  match        - same format, identical: the recorded holder is this process.
+#   1  mismatch     - same format, different: the pid was reused/recycled.
+#   2  unverifiable - written in a DIFFERENT format (a firstmate update landed
+#                     while the holder was running), so the two strings are not
+#                     comparable at all. NOT evidence of reuse; each caller picks
+#                     the safe branch for its lock (refuse, honor, heal).
+fm_pid_identity_verdict() {
+  local stored=$1 current=$2
+  [ -n "$stored" ] && [ -n "$current" ] || return 2
+  if [ "$(fm_pid_identity_format "$stored")" != "$(fm_pid_identity_format "$current")" ]; then
+    return 2
+  fi
+  [ "$stored" = "$current" ]
+}
+
 fm_pid_identity() {
   local pid=$1 out proc_root stat_line starttime cmdline_hex
   local -a stat_fields
@@ -45,7 +84,8 @@ fm_pid_identity() {
     esac
     cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
     [ -n "$cmdline_hex" ] || return 1
-    printf 'linux-starttime=%s cmdline-hex=%s\n' "$starttime" "$cmdline_hex"
+    printf '%s linux-starttime=%s cmdline-hex=%s\n' \
+      "$FM_PID_IDENTITY_FORMAT" "$starttime" "$cmdline_hex"
     return 0
   fi
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
@@ -53,7 +93,7 @@ fm_pid_identity() {
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
   out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+  printf '%s %s\n' "$FM_PID_IDENTITY_FORMAT" "$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')"
 }
 
 fm_path_mtime() {

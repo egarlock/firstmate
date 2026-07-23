@@ -12,10 +12,18 @@
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
 #   (f) Azure DevOps pr= -> refs/pull/<n>/head is a GitHub convention that ADO does
-#       not publish, so ADO must use the recorded pr_head= instead of silently
+#       not publish, so ADO must resolve the head another way instead of silently
 #       reviewing a stale local branch. ADO publishes refs/pull/<n>/merge (a merge
 #       commit into the target, NOT the PR head), so a pull-ref fetch must never
 #       be attempted for ADO even when such a ref exists.
+#   (g) Azure DevOps pr= + az on PATH -> the LIVE head from
+#       `az repos pr show ... lastMergeSourceCommit` wins over a stale recorded
+#       pr_head= (the recorded value is a one-shot snapshot nothing refreshes,
+#       so preferring it reviews a pre-fix SHA); an az failure falls back to it.
+# Two cross-cutting invariants ride along on every case: the resolved COMPARE side
+# is reported next to the base (an approval under yolo=on is unattended, so it must
+# say what it reviewed), and the private refs/fm-review/ ref the GitHub path
+# fetches through is never left behind in the long-lived pooled clone.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -77,7 +85,45 @@ run_review_diff() {
   shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
     "$REVIEW_DIFF" "$@"
+}
+
+# assert_no_private_review_refs: the GitHub path fetches through a private
+# refs/fm-review/ ref so a later base fetch cannot clobber the compare tip via
+# FETCH_HEAD, but the caller needs the COMMIT, not a lasting ref. Project clones
+# are long-lived and reviewed repeatedly, so a kept ref would accumulate one per
+# reviewed PR and pin its whole graph against GC.
+assert_no_private_review_refs() {
+  local case_dir=$1 label=$2 left
+  left=$(git -C "$case_dir/wt" for-each-ref --format='%(refname)' 'refs/fm-review/**' 2>/dev/null || true)
+  [ -z "$left" ] || fail "$label: private review refs were left behind: $left"
+}
+
+# add_az_mock <case_dir> <head|fail>: a fake az answering the azure-devops
+# extension probe plus the lastMergeSourceCommit query. `fail` makes the query
+# exit non-zero, which is the "az cannot answer" fallback path. az is NOT
+# installed in this environment, so every case without this mock exercises the
+# no-az fallback for real.
+add_az_mock() {
+  local case_dir=$1 head=$2
+  mkdir -p "$case_dir/fakebin"
+  cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-} \${3:-}" in
+  "extension show --name") exit 0 ;;
+  "repos pr show")
+    case " \$* " in
+      *" --query lastMergeSourceCommit.commitId "*)
+        [ '$head' = fail ] && exit 1
+        printf '%s\n' '$head'
+        exit 0 ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/az"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local() {
@@ -93,8 +139,11 @@ test_pr_meta_uses_pr_head_not_stale_local() {
 
   assert_contains "$out" '+pr-fixed' "pr-head-sha: diff should show the PR head content"
   assert_not_contains "$out" 'stale-local' "pr-head-sha: diff must not use the stale local branch"
+  assert_contains "$out" "compare: PR head $PR_SHA (via recorded pr_head=)" \
+    "pr-head-sha: the reported compare side must name the recorded-pr_head fallback"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "pr-head-sha: should not warn when recorded pr_head is reachable offline"
+  assert_no_private_review_refs "$case_dir" pr-head-sha
   pass "fm-review-diff falls back to recorded pr_head when pull head cannot be fetched"
 }
 
@@ -115,8 +164,11 @@ test_stale_recorded_pr_head_loses_to_fetched_pull_head() {
     "stale-recorded: diff must show the fetched PR head, not the recorded stale SHA"
   assert_not_contains "$out" 'stale-local' \
     "stale-recorded: diff must not use the stale local/recorded content"
+  assert_contains "$out" "compare: PR head $PR_SHA (via refs/pull/9/head)" \
+    "stale-recorded: the reported compare side must name the fetched pull head"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "stale-recorded: fetch of refs/pull/<n>/head should succeed"
+  assert_no_private_review_refs "$case_dir" stale-recorded
   # Pre-fix behavior preferred reachable recorded pr_head= and would show stale-local.
   [ "$stale_sha" != "$PR_SHA" ] || fail "stale-recorded: fixture did not diverge recorded vs PR head"
   pass "fm-review-diff prefers freshly fetched PR head over a stale recorded pr_head="
@@ -133,8 +185,11 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
 
   assert_contains "$out" '+pr-fixed' "pr-fetch: diff should use fetched PR head"
   assert_not_contains "$out" 'stale-local' "pr-fetch: diff must not use the stale local branch"
+  assert_contains "$out" "compare: PR head $PR_SHA (via refs/pull/9/head)" \
+    "pr-fetch: the reported compare side must name the fetched pull head"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "pr-fetch: should not warn when fetch succeeds"
+  assert_no_private_review_refs "$case_dir" pr-fetch
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
@@ -148,6 +203,8 @@ test_no_pr_meta_uses_local_branch() {
 
   assert_contains "$out" '+stale-local' "no-pr-meta: diff should still use the local branch"
   assert_not_contains "$out" '+pr-fixed' "no-pr-meta: diff must not jump to the unpushed PR commit"
+  assert_contains "$out" 'compare: local branch fm/task-x1' \
+    "no-pr-meta: the reported compare side must name the local branch"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "no-pr-meta: no warning without pr= in meta"
   pass "fm-review-diff without pr= keeps the worktree-branch diff"
@@ -171,6 +228,8 @@ test_unreachable_pr_head_falls_back_with_warning() {
     "fetch-fallback: must warn when PR head cannot be resolved"
   assert_contains "$out" '+stale-local' "fetch-fallback: should fall back to the local branch diff"
   assert_not_contains "$out" '+pr-fixed' "fetch-fallback: must not invent a PR head diff offline"
+  assert_contains "$out" 'compare: local branch fm/task-x1' \
+    "fetch-fallback: the reported compare side must name the local-branch fallback"
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
@@ -192,9 +251,61 @@ test_ado_pr_uses_recorded_pr_head() {
 
   assert_contains "$out" '+pr-fixed' "ado-recorded-head: diff should show the ADO PR head content"
   assert_not_contains "$out" 'stale-local' "ado-recorded-head: diff must not use the stale local branch"
+  assert_contains "$out" "compare: PR head $PR_SHA (via recorded pr_head=)" \
+    "ado-recorded-head: the reported compare side must name the recorded-pr_head fallback"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "ado-recorded-head: recorded pr_head must resolve for ADO without a pull ref"
-  pass "fm-review-diff resolves an Azure DevOps PR head from recorded pr_head="
+  pass "fm-review-diff resolves an Azure DevOps PR head from recorded pr_head= when az is unavailable"
+}
+
+test_ado_live_head_beats_stale_recorded_pr_head() {
+  local case_dir out stale_sha
+  case_dir=$(make_case ado-live-head)
+  stale_and_pr_commits "$case_dir"
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  # The recorded pr_head= is a one-shot snapshot fm-pr-check.sh took when the PR
+  # was first recorded; a later fix round pushed to the PR moved the real head.
+  # Reviewing the recorded SHA would approve a diff missing landed fixes -
+  # unattended under yolo=on - so the live az query must win.
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/heads/ado-source"
+  add_az_mock "$case_dir" "$PR_SHA"
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/acme/Widgets/_git/repo/pullrequest/9" \
+    "pr_head=$stale_sha"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' \
+    "ado-live-head: diff must show the live ADO PR head, not the recorded stale SHA"
+  assert_not_contains "$out" 'stale-local' \
+    "ado-live-head: diff must not use the stale recorded/local content"
+  assert_contains "$out" "compare: PR head $PR_SHA (via az lastMergeSourceCommit)" \
+    "ado-live-head: the reported compare side must name the live az lookup"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "ado-live-head: the live az lookup should resolve"
+  [ "$stale_sha" != "$PR_SHA" ] || fail "ado-live-head: fixture did not diverge recorded vs live head"
+  pass "fm-review-diff prefers the live az PR head over a stale recorded pr_head="
+}
+
+test_ado_failed_az_query_falls_back_to_recorded_head() {
+  local case_dir out
+  case_dir=$(make_case ado-az-failure)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/heads/ado-source"
+  # az is present but the query fails (not signed in, PR not visible, network):
+  # the recorded pr_head= is still better than a lagging local branch.
+  add_az_mock "$case_dir" fail
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/acme/Widgets/_git/repo/pullrequest/9" \
+    "pr_head=$PR_SHA"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "ado-az-failure: should fall back to the recorded pr_head content"
+  assert_contains "$out" "compare: PR head $PR_SHA (via recorded pr_head=)" \
+    "ado-az-failure: the reported compare side must name the recorded-pr_head fallback"
+  assert_not_contains "$out" 'stale-local' "ado-az-failure: must not silently review the lagging branch"
+  pass "fm-review-diff falls back to recorded pr_head= when the live az query fails"
 }
 
 test_ado_pr_ignores_pull_merge_ref() {
@@ -223,6 +334,7 @@ test_ado_pr_ignores_pull_merge_ref() {
   assert_contains "$out" '+pr-fixed' "ado-ignores-merge-ref: must diff the recorded ADO PR head"
   assert_not_contains "$out" 'ado-merge-artifact' \
     "ado-ignores-merge-ref: must not fetch a pull ref for an ADO PR"
+  assert_no_private_review_refs "$case_dir" ado-ignores-merge-ref
   [ "$merge_sha" != "$PR_SHA" ] || fail "ado-ignores-merge-ref: fixture did not diverge merge ref vs PR head"
   pass "fm-review-diff never resolves an ADO PR through refs/pull/<n>/*"
 }
@@ -251,5 +363,7 @@ test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_ado_pr_uses_recorded_pr_head
+test_ado_live_head_beats_stale_recorded_pr_head
+test_ado_failed_az_query_falls_back_to_recorded_head
 test_ado_pr_ignores_pull_merge_ref
 test_ado_pr_without_recorded_head_warns

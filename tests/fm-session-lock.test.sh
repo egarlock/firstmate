@@ -69,6 +69,17 @@ seed_identity() {  # <fakebin> <pid>
   PATH="$fakebin:$PATH" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid"
 }
 
+identity_format_tag() {  # the current format tag, read from the lib itself
+  bash -c '. "$1"; printf "%s\n" "$FM_PID_IDENTITY_FORMAT"' _ "$LIB"
+}
+
+# A NON-matching identity in the CURRENT format: the genuine reused/recycled-pid
+# case, which must still be reclaimable. Tagged from the lib so the fixture can
+# never drift from the format it is exercising.
+current_format_identity() {  # <payload>
+  printf '%s %s\n' "$(identity_format_tag)" "$1"
+}
+
 test_atomic_single_winner_under_concurrency() {
   local dir state fakebin results sim n i pids pid winners
   dir="$TMP_ROOT/concurrency"
@@ -137,7 +148,7 @@ test_atomic_single_winner_vs_live_impostor() {
   impostor=$!
   mkdir "$lock"
   printf '%s\n' "$impostor" > "$lock/pid"
-  printf '%s\n' "identity of a since-exited process" > "$lock/pid-identity"
+  current_format_identity "identity of a since-exited process" > "$lock/pid-identity"
   cat > "$sim" <<'SH'
 #!/usr/bin/env bash
 "$FMLOCK" >> "$RESULTS" 2>&1
@@ -209,7 +220,7 @@ test_reused_pid_holder_is_reclaimed() {
   holder=$!
   mkdir "$lock"
   printf '%s\n' "$holder" > "$lock/pid"
-  printf '%s\n' "stale identity of a since-exited process" > "$lock/pid-identity"
+  current_format_identity "stale identity of a since-exited process" > "$lock/pid-identity"
   status=0
   out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" 2>&1) || status=$?
   newpid=$(cat "$lock/pid" 2>/dev/null || true)
@@ -219,6 +230,76 @@ test_reused_pid_holder_is_reclaimed() {
   assert_contains "$out" "lock acquired: harness pid" "reclaim did not report an acquisition"
   [ "$newpid" != "$holder" ] || fail "reused-pid lock still names the recycled holder ($holder)"
   pass "a live pid whose recorded identity no longer matches does not read as a live holder"
+}
+
+test_legacy_format_identity_is_not_reclaimed_and_self_heals() {
+  # A firstmate update that changes the identity FORMAT lands while a session is
+  # live. The next session recomputes the live holder's identity in the new
+  # format; comparing that against the older-format recorded string would read a
+  # genuinely live holder as a recycled pid and STEAL the lock - two sessions
+  # supervising one home, the exact outcome the identity check exists to prevent.
+  # A format change is not evidence of pid reuse: the holder must be refused, and
+  # its identity healed in place so the unverifiable window does not recur.
+  local dir state fakebin lock holder tagged legacy status out healed
+  dir="$TMP_ROOT/legacy-identity-format"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lock="$state/.lock"
+  mkdir -p "$state" "$fakebin"
+  write_delegating_ps "$fakebin"
+  sleep 300 &
+  holder=$!
+  tagged=$(seed_identity "$fakebin" "$holder")
+  # The pre-tag recording of the SAME process: today's payload, no format tag.
+  legacy=${tagged#* }
+  mkdir "$lock"
+  printf '%s\n' "$holder" > "$lock/pid"
+  printf '%s\n' "$legacy" > "$lock/pid-identity"
+  status=0
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" 2>&1) || status=$?
+  healed=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  [ "$status" -eq 1 ] || fail "acquire stole the lock from a live holder whose identity was in the older format (status $status): $out"
+  assert_contains "$out" "another live firstmate session holds the lock" \
+    "an unverifiable-but-live holder must be refused, not reclaimed"
+  [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$holder" ] || fail "live holder's lock pid was clobbered across the format change"
+  [ "$healed" = "$tagged" ] || fail "the older-format identity was not healed to the current format (got '$healed', want '$tagged')"
+  # Healed, so the next contender takes the ordinary same-format match path.
+  status=0
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" 2>&1) || status=$?
+  [ "$status" -eq 1 ] || fail "acquire did not refuse the same live holder after the identity was healed (status $status): $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" status)
+  assert_contains "$out" "lock: held by live harness pid $holder" \
+    "status did not report the live holder across the identity format change"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "an older-format recorded identity reads unverifiable (refuse, then heal), never as a recycled pid"
+}
+
+test_legacy_format_identity_on_non_harness_is_reclaimed() {
+  # The safe direction is refuse, but it must not become "refuse forever": an
+  # older-format identity whose pid is now some OTHER, non-harness process is
+  # still reclaimable, so a genuinely recycled pid cannot wedge the home.
+  local dir state fakebin lock holder status out newpid
+  dir="$TMP_ROOT/legacy-identity-non-harness"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lock="$state/.lock"
+  mkdir -p "$state" "$fakebin"
+  # No delegating ps here: the real ps reports `sleep`, which the harness regex
+  # does not match, so the holder is live but not a firstmate harness.
+  sleep 300 &
+  holder=$!
+  mkdir "$lock"
+  printf '%s\n' "$holder" > "$lock/pid"
+  printf '%s\n' "untagged identity of the recycled pid" > "$lock/pid-identity"
+  status=0
+  out=$(FM_HOME="$dir" "$FMLOCK" 2>&1) || status=$?
+  newpid=$(cat "$lock/pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ] || fail "acquire did not reclaim an older-format lock held by a non-harness process (status $status): $out"
+  [ "$newpid" != "$holder" ] || fail "reclaimed lock still names the non-harness holder ($holder)"
+  pass "an older-format identity on a non-harness holder is still reclaimable"
 }
 
 test_dead_holder_is_reclaimed() {
@@ -421,8 +502,8 @@ test_status_verifies_identity() {
   printf '%s\n' "$ident" > "$lock/pid-identity"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" status)
   assert_contains "$out" "lock: held by live harness pid $holder" "status did not report a verified live holder"
-  # (3) same live pid, mismatched identity (reused) -> stale, not held.
-  printf '%s\n' "some other identity" > "$lock/pid-identity"
+  # (3) same live pid, same-format mismatched identity (reused) -> stale, not held.
+  current_format_identity "some other identity" > "$lock/pid-identity"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" "$FMLOCK" status)
   assert_contains "$out" "lock: stale" "status treated a reused pid as a live holder"
   kill "$holder" 2>/dev/null || true
@@ -434,6 +515,8 @@ test_atomic_single_winner_under_concurrency
 test_atomic_single_winner_vs_live_impostor
 test_live_holder_refuses
 test_reused_pid_holder_is_reclaimed
+test_legacy_format_identity_is_not_reclaimed_and_self_heals
+test_legacy_format_identity_on_non_harness_is_reclaimed
 test_dead_holder_is_reclaimed
 test_legacy_plainfile_lock_is_migrated
 test_stalled_winner_never_splits_brain_with_stealer

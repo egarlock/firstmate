@@ -463,6 +463,46 @@ test_arm_reports_healthy_for_live_fresh_watcher() {
   pass "arm reports a live fresh watcher as healthy and exits zero"
 }
 
+test_arm_reports_healthy_across_an_identity_format_change() {
+  # The other half of the format-tag transition (the session lock's half lives in
+  # tests/fm-session-lock.test.sh): a firstmate update that changes the identity
+  # FORMAT lands while a watcher is running, so the lock still holds a pre-update
+  # identity string. Comparing formats by string equality would read this live,
+  # beating watcher as a reused pid: every arm would report FAILED against a
+  # perfectly healthy watcher for as long as it runs, and --restart would clear
+  # its lock instead of stopping it. An older-format identity is unverifiable, not
+  # mismatched, so the live watcher must still read healthy.
+  local dir state fakebin out armout i wpid status tagged
+  dir=$(make_case arm-identity-format-change)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  # Rewrite the recorded identity as the PRE-TAG format recorded it: same payload,
+  # no format tag - exactly what an older firstmate left in this file.
+  tagged=$(cat "$state/.watch.lock/pid-identity")
+  printf '%s\n' "${tagged#* }" > "$state/.watch.lock/pid-identity"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" > "$armout" || status=$?
+  [ "$status" -eq 0 ] || fail "arm did not exit zero for a healthy watcher across a format change (status $status): $(cat "$armout")"
+  grep -F "watcher: healthy pid=$wpid" "$armout" >/dev/null \
+    || fail "arm did not report the live watcher as healthy across an identity format change: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a live watcher across an identity format change"
+  ! grep -qF 'watcher: started' "$armout" || fail "arm started a second watcher across an identity format change"
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  pass "arm honors a live watcher whose recorded identity predates an identity format change"
+}
+
 test_arm_starts_and_self_heals() {
   # Arming with no confirmable watcher must FORK one and confirm it live + fresh
   # before reporting 'started' - whether the lock is empty (clean start) or held
@@ -671,8 +711,8 @@ test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
 
   [ "$after_time_jump" = "$before" ] \
     || fail "Linux process identity changed with btime (before '$before', after '$after_time_jump')"
-  [ "$before" = 'linux-starttime=987654 cmdline-hex=62617368002f706174682077697468207370616365732f666d2d77617463682e7368002d2d666c616700' ] \
-    || fail "Linux process identity did not combine parsed starttime field 22 with the full cmdline ('$before')"
+  [ "$before" = 'fmid1 linux-starttime=987654 cmdline-hex=62617368002f706174682077697468207370616365732f666d2d77617463682e7368002d2d666c616700' ] \
+    || fail "Linux process identity did not combine the format tag with parsed starttime field 22 and the full cmdline ('$before')"
   pass "Linux process identity ignores simulated btime changes"
 
   write_fake_proc_identity "$proc_root" "$pid" 987655
@@ -699,6 +739,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watcher_self_evicts_on_lock_takeover
 test_arm_reports_healthy_for_live_fresh_watcher
+test_arm_reports_healthy_across_an_identity_format_change
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation

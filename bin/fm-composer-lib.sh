@@ -21,6 +21,16 @@
 # injection target). The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a
 # genuine empty agent composer either way, bordered or bare.
 #
+# KNOWN LIMITATION (agent glyphs are trusted unconditionally): the agent glyphs
+# are judged by SHAPE, not by what is actually running in the pane. `❯` (U+276F)
+# is also the default prompt character of the Starship and pure zsh prompts, so a
+# pane whose agent has exited to a login shell using one of those prompts still
+# classifies `empty` and remains a viable injection target - the very hazard the
+# rule above closes for stock `$`/`%`/`#`/`>` prompts. Closing it properly means
+# gating on the pane's FOREGROUND PROCESS (e.g. tmux's `#{pane_current_command}`)
+# rather than on glyph shape, which is a change to the injection path itself and
+# is tracked as separate follow-up work.
+#
 # The caller still owns its own CAPTURE and structural row-finding, because those
 # use genuinely different primitives per session provider (tmux's cursor-row
 # read via bin/fm-tmux-lib.sh is the one that classifies content today; this
@@ -73,10 +83,19 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case]
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip a leading prompt glyph, then re-judge the remainder. Removal is by
+  # LITERAL prefix, never `?`: `?` matches one character in a multibyte locale
+  # but one BYTE under LC_ALL=C/POSIX, and the agent glyphs are three UTF-8 bytes
+  # each - so a `?` strip would leave a stray continuation byte at the head under
+  # C and make the post-strip idle match miss. Literal removal is byte-exact in
+  # every locale, matching the `case` patterns above.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯'*) content=${content#'❯'} ;;
+    '›'*) content=${content#'›'} ;;
+    '>'*) content=${content#'>'} ;;
+    '$'*) content=${content#'$'} ;;
+    '%'*) content=${content#'%'} ;;
+    '#'*) content=${content#'#'} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"
