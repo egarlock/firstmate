@@ -413,8 +413,15 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # strips the harness's composer box borders, so a ghost-only or idle bordered
 # claude composer ("│ > … │") is correctly read as empty, not pending (incidents
 # afk-invx-i5 and composer-robust).
+#
+# inject_msg no longer routes its composer guard through this boolean: a safe
+# injection target must be affirmatively 'empty', and a pending/not-pending check
+# cannot distinguish an empty agent composer from a bare dead-shell prompt or an
+# unreadable pane (both 'unknown'), so inject_msg reads the tri-state verdict
+# directly. This wrapper is retained as the shared pending predicate.
 pane_is_busy() { fm_pane_is_busy "$@"; }        # <window>
 pane_input_pending() { fm_pane_input_pending "$@"; }  # <target>
+pane_composer_state() { fm_tmux_composer_state "$@"; }  # <target> -> empty|pending|unknown
 
 task_window_backend() {  # <window> <state>
   local win=$1 state=$2 task meta
@@ -616,12 +623,12 @@ window_for_task() {  # <task-key> [state]
 #     empty after Enter.
 #     Empty means the text was consumed; pending means Enter was swallowed; unknown
 #     is treated as undelivered by this strict daemon path.
-#   - COMPOSER GUARD before typing: if the cursor line already has real content
-#     after dim/faint ghost text and borders are ignored (a human's half-typed
-#     line, or a previous injection's unsent text), defer entirely - injecting
-#     would merge with the human's text.
+#   - COMPOSER GUARD before typing: inject ONLY into a confirmed-empty GENUINE
+#     agent composer. Anything else - real content on the cursor line (a human's
+#     half-typed line, or a previous injection's unsent text), a bare dead-shell
+#     prompt, or an unreadable pane - defers entirely.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target retries sleep_s verdict
+  local msg=$1 state target retries sleep_s verdict composer
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -635,17 +642,25 @@ inject_msg() {  # <message> [state]
   msg="${FM_INJECT_MARK}${msg}"
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   fm_tmux_pane_exists "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use pane. Two checks:
+  # (3) Busy-guard: never inject into an in-use pane.
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
-  #   b) pane_input_pending: the cursor line has real unsubmitted text after
-  #      dim/faint ghost text and borders are ignored (a human's half-typed line,
-  #      or a previous injection whose Enter was swallowed).
   if pane_is_busy "$target"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi
-  if pane_input_pending "$target"; then
-    log "inject deferred: supervisor pane has pending input (non-empty composer)"
+  #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
+  #      composer. The shared classifier (fm_tmux_composer_state ->
+  #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
+  #      for real unsubmitted text (a human's half-typed line, or a swallowed
+  #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
+  #      exited to its login shell) or an unreadable pane. Neither is a safe
+  #      target - typing the escalation into a live shell would both lose the
+  #      escalation and EXECUTE it as a command - so defer on anything that is
+  #      not affirmatively 'empty'. A deferred escalation stays buffered for the
+  #      next cycle or the catch-up flush.
+  composer=$(pane_composer_state "$target" 2>/dev/null)
+  if [ "$composer" != empty ]; then
+    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never

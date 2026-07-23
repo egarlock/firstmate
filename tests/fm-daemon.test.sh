@@ -543,6 +543,89 @@ test_pane_input_pending_idle_prompt_not_pending() {
   pass "pane_input_pending: bare prompts are not pending (idle)"
 }
 
+# THE dead-shell safety regression. A bare, unbordered shell prompt is a dead
+# shell - the pane's agent exited to its login shell - NOT an empty agent
+# composer. It must classify `unknown` (unsafe target), never `empty`. Before
+# this fix it read `empty`, so the away-mode injector typed the escalation into
+# that shell: the escalation was lost AND the shell executed the digest text
+# ("sh: FM_INJECT_MARK: command not found").
+test_tmux_composer_state_bare_shell_is_unknown() {
+  local dir fakebin capture g out
+  dir=$(make_supercase composer-bare-shell)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  for g in '$' '%' '#' '>'; do
+    printf 'output\noutput\n%s \n' "$g" > "$capture"
+    out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = unknown ] \
+      || fail "bare shell prompt '$g' must classify unknown (dead shell, unsafe), got '$out'"
+  done
+  pass "fm_tmux_composer_state: a bare shell prompt (\$/%/#/>) reads unknown, never empty (dead-shell injection safety)"
+}
+
+# The other side of the fix: a bordered composer box (the harness draws its own
+# prompt glyph inside it) and a bare AGENT prompt glyph (claude ❯, codex ›) are
+# genuine empty agent composers and must still read `empty`.
+test_tmux_composer_state_bordered_and_agent_rows_are_empty() {
+  local dir fakebin capture out
+  dir=$(make_supercase composer-empty-agent)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  printf '%s\n' "│ >                     │" > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "a bordered '│ > │' composer should read empty, got '$out'"
+  printf '%s\n' "❯ " > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "a bare claude '❯' composer should read empty, got '$out'"
+  printf '%s\n' "› " > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "a bare codex '›' composer should read empty, got '$out'"
+  pass "fm_tmux_composer_state: a bordered composer box and bare agent glyphs (❯/›) still read empty"
+}
+
+# Only a MATCHING pair of edge borders makes a row a composer box. A shell
+# prompt that happens to sit next to one stray border glyph (a split pane's
+# divider bleeding into the cursor row) must not be promoted to "empty".
+test_tmux_composer_state_requires_matching_box_borders() {
+  local dir fakebin capture line out
+  dir=$(make_supercase composer-decorated-shell)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  for line in '| $ ' '$ |' '│ % ' '# ┃'; do
+    printf '%s\n' "$line" > "$capture"
+    out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" != empty ] \
+      || fail "a decorated shell prompt '$line' must not read as an empty composer"
+  done
+  pass "fm_tmux_composer_state: only matching edge borders form a composer box"
+}
+
+# The end-to-end consequence: the away-mode injector must DEFER on a dead-shell
+# pane, typing nothing and preserving the buffered escalation for the next cycle
+# or the catch-up flush. This is the repro that executed injected text before.
+test_inject_defers_on_dead_shell_pane() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase inject-dead-shell)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  # The agent exited; the pane is a live login shell showing a bare `$` prompt.
+  printf 'output\noutput\n$ \n' > "$capture"
+  escalate_add "$state" "needs-decision: pick B"
+  afk_enter "$state"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 FM_ESCALATE_BATCH_SECS=0 \
+    escalate_flush "$state"; then
+    fail "escalate_flush injected into a dead-shell pane"
+  fi
+  [ -s "$sent" ] && fail "daemon typed an escalation into a live login shell"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved when deferring on a dead shell"
+  pass "inject defers on a dead-shell pane and preserves the escalation buffer"
+}
+
 test_pane_input_pending_honors_idle_override_after_border_strip() {
   local dir state fakebin capture
   dir=$(make_supercase pending-custom-idle)
@@ -849,6 +932,10 @@ test_strip_injection_marker
 test_pane_input_pending_detects_partial_input
 test_pane_input_pending_blank_is_not_pending
 test_pane_input_pending_idle_prompt_not_pending
+test_tmux_composer_state_bare_shell_is_unknown
+test_tmux_composer_state_bordered_and_agent_rows_are_empty
+test_tmux_composer_state_requires_matching_box_borders
+test_inject_defers_on_dead_shell_pane
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal

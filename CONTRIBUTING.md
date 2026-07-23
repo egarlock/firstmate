@@ -44,7 +44,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
 - Logic shared by more than one `bin/` script lives in one sourced `bin/fm-*-lib.sh` helper, never a copy-paste, so a fix or a per-VCS/per-backend quirk has a single home and cannot drift.
   A lib self-locates via `BASH_SOURCE` (so it works however it is sourced) and guards against double-sourcing.
-  The foundational ones: `fm-env-lib.sh` resolves `FM_ROOT`/`FM_HOME`/`STATE` (call `fm_env_init` right after computing `SCRIPT_DIR`); `fm-git-lib.sh` holds `fm_default_branch`; `fm-path-lib.sh` holds `path_is_ancestor_of`; `fm-tmux-lib.sh` owns the tmux pane primitives and the one busy-footer regex `FM_TMUX_BUSY_REGEX_DEFAULT`.
+  The foundational ones: `fm-env-lib.sh` resolves `FM_ROOT`/`FM_HOME`/`STATE` (call `fm_env_init` right after computing `SCRIPT_DIR`); `fm-git-lib.sh` holds `fm_default_branch`; `fm-path-lib.sh` holds `path_is_ancestor_of`; `fm-tmux-lib.sh` owns the tmux pane primitives and the one busy-footer regex `FM_TMUX_BUSY_REGEX_DEFAULT`; `fm-composer-lib.sh` owns the composer-content `empty`/`pending`/`unknown` verdict, including the injection-safety rule that an unbordered shell prompt glyph is a dead shell (`unknown`), not an empty composer.
   When you add a new duplicate site, source the lib instead of re-inlining the body.
   Test scripts and helpers in `tests/` are plain bash too.
   They must stay portable to macOS stock `/bin/bash` 3.2 (no `$(cat <<EOF)` heredocs, no bare `"${arr[@]}"` on a possibly-empty array under `set -u`, no locale-dependent `[a-z]` ranges); a dedicated CI leg runs the whole behavior suite under real bash 3.2 alongside the Linux (bash 5) legs.
@@ -77,6 +77,7 @@ tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selec
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
 tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
+tests/fm-composer-lib.test.sh             # the shared composer-content classifier: bare shell glyph reads unknown (dead-shell injection safety), bordered shell glyph and agent glyphs read empty, idle-placeholder and pending cases
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, and crew-dispatch reporting tests
 tests/fm-shared-libs.test.sh              # shared helper lib equivalence: fm_default_branch fallback order, path_is_ancestor_of edge cases, fm_env_init precedence, busy-regex and pane-probe behavior, plus single-definition and former-site sourcing invariants

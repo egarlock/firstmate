@@ -52,6 +52,9 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  # fm-tmux-lib.sh sources fm-composer-lib.sh (the shared composer verdict) from
+  # its own dir, which for a symlinked lib is THIS fake bin - so it must be here too.
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   # Shared helper libs teardown sources (env/git/path resolution).
   ln -s "$ROOT/bin/fm-env-lib.sh" "$fake/bin/fm-env-lib.sh"
   ln -s "$ROOT/bin/fm-git-lib.sh" "$fake/bin/fm-git-lib.sh"
@@ -150,6 +153,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  # fm-tmux-lib.sh sources fm-composer-lib.sh (the shared composer verdict) from
+  # its own dir, which for a symlinked lib is THIS fake bin - so it must be here too.
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   # Shared helper libs teardown sources (env/git/path resolution).
   ln -s "$ROOT/bin/fm-env-lib.sh" "$fake/bin/fm-env-lib.sh"
   ln -s "$ROOT/bin/fm-git-lib.sh" "$fake/bin/fm-git-lib.sh"
