@@ -120,7 +120,9 @@ family_for_basename() {
     fm-arm-pretool-check.test.sh|fm-brief.test.sh|fm-calm-pi-extension.test.sh|\
     fm-captain-translation-contract.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
-    fm-continuity-pretool-check.test.sh|fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
+    fm-continuity-pretool-check.test.sh|fm-copilot-harness.test.sh|\
+    fm-copilot-pane-fixture.test.sh|fm-copilot-version.test.sh|\
+    fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-dispatch-select.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
     fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
@@ -131,7 +133,8 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
-    fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-marker-sweep.test.sh|\
+    fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-hook-sweep.test.sh|\
+    fm-marker-sweep.test.sh|\
     fm-pi-watch-extension.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-queue.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
@@ -669,6 +672,16 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-harness-policy.sh)
+      # The single harness-policy source is consumed by spawn/harness (dispatch),
+      # the session lock (bootstrap family), and the copilot contract tests.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-hook-sweep.sh)
+      printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
