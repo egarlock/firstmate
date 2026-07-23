@@ -1290,6 +1290,43 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+# A clean teardown removes the task's per-task watcher/daemon marker sidecars so
+# state/ does not accumulate orphaned suppression markers (bin/fm-marker-sweep.sh
+# is only the backstop for tasks that died without teardown).
+test_teardown_removes_task_markers() {
+  local case_dir state rc task_key window_key
+  case_dir=$(make_case marker-removal); state="$case_dir/state"
+  write_meta "$case_dir" no-mistakes ship
+  # window= is fm-task-x1, task id is task-x1.
+  task_key=$(printf '%s' task-x1 | tr ':/.' '___')
+  window_key=$(printf '%s' fm-task-x1 | tr ':/.' '___')
+  printf 'sig' > "$state/.seen-task-x1_status"
+  printf 'sig' > "$state/.seen-task-x1_turn-ended"
+  printf 'x' > "$state/.hb-surfaced-$task_key"
+  printf 'x' > "$state/.subsuper-stale-$task_key"
+  printf 'x' > "$state/.subsuper-paused-$task_key"
+  printf 'x' > "$state/.hash-$window_key"
+  printf 'x' > "$state/.stale-since-$window_key"
+  printf 'x' > "$state/.wedge-escalations-$window_key"
+  printf 'x' > "$state/.paused-resurfaced-$window_key"
+  # A different task's marker must survive.
+  printf 'x' > "$state/.hash-other-window"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "marker-removal: teardown should succeed under --force"
+  for m in .seen-task-x1_status .seen-task-x1_turn-ended ".hb-surfaced-$task_key" \
+    ".subsuper-stale-$task_key" ".subsuper-paused-$task_key" ".hash-$window_key" \
+    ".stale-since-$window_key" ".wedge-escalations-$window_key" ".paused-resurfaced-$window_key"; do
+    [ ! -e "$state/$m" ] || fail "marker-removal: teardown left the task marker $m behind"
+  done
+  [ -e "$state/.hash-other-window" ] || fail "marker-removal: teardown removed an unrelated task's marker"
+  pass "a clean teardown removes the task's own watcher/daemon markers and leaves others"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1427,6 +1464,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_teardown_removes_task_markers
 test_herdr_teardown_clears_escalation_marker
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed

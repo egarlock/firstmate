@@ -251,6 +251,34 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+# Remove the per-task watcher/daemon marker sidecars so a torn-down task leaves no
+# orphaned suppression state behind. The families mirror the writers exactly (see
+# bin/fm-marker-sweep.sh for the full derivation): task-keyed .hb-surfaced-,
+# .subsuper-seen-status-, .subsuper-stale-, .subsuper-paused-; signal-file-keyed
+# .seen-<id>_status / .seen-<id>_turn-ended; and the window-keyed .hash-, .count-,
+# .stale-, .stale-since-, .wedge-escalations-, .paused-, .paused-rechecked-,
+# .paused-resurfaced- sidecars. task/window keys are the id/window target through
+# `tr ':/.' '___'` and the signal-file basename through `tr '.' '_'`.
+remove_task_markers() {
+  local state_dir=$1 id=$2 window=$3 task_key seen_status seen_turnend window_key
+  task_key=$(printf '%s' "$id" | tr ':/.' '___')
+  seen_status=$(printf '%s.status' "$id" | tr '.' '_')
+  seen_turnend=$(printf '%s.turn-ended' "$id" | tr '.' '_')
+  rm -f "$state_dir/.seen-$seen_status" "$state_dir/.seen-$seen_turnend" \
+    "$state_dir/.hb-surfaced-$task_key" \
+    "$state_dir/.subsuper-seen-status-$task_key" \
+    "$state_dir/.subsuper-stale-$task_key" \
+    "$state_dir/.subsuper-paused-$task_key"
+  if [ -n "$window" ]; then
+    window_key=$(printf '%s' "$window" | tr ':/.' '___')
+    rm -f "$state_dir/.hash-$window_key" "$state_dir/.count-$window_key" \
+      "$state_dir/.stale-$window_key" "$state_dir/.stale-since-$window_key" \
+      "$state_dir/.wedge-escalations-$window_key" \
+      "$state_dir/.paused-$window_key" "$state_dir/.paused-rechecked-$window_key" \
+      "$state_dir/.paused-resurfaced-$window_key"
+  fi
+}
+
 validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
@@ -1015,6 +1043,7 @@ cleanup_firstmate_home_children() {
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    remove_task_markers "$sub_state" "$child_id" "$child_t"
   done
 }
 
@@ -1201,6 +1230,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+remove_task_markers "$STATE" "$ID" "$T"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

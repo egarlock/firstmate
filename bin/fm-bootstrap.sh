@@ -867,6 +867,10 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  # Best-effort, quiet: remove orphaned per-task watcher/daemon marker sidecars
+  # left by tasks that died without teardown. Age-guarded, so a live task's
+  # markers are never touched; prints a MARKER_SWEEP line only when it removes.
+  [ -x "$SCRIPT_DIR/fm-marker-sweep.sh" ] && "$SCRIPT_DIR/fm-marker-sweep.sh" 2>/dev/null || true
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
