@@ -174,7 +174,9 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
 | `/ahoy`            | Recap only visible session events since the prior real captain message, falling back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a standalone current-status report from bounded local fleet and registered-secondmate state, with live PR enrichment only when requested, written to a dated file in `data/` and surfaced concisely in chat; read-mostly, mutates no task state |
+| `/showdevsetup`    | Print a live, strictly read-only snapshot of the dev setup: the operating firstmate repo, every project clone, the canonical no-mistakes checkout, and the treehouse sibling, ending with a PASS/DRIFT verdict on whether the installed no-mistakes binaries all report the same commit |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
+| `/updatenomistakes` | Adopt the latest no-mistakes into the running gate: fast-forward the canonical checkout from origin/main, rebuild and reinstall via `make install`, and verify every installed binary reports the new commit; refuses on a dirty checkout or while a pipeline run is active |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
