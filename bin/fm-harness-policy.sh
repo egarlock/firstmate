@@ -21,11 +21,8 @@
 #   claude   accepts low|medium|high|xhigh|max via --effort (Claude Code 2.1.196).
 #   codex    catalog advertises only low|medium|high|xhigh for
 #            model_reasoning_effort; max is omitted rather than guessed (0.142.1).
-#   grok     --reasoning-effort's ceiling is high as of 0.2.99: both xhigh and
-#            max are rejected with "use one of: high, medium, low", so both are
-#            omitted. (0.2.73 accepted xhigh; the ceiling dropped since.)
-#   pi       --thinking accepts max as of 0.80.6, so the full low..max set is
-#            passed. (0.80.2 warned that max was invalid; it no longer does.)
+#   grok     --reasoning-effort rejects max, so max is omitted (0.2.73).
+#   pi       --thinking warns on max as invalid, so max is omitted (0.80.2).
 #   opencode no verified effort flag for the interactive `opencode --prompt`
 #            launch (`opencode run --variant` is a different mode), so no effort
 #            value is ever passed (1.17.6).
@@ -107,11 +104,13 @@ fm_copilot_compatible() {
 # fm_harness_efforts <harness>: print the effort values the installed CLI was
 # verified to accept at launch, space-separated; print nothing when the adapter
 # has no verified effort flag. This is the ONE effort matrix.
+# Note: upstream commits 8c0d9eb (grok drops xhigh at 0.2.99) and f8c5941 (pi
+# accepts max at 0.80.6) correct grok's and pi's effort sets, but were NOT
+# adopted here because the installed CLIs could not be verified locally.
 fm_harness_efforts() {
   case "$1" in
-    claude|copilot|pi) printf '%s\n' 'low medium high xhigh max' ;;
-    codex) printf '%s\n' 'low medium high xhigh' ;;
-    grok) printf '%s\n' 'low medium high' ;;
+    claude|copilot) printf '%s\n' 'low medium high xhigh max' ;;
+    codex|grok|pi) printf '%s\n' 'low medium high xhigh' ;;
   esac
 }
 

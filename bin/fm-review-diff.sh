@@ -106,40 +106,40 @@ fetch_pull_head() {
   return "$rc"
 }
 
-# ado_live_head: Azure DevOps only. Re-query the PR's CURRENT source-branch head,
-# the analogue of GitHub's pull-head re-fetch, so a fix round pushed after the PR
-# was first recorded is reviewed instead of the one-shot recorded pr_head=.
-# Reads the FM_PR_* values a successful fm_pr_url_parse set. Best-effort and
-# quiet: no az CLI, no extension, or a failed query just means "fall back".
-ado_live_head() {
-  local head
+# ado_pr_snapshot: Azure DevOps only. ONE `az repos pr show` query returning both
+# the PR's CURRENT source-branch head (lastMergeSourceCommit.commitId) and its
+# source ref name (sourceRefName) as a single consistent snapshot. The live head
+# is the analogue of GitHub's pull-head re-fetch, so a fix round pushed after the
+# PR was first recorded is reviewed instead of the one-shot recorded pr_head=.
+# Both fields come from ONE round-trip so they observe the PR at the same instant:
+# two separate queries could be split by a force-push, leaving the fetched source
+# branch no longer containing the head just resolved. Echoes the tsv row
+# "<head><TAB><src>"; either field may be empty. Reads the FM_PR_* values a
+# successful fm_pr_url_parse set. Best-effort and quiet: no az CLI, no extension,
+# or a failed query just means "fall back".
+ado_pr_snapshot() {
   fm_ado_preflight >/dev/null 2>&1 || return 1
-  head=$(az repos pr show --id "$FM_PR_NUMBER" --organization "$FM_PR_ADO_ORG_URL" \
-    --query lastMergeSourceCommit.commitId -o tsv 2>/dev/null) || return 1
-  # az tsv renders a missing field as empty; be defensive about a literal None.
-  case "$head" in
-    ''|None) return 1 ;;
-  esac
-  printf '%s' "$head"
+  az repos pr show --id "$FM_PR_NUMBER" --organization "$FM_PR_ADO_ORG_URL" \
+    --query '{head:lastMergeSourceCommit.commitId,src:sourceRefName}' -o tsv 2>/dev/null
 }
 
-# ado_fetch_source_ref <n>: make the PR's source-branch history available locally.
-# Azure Repos only honours a `want` for an ADVERTISED ref tip, so fetching the
-# live head by bare object name is refused whenever the branch has moved past it -
-# exactly the fix-round case the live query exists to catch. Fetching the source
-# BRANCH ref brings that commit down as part of the branch history. Uses the same
+# ado_fetch_source_ref <src-ref>: make the PR's source-branch history available
+# locally. <src-ref> comes from the single ado_pr_snapshot query, so this issues
+# NO second az round-trip and cannot desync from the head. Azure Repos only
+# honours a `want` for an ADVERTISED ref tip, so fetching the live head by bare
+# object name is refused whenever the branch has moved past it - exactly the
+# fix-round case the live query exists to catch. Fetching the source BRANCH ref
+# brings that commit down as part of the branch history. Uses the same
 # private-ref discipline as the GitHub path (never FETCH_HEAD, deleted once the
 # objects are local) so a later base-branch fetch cannot clobber the compare tip
 # and the long-lived pooled clone accumulates nothing.
 ado_fetch_source_ref() {
-  local n=$1 src ref rc=1
-  src=$(az repos pr show --id "$n" --organization "$FM_PR_ADO_ORG_URL" \
-    --query sourceRefName -o tsv 2>/dev/null) || return 1
+  local src=$1 ref rc=1
   case "$src" in
     refs/heads/*) ;;
     *) return 1 ;;
   esac
-  ref="refs/fm-review/pr/$n/source"
+  ref="refs/fm-review/pr/$FM_PR_NUMBER/source"
   if git -C "$WT" remote get-url origin >/dev/null 2>&1 &&
      git -C "$WT" fetch --quiet origin "+$src:$ref" >/dev/null 2>&1; then
     rc=0
@@ -176,7 +176,7 @@ recorded_head_commit() {
 # Echoes "<commit> <how-it-was-resolved>" so the caller can report the compare
 # side; the provenance travels with the value because this runs in a subshell.
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 resolved live
+  local pr_url=$1 recorded_head=$2 resolved live src snapshot field
   # Classify the forge; the shape error is this lib's, and an unparseable pr=
   # simply means "no forge-specific lookup to do", so keep it quiet here.
   if fm_pr_url_parse "$pr_url" 2>/dev/null; then
@@ -188,19 +188,35 @@ resolve_pr_head() {
         fi
         ;;
       azuredevops)
-        # Two outcomes that must NOT collapse into one silent fallback: az cannot
-        # answer at all (the ordinary offline case), versus az answering with a
-        # head that cannot be materialized. In the second case firstmate KNOWS the
-        # live head and is about to review a different one, so it says so - that is
-        # the silently-stale approval this resolver exists to prevent.
-        if live=$(ado_live_head); then
-          if resolved=$(recorded_head_commit "$live") ||
-             { ado_fetch_source_ref "$FM_PR_NUMBER" && resolved=$(recorded_head_commit "$live"); }; then
-            printf '%s az lastMergeSourceCommit' "$resolved"
-            return 0
+        # ONE query returns both the live head and its source ref as a consistent
+        # snapshot. Two outcomes must NOT collapse into one silent fallback: az
+        # cannot answer at all (the ordinary offline case), versus az answering
+        # with a head that cannot be materialized. In the second case firstmate
+        # KNOWS the live head and is about to review a different one, so it says
+        # so - that is the silently-stale approval this resolver exists to prevent.
+        if snapshot=$(ado_pr_snapshot); then
+          live='' src=''
+          # Classify by shape, not tsv column position, so az's key ordering does
+          # not matter: the source ref is refs/heads/*, the head is a hex SHA.
+          while IFS= read -r field; do
+            case "$field" in
+              refs/heads/*) src=$field ;;
+              ''|None) ;;
+              *[!0-9a-fA-F]*) ;;
+              *) live=$field ;;
+            esac
+          done <<EOF
+$(printf '%s' "$snapshot" | tr '\t' '\n')
+EOF
+          if [ -n "$live" ]; then
+            if resolved=$(recorded_head_commit "$live") ||
+               { [ -n "$src" ] && ado_fetch_source_ref "$src" && resolved=$(recorded_head_commit "$live"); }; then
+              printf '%s az lastMergeSourceCommit' "$resolved"
+              return 0
+            fi
+            printf 'warning: live Azure DevOps PR head %s could not be fetched; falling back to the recorded pr_head= (the diff may lag the open PR)\n' \
+              "$live" >&2
           fi
-          printf 'warning: live Azure DevOps PR head %s could not be fetched; falling back to the recorded pr_head= (the diff may lag the open PR)\n' \
-            "$live" >&2
         fi
         ;;
     esac

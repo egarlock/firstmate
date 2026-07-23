@@ -46,14 +46,14 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
 Do not make the shell scripts parse or match natural-language dispatch rules.
-The supported launch-profile flags below were verified locally with each CLI's help and parser path; each row records the version its evidence came from, because accepted effort sets do move between releases.
+The supported launch-profile flags below were verified locally on 2026-06-30 with each CLI's help and parser path.
 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
-| grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99. `--effort` parses too, but firstmate's profile axis is reasoning effort. The ceiling is `high` as of 0.2.99: both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so both are omitted. (0.2.73 accepted `xhigh`; the ceiling dropped since, so a dispatch profile pairing grok with `xhigh` now launches without an effort flag.) |
-| pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified on pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, and a `--thinking max` run completes without the invalid-thinking warning 0.80.2 emitted, so firstmate now passes `max`. |
+| grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Verified on grok 0.2.73. `--effort` parses too, but firstmate's profile axis is reasoning effort. `--reasoning-effort max` is rejected, so `max` is omitted. |
+| pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | copilot | `--model <model>` (`auto` lets Copilot pick) | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on GitHub Copilot CLI 1.0.68 (2026-07-02). `--effort` is an alias of `--reasoning-effort`; the parser enumerates none/low/medium/high/xhigh/max. `none` is outside firstmate's effort vocabulary and is never passed. |
 
@@ -129,7 +129,7 @@ Opencode can auto-upgrade itself in the background and the running TUI can exit 
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 
-## pi (VERIFIED 2026-06-11; `--thinking` accepted set re-verified on Pi 0.80.6)
+## pi (VERIFIED 2026-06-11)
 
 | Fact | Value |
 |---|---|
@@ -149,7 +149,7 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
 
-## grok (VERIFIED 2026-06-29, grok 0.2.73; reasoning-effort ceiling re-verified on 0.2.99)
+## grok (VERIFIED 2026-06-29, grok 0.2.73)
 
 Grok Build TUI (`grok`), a Claude-Code-compatible CLI from xAI.
 Launch with a positional prompt: `grok --always-approve "$(cat <brief>)"`.

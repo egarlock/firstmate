@@ -57,6 +57,20 @@ make_case() {
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
 
+  # Default az stub: fail closed. run_review_diff prepends $case_dir/fakebin to
+  # PATH, so the no-az fallback cases resolve `az` to this stub instead of any az
+  # the host happens to have. Without it, a runner with the Azure CLI installed
+  # and signed in would make a real outbound `az repos pr show` call against a
+  # nonexistent org - non-deterministic, and a reachable org could resolve a head
+  # and flip the asserted compare: line. add_az_mock overrides this for the cases
+  # that genuinely exercise a live query.
+  mkdir -p "$case_dir/fakebin"
+  cat > "$case_dir/fakebin/az" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/az"
+
   touch "$case_dir/state/.last-watcher-beat"
   printf '%s\n' "$case_dir"
 }
@@ -107,12 +121,13 @@ assert_no_private_review_refs() {
 }
 
 # add_az_mock <case_dir> <head|fail> [source-ref]: a fake az answering the
-# azure-devops extension probe, the lastMergeSourceCommit query, and the
-# sourceRefName query. `fail` makes the head query exit non-zero, which is the
-# "az cannot answer" fallback path; an empty source-ref makes the sourceRefName
-# query answer nothing, which is the "live head known but unfetchable" path.
-# az is NOT installed in this environment, so every case without this mock
-# exercises the no-az fallback for real.
+# azure-devops extension probe and the SINGLE combined snapshot query
+# ({head:lastMergeSourceCommit.commitId,src:sourceRefName} -o tsv), which returns
+# the head and source ref as one consistent tsv row. `fail` makes that query exit
+# non-zero, which is the "az cannot answer" fallback path; an empty source-ref
+# emits only the head field, which is the "live head known but unfetchable" path.
+# make_case plants a fail-closed default az; this overrides it for cases that
+# genuinely exercise a live query, since az is NOT installed in this environment.
 add_az_mock() {
   local case_dir=$1 head=$2 source_ref=${3:-}
   mkdir -p "$case_dir/fakebin"
@@ -122,13 +137,9 @@ case "\${1:-} \${2:-} \${3:-}" in
   "extension show --name") exit 0 ;;
   "repos pr show")
     case " \$* " in
-      *" --query lastMergeSourceCommit.commitId "*)
+      *"lastMergeSourceCommit.commitId,src:sourceRefName"*)
         [ '$head' = fail ] && exit 1
-        printf '%s\n' '$head'
-        exit 0 ;;
-      *" --query sourceRefName "*)
-        [ -n '$source_ref' ] || exit 1
-        printf '%s\n' '$source_ref'
+        printf '%s\t%s\n' '$head' '$source_ref'
         exit 0 ;;
     esac
     exit 0 ;;

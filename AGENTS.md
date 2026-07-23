@@ -241,8 +241,8 @@ The verified profile axes are:
 
 - `claude`: model via `--model <name>`, effort via `--effort <low|medium|high|xhigh|max>`.
 - `codex`: model via `--model <name>`, effort via `-c 'model_reasoning_effort="<low|medium|high|xhigh>"'`; `max` is not passed because the installed Codex model catalog advertises only `low`, `medium`, `high`, and `xhigh`.
-- `grok`: model via `--model <name>`, reasoning effort via `--reasoning-effort <low|medium|high>`; neither `xhigh` nor `max` is passed because Grok's ceiling is `high` as of 0.2.99 and it rejects both.
-- `pi`: model via `--model <name>`, effort via `--thinking <low|medium|high|xhigh|max>`; the installed Pi CLI accepts the full set as of 0.80.6.
+- `grok`: model via `--model <name>`, reasoning effort via `--reasoning-effort <low|medium|high|xhigh>`; `max` is not passed because Grok rejects it for `--reasoning-effort`.
+- `pi`: model via `--model <name>`, effort via `--thinking <low|medium|high|xhigh>`; `max` is not passed because the installed Pi CLI warns that it is invalid.
 - `opencode`: model via `--model <provider/model>`; no verified effort flag for firstmate's interactive `opencode --prompt` launch, so effort is not passed.
 - `copilot`: model via `--model <name>`, effort via `--effort <low|medium|high|xhigh|max>`; the CLI also accepts `none`, which is outside firstmate's effort vocabulary and is never passed.
 
