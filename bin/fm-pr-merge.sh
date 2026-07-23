@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Merge a task's PR after recording pr= and any available pr_head= through
-# bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
+# bin/fm-pr-check.sh, then record the landed= verdict from the merge itself so
+# bin/fm-teardown.sh reads the recorded fact instead of re-deriving landed work
+# from remote/PR heuristics after squash merges.
 # The full canonical PR URL is parsed by bin/fm-pr-lib.sh; GitHub and Azure
 # DevOps are mergeable here, and a GitLab URL is still refused until merge
 # parity lands for it.
@@ -124,10 +126,22 @@ case "$PROVIDER" in
     ;;
 esac
 
-# TODO(wave D): once the teardown landed-verdict oracle lands, record
-# landed=<sha> here as part of the merge itself - from the recorded pr_head=
-# for GitHub and from the completed PR's lastMergeCommit.commitId
-# (az repos pr show --query lastMergeCommit.commitId) for Azure DevOps, with
-# the pr-<n> placeholder as the fallback - so teardown reads the verdict
-# instead of re-deriving it. Until then teardown keeps using its
-# remote-reachability and content checks for both providers.
+# The merge succeeded (set -e would have exited above otherwise). Record the
+# authoritative "this task's work reached its destination" fact so bin/fm-teardown.sh
+# can allow teardown without re-deriving it from remote/PR heuristics. GitHub records
+# the merged PR head captured by fm-pr-check.sh; ADO records the completed PR's merge
+# commit. Either falls back to the PR number as a non-empty presence marker - a stale
+# verdict that no longer covers HEAD falls through to teardown's reachability and
+# content checks, so recording the field is always safe.
+case "$PROVIDER" in
+  github)
+    LANDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    ;;
+  azuredevops)
+    LANDED=$(az repos pr show --id "$PR_NUMBER" --organization "$ADO_ORG_URL" --query lastMergeCommit.commitId -o tsv 2>/dev/null || true)
+    # az tsv renders a missing field as empty; be defensive about a literal None.
+    [ "$LANDED" = None ] && LANDED=
+    ;;
+esac
+[ -n "$LANDED" ] || LANDED="pr-$PR_NUMBER"
+grep -qxF "landed=$LANDED" "$META" || echo "landed=$LANDED" >> "$META"

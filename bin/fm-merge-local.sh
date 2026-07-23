@@ -65,4 +65,11 @@ fi
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+
+# Record the authoritative landed verdict so bin/fm-teardown.sh can allow teardown
+# on the recorded fact alone, without re-deriving it. The merged default-branch tip
+# is where this task's work now lives locally.
+LANDED=$(git -C "$PROJ" rev-parse "$DEFAULT")
+grep -qxF "landed=$LANDED" "$META" || echo "landed=$LANDED" >> "$META"
+
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"

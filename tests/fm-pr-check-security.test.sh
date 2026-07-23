@@ -3055,6 +3055,46 @@ Example%20Project/_git/example-repo
   pass "Azure DevOps pull requests ride the validated static-poll model end to end"
 }
 
+# The teardown landed-verdict oracle records landed=<sha> after pr= (and pr_head=).
+# fm_pr_metadata_identity_parse must accept that line, or the migrator quarantines
+# every merged task's poll (the wave-D coupling hazard). Directly assert the
+# allowlist: a well-formed landed= is valid, a garbled one is caught, and a
+# pre-pr landed= is ignored like any other pre-pr line.
+test_landed_metadata_identity_allowlist() {
+  local dir meta
+  dir=$(make_case landed-identity)
+  meta="$dir/home/state/task-a.meta"
+  mkdir -p "$dir/home/state"
+
+  # pr= + pr_head= + landed=<sha>: the realistic merged-task shape, must be valid.
+  printf 'window=fm-task-a\npr=https://github.com/o/r/pull/5\npr_head=%s\nlanded=%s\n' \
+    0123456789abcdef0123456789abcdef01234567 \
+    0123456789abcdef0123456789abcdef01234567 > "$meta"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "landed=<sha> after pr= was rejected by the PR-metadata identity parse"
+  [ "$FM_PR_META_NUMBER" = 5 ] || fail "landed= meta did not parse the PR identity"
+
+  # landed=pr-<n> placeholder is also valid.
+  printf 'pr=https://github.com/o/r/pull/6\nlanded=pr-6\n' > "$meta"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "landed=pr-<n> placeholder was rejected by the identity parse"
+
+  # A garbled landed= value after pr= is still caught (invalidates the identity).
+  printf 'pr=https://github.com/o/r/pull/7\nlanded=not-a-sha\n' > "$meta"
+  if fm_pr_metadata_identity_parse "$meta"; then
+    fail "a garbled landed= value after pr= was accepted"
+  fi
+
+  # A landed= line before pr= is a pre-pr line, ignored like any other, so a
+  # normal pr= still parses to a valid identity.
+  printf 'landed=%s\npr=https://github.com/o/r/pull/8\n' \
+    0123456789abcdef0123456789abcdef01234567 > "$meta"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "a landed= line before pr= wrongly invalidated the identity"
+
+  pass "PR-metadata identity parse accepts landed= without quarantining merged polls"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_ado_merge_watch
@@ -3085,3 +3125,4 @@ test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_landed_metadata_identity_allowlist

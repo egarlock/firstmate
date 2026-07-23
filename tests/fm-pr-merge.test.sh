@@ -16,8 +16,11 @@
 #   (h) repo override args fail fast because the repo comes from the URL
 #   (i) an Azure DevOps PR completes via az repos pr update --status completed,
 #       addressed by the canonical organization URL (legacy visualstudio.com
-#       spelling included), records pr=/pr_head= first, refuses extra args,
-#       propagates az failures, and records no landed= (that is wave D's seam)
+#       spelling included), records pr=/pr_head= first, refuses extra args, and
+#       propagates az failures without recording landed=
+#   (j) a successful merge records the landed= verdict as part of the merge:
+#       GitHub from the recorded pr_head=, ADO from lastMergeCommit.commitId,
+#       falling back to the pr-<n> placeholder when no head sha is available
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -89,16 +92,18 @@ SH
 }
 
 # az mock answering fm-pr-check.sh's preflight (extension show) and pr_head
-# lookup (lastMergeSourceCommit) plus the merge-path pr update call, recording
-# every invocation. Args: case_dir [head_sha]
+# lookup (lastMergeSourceCommit), the merge-path pr update call, and the
+# post-merge landed lookup (lastMergeCommit), recording every invocation.
+# Args: case_dir [head_sha] [merge_commit_sha]
 add_az_mocks() {
-  local case_dir=$1 head=${2:-}
+  local case_dir=$1 head=${2:-} merge=${3:-}
   cat > "$case_dir/fakebin/az" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_AZ_LOG"
 case " \$* " in
   *" extension show "*) exit 0 ;;
   *" lastMergeSourceCommit.commitId "*) printf '%s\n' '$head' ;;
+  *" lastMergeCommit.commitId "*) printf '%s\n' '$merge' ;;
   *" pr update "*) exit "\${FM_TEST_AZ_UPDATE_RC:-0}" ;;
 esac
 exit 0
@@ -142,7 +147,10 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr_head= was not recorded"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+  # After a successful GitHub merge, the landed verdict is the recorded PR head.
+  assert_grep 'landed=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
+    "records-before-merge: landed= was not recorded from pr_head after the merge"
+  pass "fm-pr-merge records pr=, pr_head=, and landed= for a GitHub merge"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -161,6 +169,8 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
+  assert_no_grep 'landed=' "$case_dir/state/task-x1.meta" \
+    "merge-fails: landed= must not be recorded when the merge itself failed"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 
@@ -328,7 +338,7 @@ test_ado_merge_completes_and_records() {
   local case_dir rc url
   case_dir=$(make_case ado-completes)
   mkdir -p "$case_dir/wt"
-  add_az_mocks "$case_dir" 0123456789abcdef0123456789abcdef01234567
+  add_az_mocks "$case_dir" 0123456789abcdef0123456789abcdef01234567 fedcba9876543210fedcba9876543210fedcba98
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/az.log"
   url='https://dev.azure.com/exampleorg/Example%20Project/_git/example-repo/pullrequest/9'
@@ -348,10 +358,10 @@ test_ado_merge_completes_and_records() {
   [ ! -s "$case_dir/gh-axi.log" ] || fail "ado-completes: the GitHub CLI was invoked for an ADO URL"
   assert_grep 'completed: ADO PR 9' "$case_dir/stdout" \
     "ado-completes: completion was not reported"
-  # landed= recording is wave D's seam; pin that this merge records none yet.
-  assert_no_grep 'landed=' "$case_dir/state/task-x1.meta" \
-    "ado-completes: landed= must not be recorded before the wave D oracle"
-  pass "fm-pr-merge completes an ADO PR via az after recording pr= and pr_head="
+  # After completion the landed verdict is the PR's merge commit (lastMergeCommit).
+  assert_grep 'landed=fedcba9876543210fedcba9876543210fedcba98' "$case_dir/state/task-x1.meta" \
+    "ado-completes: landed= was not recorded from lastMergeCommit after completion"
+  pass "fm-pr-merge completes an ADO PR and records pr=, pr_head=, and landed="
 }
 
 test_ado_legacy_host_normalizes_organization() {
@@ -415,6 +425,27 @@ test_ado_update_failure_propagates_after_recording() {
   pass "fm-pr-merge propagates an az completion failure without silently succeeding"
 }
 
+test_ado_landed_falls_back_to_placeholder() {
+  local case_dir rc url
+  case_dir=$(make_case ado-landed-fallback)
+  mkdir -p "$case_dir/wt"
+  # Head sha present (pr_head), but no merge commit reported: landed= falls back
+  # to the pr-<n> placeholder, which the teardown oracle treats as unresolvable.
+  add_az_mocks "$case_dir" 0123456789abcdef0123456789abcdef01234567 ""
+  : > "$case_dir/az.log"
+  url='https://dev.azure.com/exampleorg/proj/_git/repo/pullrequest/42'
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ado-landed-fallback: fm-pr-merge should succeed"
+  assert_grep 'landed=pr-42' "$case_dir/state/task-x1.meta" \
+    "ado-landed-fallback: landed= should fall back to the pr-<n> placeholder"
+  pass "fm-pr-merge records the pr-<n> landed placeholder when no merge commit is reported"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -429,3 +460,4 @@ test_ado_merge_completes_and_records
 test_ado_legacy_host_normalizes_organization
 test_ado_extra_args_refused_before_recording
 test_ado_update_failure_propagates_after_recording
+test_ado_landed_falls_back_to_placeholder

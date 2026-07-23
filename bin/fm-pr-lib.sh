@@ -283,6 +283,15 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# A recorded landed= verdict is either a git commit sha (sha1 or sha256) or the
+# pr-<n> placeholder fm-pr-merge.sh records when the provider returned no head
+# sha. Both are safe, opaque tokens the teardown oracle resolves later.
+fm_pr_landed_valid() {
+  local landed=${1-}
+  local LC_ALL=C
+  [[ "$landed" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$|^pr-[1-9][0-9]*$ ]]
+}
+
 # Verify the az CLI plus its azure-devops extension before an Azure DevOps PR
 # flow starts. The static poll is silent on every error by design, so arming
 # and merging are the points where a missing tool can still be reported; both
@@ -401,6 +410,16 @@ fm_pr_metadata_identity_parse() {
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        ;;
+      landed=*)
+        # fm-pr-merge.sh / fm-merge-local.sh record the teardown landed verdict
+        # after pr=; it is a legitimate post-pr line and must not invalidate the
+        # PR-metadata identity (otherwise the migrator quarantines every merged
+        # task's poll). Validated like pr_head so a garbled value is still caught.
+        if [ "$seen_pr" -eq 1 ]; then
+          value=${line#landed=}
+          fm_pr_landed_valid "$value" || post_pr_invalid=1
+        fi
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
