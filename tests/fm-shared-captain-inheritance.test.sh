@@ -14,6 +14,11 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-shared-captain)
 
+# Pin the spawn backend: on a host terminal with cmux app markers (or cmux
+# process ancestry), fm-spawn's runtime auto-detection would select the cmux
+# backend and abort before the inheritance convergence points under test.
+export FM_BACKEND=tmux
+
 fm_git_identity fmtest fmtest@example.invalid
 
 file_mode() {
