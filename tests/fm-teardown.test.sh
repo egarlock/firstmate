@@ -1,43 +1,47 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
+# Tests for bin/fm-teardown.sh's landed-work oracle and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# treehouse return hard-resets the worktree. The oracle is a dirty gate then three
+# allow-conditions (ANY one lands it): (b) a recorded landed=<sha> in state/<id>.meta
+# that COVERS HEAD (written at merge time by fm-pr-merge.sh / fm-merge-local.sh),
+# (c) HEAD reachable from a publishing remote-tracking branch (a fork counts, the local
+# no-mistakes gate remote excluded), (d) the branch's content already present in the
+# up-to-date default branch. It replaced a ~100-line PR-head-ancestor + patch-id
+# heuristic oracle with the recorded verdict, a direct reachability check, and the
+# single content fallback; the oracle now never calls gh/gh-axi.
 #
-# Covers three fixes:
+# Covers:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
 #     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
-#     remote after a squash merge deletes the head branch, yet the change is fully in
-#     main. Reachability alone false-refused this common GitHub flow; the check now
-#     recognizes a merged PR head containing the local work (or the content already
-#     in main) as landed.
+#     remote after a squash merge, yet the change is fully in main - covered now by
+#     the recorded landed= verdict and by the content-in-default fallback.
 #   - teardown-lock-race: a killed crew process can leave a transient worktree
 #     git index.lock that blocks teardown. The return path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
 #     provably stale lock before re-running safety checks.
 #
 # Matrix:
-#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
-#   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
-#   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
-#   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
-#   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
-#   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
-#   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
-#   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
-#   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
-#   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
-#   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
-#   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
-#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
-#   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
-#   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
-#   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (a) landed= covering HEAD, content NOT in default, no PR     -> ALLOW  (recorded verdict)
+#   (a2) landed= recorded but HEAD advanced past it              -> REFUSE (post-merge commits unlanded)
+#   (a3) landed= is a descendant of HEAD (origin advanced)       -> ALLOW  (verdict still covers HEAD)
+#   (a4) landed=pr-<n> placeholder, content in default           -> ALLOW  (falls through to content)
+#   (b) dirty worktree, even when landed= recorded              -> REFUSE (dirty wins)
+#   (c) local-only + HEAD on a fork remote-tracking branch      -> ALLOW  (fork reachability)
+#   (d) no-mistakes + HEAD on origin remote-tracking branch     -> ALLOW  (reachability)
+#   (e) HEAD only on the no-mistakes gate remote                -> REFUSE (gate excluded)
+#   (f) no-mistakes + unpushed, no landed=, content not default -> REFUSE (safety)
+#   (g) local-only + truly unpushed work (no remote, not main)  -> REFUSE (safety)
+#   (h) local-only + merged into local main, no remote          -> ALLOW  (refs/heads fallback)
+#   (i) local-only + recorded landed= verdict                   -> ALLOW  (local-merge verdict)
+#   (j) no-mistakes + no landed= but content already in default -> ALLOW  (content fallback)
+#   (k) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
+#   (l) no-mistakes + content not in default (gh never called)  -> REFUSE (safety)
+#   (m) worktree unreadable by git (broken gitfile)             -> REFUSE (fail closed)
+#   (n) local-only + truly unpushed + --force                   -> ALLOW  (escape hatch)
+#   (o) fm-pr-check rerun after HEAD moved                       -> no stale pr_head
+#   (p) fm-pr-check when local HEAD lags                         -> record remote PR head
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -169,6 +173,25 @@ wt_commit() {
     commit -q --allow-empty -m "$msg"
 }
 
+# Record a landed=<sha> verdict in the task meta, exactly as bin/fm-pr-merge.sh /
+# bin/fm-merge-local.sh do on a successful merge. Args: case_dir [sha]
+append_landed_meta() {
+  local case_dir=$1 sha=${2:-}
+  [ -n "$sha" ] || sha=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'landed=%s\n' "$sha" >> "$case_dir/state/task-x1.meta"
+}
+
+# Add a bare remote named `no-mistakes` and push the worktree's task branch to it,
+# then fetch into the project so refs/remotes/no-mistakes/* is visible. The oracle
+# excludes this gate remote from its reachability check. Args: case_dir
+add_no_mistakes_remote_with_pushed_branch() {
+  local case_dir=$1
+  git init -q --bare "$case_dir/no-mistakes.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/no-mistakes.git"
+  git -C "$case_dir/wt" push -q no-mistakes fm/task-x1
+  git -C "$case_dir/project" fetch -q no-mistakes
+}
+
 # Add a fork bare repo and register it as a remote on the project, then push
 # the worktree's task branch to it and fetch into the project so the worktree
 # sees the remote-tracking ref. Args: case_dir
@@ -236,36 +259,10 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
-append_pr_meta_for_current_head() {
-  local case_dir=$1 head
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  printf '%s\n' \
-    'pr=https://github.com/example/repo/pull/7' \
-    "pr_head=$head" >> "$case_dir/state/task-x1.meta"
-}
-
-append_pr_meta_url() {
-  local case_dir=$1
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
-}
-
 commit_tree_from_wt_head() {
   local case_dir=$1 parent=$2 msg=$3 tree
   tree=$(git -C "$case_dir/wt" rev-parse "$parent^{tree}") || return 1
   printf '%s\n' "$msg" | git -C "$case_dir/wt" commit-tree "$tree" -p "$parent"
-}
-
-land_equivalent_patch_on_origin_branch() {
-  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 tmp
-  tmp="$case_dir/_equiv"
-  git clone -q "$case_dir/origin.git" "$tmp"
-  printf '%s\n' "$content" > "$tmp/$file"
-  git -C "$tmp" add -- "$file"
-  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
-  git -C "$tmp" push -q origin "HEAD:refs/heads/$branch"
-  git -C "$case_dir/project" fetch -q origin "$branch"
-  rm -rf "$tmp"
-  git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
 }
 
 # Override gh-axi so every call fails, simulating an API/network error.
@@ -627,122 +624,173 @@ test_no_mistakes_truly_unpushed_refuses() {
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
-test_squash_merged_branch_deleted_allows() {
-  local case_dir rc pr_head
-  case_dir=$(make_case squash-merged)
+# (a) A recorded landed= verdict covering HEAD lands the work even when the content
+# is nowhere on a remote and not yet in the default branch (the oracle allows on the
+# recorded fact alone, without any GitHub call).
+test_landed_verdict_covering_head_allows() {
+  local case_dir rc
+  case_dir=$(make_case landed-covers-head)
   write_meta "$case_dir" no-mistakes ship
-  # Real branch content that is NOT pushed and NOT on origin/main: a squash merge
-  # rewrote it into a different commit on main and auto-deleted the head branch, so
-  # HEAD is unreachable from every remote-tracking branch. The matching merged PR is
-  # the only signal that the work landed.
+  # Real, unpushed content that is NOT on origin/main: only the recorded verdict proves it landed.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
-  append_pr_meta_for_current_head "$case_dir"
-  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  append_landed_meta "$case_dir"   # landed=<current HEAD>
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
-  pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+  expect_code 0 "$rc" "landed-covers-head: teardown should succeed on the recorded verdict"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "landed-covers-head: teardown printed a REFUSED line"
+  pass "a recorded landed= verdict covering HEAD allows teardown without a GitHub call"
 }
 
-test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
-  local case_dir rc local_head pr_head
-  case_dir=$(make_case squash-ancestor)
+# (a3) The recorded verdict is a descendant of HEAD (a no-mistakes run advanced origin
+# past the local worktree HEAD). HEAD is still an ancestor of the recorded sha, so the
+# verdict covers it -> ALLOW.
+test_landed_verdict_descendant_of_head_allows() {
+  local case_dir rc local_head advanced
+  case_dir=$(make_case landed-descendant)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
-  append_pr_meta_url "$case_dir"
-  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
-
-  set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "squash-ancestor: teardown should succeed when local HEAD is in the merged PR head"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-ancestor: teardown printed a REFUSED line"
-  pass "squash-merged PR accepts a local HEAD that is an ancestor of the final PR head"
-}
-
-test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
-  local case_dir rc local_head pr_head
-  case_dir=$(make_case no-pr-branch-discovery)
-  write_meta "$case_dir" no-mistakes ship
-  # Reproduces the real false-refusal report exactly, with NO pr=/pr_head=
-  # recorded in meta at all (fm-pr-check.sh was never run, e.g. a yolo merge on
-  # a repo with no PR CI so the "checks green" trigger that fires it never
-  # happened): a branch with a commit, a no-mistakes auto-fix commit pushed on
-  # top that never made it back into the local worktree, a squash merge onto
-  # main under a brand-new SHA, and the head branch deleted (simulated here by
-  # never pushing fm/task-x1 at all, so no refs/remotes/origin/fm/task-x1
-  # exists to make HEAD "reachable").
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
-  land_on_origin_main "$case_dir" feature.txt hello
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
-  # No append_pr_meta_* call: state/task-x1.meta has no pr= or pr_head= line.
-
-  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
-    || fail "no-pr-branch-discovery: test setup bug, meta unexpectedly has a pr= line"
+  # The merged head recorded at merge time is one commit past the local HEAD.
+  advanced=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  append_landed_meta "$case_dir" "$advanced"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
-  pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+  expect_code 0 "$rc" "landed-descendant: teardown should succeed when the verdict is a descendant of HEAD"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "landed-descendant: teardown printed a REFUSED line"
+  pass "a recorded landed= verdict that HEAD is an ancestor of allows teardown (lagging local HEAD)"
 }
 
-test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
-  case_dir=$(make_case squash-replayed-patch)
-  write_meta "$case_dir" no-mistakes ship
-  wt_commit_file "$case_dir" local-parent.txt parent "local parent"
-  parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
-  git -C "$case_dir/project" fetch -q origin fm/task-x1
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
-  append_pr_meta_url "$case_dir"
-  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
-
-  set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
-  pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
-}
-
-test_merged_pr_with_later_local_commit_refuses() {
-  local case_dir rc pr_head
-  case_dir=$(make_case stale-pr-head)
+# (a2) A landed= that no longer covers HEAD: a commit was made AFTER the merge. Those
+# post-merge commits are unlanded, so the stale verdict falls through to the other
+# checks, and with nothing else landing the work teardown REFUSES.
+test_landed_verdict_stale_after_later_commit_refuses() {
+  local case_dir rc merged_head
+  case_dir=$(make_case landed-stale)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
-  append_pr_meta_for_current_head "$case_dir"
-  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  merged_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  append_landed_meta "$case_dir" "$merged_head"
+  # A later local commit (review feedback, a follow-up steer) past the recorded merge.
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "stale-pr-head: teardown should refuse when HEAD moved after PR recording"
-  grep -q REFUSED "$case_dir/stderr" || fail "stale-pr-head: no REFUSED line in stderr"
-  pass "merged PR does not allow teardown after a later local commit"
+  expect_code 1 "$rc" "landed-stale: teardown should refuse when HEAD moved past the recorded verdict"
+  grep -q REFUSED "$case_dir/stderr" || fail "landed-stale: no REFUSED line in stderr"
+  pass "a landed= verdict that no longer covers HEAD does not allow teardown of post-merge commits"
+}
+
+# (a4) The unresolvable pr-<n> placeholder (recorded when the provider returned no head
+# sha) never covers HEAD, so it falls through - here to the content check, which lands
+# the work because the change is already in the default branch.
+test_landed_placeholder_falls_through_to_content() {
+  local case_dir rc
+  case_dir=$(make_case landed-placeholder)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf 'landed=pr-7\n' >> "$case_dir/state/task-x1.meta"   # unresolvable placeholder
+  land_on_origin_main "$case_dir" feature.txt hello           # content IS in default
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-placeholder: teardown should fall through to the content check"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "landed-placeholder: teardown printed a REFUSED line"
+  pass "an unresolvable landed=pr-<n> placeholder falls through to the content fallback"
+}
+
+# (b) Dirty always wins: even with a covering landed= verdict, uncommitted changes are
+# never landed and the reset would discard them, so teardown REFUSES.
+test_dirty_worktree_refuses_even_when_landed() {
+  local case_dir rc
+  case_dir=$(make_case dirty-landed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_landed_meta "$case_dir"
+  printf 'uncommitted\n' > "$case_dir/wt/scratch.txt"   # a real untracked file
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "dirty-landed: teardown should refuse a dirty worktree even when landed= covers HEAD"
+  grep -q REFUSED "$case_dir/stderr" || fail "dirty-landed: no REFUSED line in stderr"
+  pass "a dirty worktree refuses teardown even with a covering landed= verdict"
+}
+
+# (e) A branch pushed ONLY to the local no-mistakes gate remote is not published: the
+# oracle excludes refs/remotes/no-mistakes/* from its reachability scan, so with no
+# landed= and content not in the default branch teardown REFUSES.
+test_head_only_on_no_mistakes_gate_remote_refuses() {
+  local case_dir rc
+  case_dir=$(make_case gate-remote-only)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_no_mistakes_remote_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gate-remote-only: teardown should refuse work only on the no-mistakes gate remote"
+  grep -q REFUSED "$case_dir/stderr" || fail "gate-remote-only: no REFUSED line in stderr"
+  pass "work reachable only from the no-mistakes gate remote is not counted as landed"
+}
+
+# (m) A worktree git cannot read (broken .git gitfile pointer) fails closed: every
+# downstream git read would emit empty output that reads as clean and published, so
+# the oracle refuses before it runs rather than destroying whatever the dir holds.
+test_unreadable_worktree_refuses_fail_closed() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-worktree)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # Corrupt the worktree's git link so `git rev-parse HEAD` fails but the dir persists.
+  printf 'gitdir: /nonexistent/broken\n' > "$case_dir/wt/.git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unreadable-worktree: teardown should refuse a git-unreadable worktree"
+  grep -q REFUSED "$case_dir/stderr" || fail "unreadable-worktree: no REFUSED line in stderr"
+  grep -q 'unreadable by git' "$case_dir/stderr" || fail "unreadable-worktree: refusal did not name the unreadable git HEAD"
+  pass "a git-unreadable worktree refuses teardown before the oracle runs (fail closed)"
+}
+
+# local-only + a recorded landed= verdict (fm-merge-local.sh records the merged default
+# tip): the oracle allows on the recorded fact alone.
+test_local_only_landed_verdict_allows() {
+  local case_dir rc
+  case_dir=$(make_case local-only-landed)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_landed_meta "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "local-only-landed: teardown should succeed on the recorded local-merge verdict"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "local-only-landed: teardown printed a REFUSED line"
+  pass "a local-only task with a recorded landed= verdict is torn down"
 }
 
 test_pr_check_does_not_refresh_stale_pr_head() {
@@ -1382,11 +1430,14 @@ test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
-test_squash_merged_branch_deleted_allows
-test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
-test_no_pr_recorded_discovers_merged_pr_by_branch_allows
-test_squash_merged_pr_allows_replayed_unpushed_patch
-test_merged_pr_with_later_local_commit_refuses
+test_landed_verdict_covering_head_allows
+test_landed_verdict_descendant_of_head_allows
+test_landed_verdict_stale_after_later_commit_refuses
+test_landed_placeholder_falls_through_to_content
+test_dirty_worktree_refuses_even_when_landed
+test_head_only_on_no_mistakes_gate_remote_refuses
+test_unreadable_worktree_refuses_fail_closed
+test_local_only_landed_verdict_allows
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
