@@ -304,6 +304,64 @@ jobs:
           path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
           if-no-files-found: warn
 
+  # Full portable behavior coverage under the captain's real interpreter. Every
+  # portable lane above runs on ubuntu-latest (bash 5) and macos-stock-bash below
+  # covers only two snapshot consumers, so a bash-3.2-only break ships undetected:
+  # `set -e` skipped on a compound command's redirection failure, a heredoc inside
+  # $(...) whose apostrophe crashes the pre-POSIX scanner, an empty array expanded
+  # under set -u, a locale-dependent [a-z] range that matches uppercase. This lane
+  # syntax-checks every tracked script and runs the whole portable suite through
+  # bin/fm-test-run.sh under stock /bin/bash so that class fails CI instead of the
+  # captain's machine.
+  macos-bash32:
+    name: macOS stock bash 3.2
+    runs-on: macos-latest
+    # Hang tripwire, not the expected healthy end: the portable suite is ~14 min
+    # of serial wall locally and macOS runners are slower than the Linux shards.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Assert stock /bin/bash is 3.2
+        run: |
+          set -eu
+          /bin/bash --version | head -1
+          major=$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')
+          [ "$major" = 3 ] || {
+            echo "::error::expected stock /bin/bash major version 3 (macOS 3.2), got $major"
+            exit 1
+          }
+      - name: Syntax-check every script under bash 3.2
+        run: |
+          set -eu
+          for script in bin/*.sh bin/backends/*.sh tests/*.sh; do
+            /bin/bash -n "$script"
+          done
+      - name: Require tmux for e2e tests
+        run: |
+          set -eu
+          command -v tmux >/dev/null || brew install tmux
+          tmux -V
+      - name: Install tasks-axi
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
+      - name: Run the portable behavior suite under stock bash 3.2
+        run: |
+          set -eu
+          # Put /bin first so this runner, every test's `#!/usr/bin/env bash`, and
+          # every script they spawn resolve to the stock 3.2 interpreter - the same
+          # bash the captain's macOS machine runs. Other tools (git, tmux, node)
+          # stay resolvable further down PATH.
+          export PATH="/bin:$PATH"
+          # One serial pass over the whole portable suite. real-herdr-gated is
+          # excluded because the required Herdr lane owns that coverage and this
+          # runner installs no Herdr; the shard split above exists for Linux
+          # wall-clock balance, not for coverage, so it is not reproduced here.
+          bin/fm-test-run.sh --all --exclude-family real-herdr-gated
+
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
