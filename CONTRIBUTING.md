@@ -46,6 +46,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   A lib self-locates via `BASH_SOURCE` (so it works however it is sourced) and guards against double-sourcing.
   The foundational ones: `fm-env-lib.sh` resolves `FM_ROOT`/`FM_HOME`/`STATE` (call `fm_env_init` right after computing `SCRIPT_DIR`); `fm-git-lib.sh` holds `fm_default_branch`; `fm-path-lib.sh` holds `path_is_ancestor_of`; `fm-tmux-lib.sh` owns the tmux pane primitives and the one busy-footer regex `FM_TMUX_BUSY_REGEX_DEFAULT`; `fm-composer-lib.sh` owns the composer-content `empty`/`pending`/`unknown` verdict, including the injection-safety rule that an unbordered shell prompt glyph is a dead shell (`unknown`), not an empty composer.
   When you add a new duplicate site, source the lib instead of re-inlining the body.
+  When you make an EXISTING lib source a NEW sibling lib, also add that sibling to the synthetic-`bin/` symlink lists in `tests/fm-backend.test.sh` (`OLD_BIN_UNCHANGED_SIBLINGS`) and `tests/fm-gotmp.test.sh`.
+  Those fixtures symlink individual libs into a scratch `bin/`, and a lib self-locating via `BASH_SOURCE` resolves to the SYMLINK's directory, not the real one - so a sibling missing there makes the lib abort under `set -eu`, surfacing as an unrelated-looking conformance or teardown failure.
   Test scripts and helpers in `tests/` are plain bash too.
   They must stay portable to macOS stock `/bin/bash` 3.2 (no `$(cat <<EOF)` heredocs, no bare `"${arr[@]}"` on a possibly-empty array under `set -u`, no locale-dependent `[a-z]` ranges); a dedicated CI leg runs the whole behavior suite under real bash 3.2 alongside the Linux (bash 5) legs.
   `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` must pass, and CI enforces it.
