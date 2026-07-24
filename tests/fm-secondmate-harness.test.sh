@@ -83,6 +83,41 @@ ROWS
   pass "A1 fm-harness.sh secondmate resolves the fallback chain; crew mode unchanged"
 }
 
+# A bare invocation keeps printing the detected own harness (the documented
+# default), but an unrecognized non-empty verb must error with a non-zero exit
+# and the known-verb list. Falling through to detect_own printed a plausible
+# adapter name and exited 0, so a typoed or renamed verb in a caller read as a
+# successful query while silently substituting the detecting process's own
+# harness for the answer it asked for.
+test_harness_unknown_verb_errors() {
+  local out rc cfg verb
+  cfg="$TMP_ROOT/unknown-verb-config"
+  mkdir -p "$cfg"
+
+  out=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = claude ] || fail "bare fm-harness.sh no longer prints the detected own harness (got '$out')"
+
+  # A typo of a real verb, a plausible-but-absent verb, and an empty-looking
+  # non-empty argument all have to fail rather than answer something else.
+  # This file runs without errexit, so a failing command's status is captured
+  # directly; toggling set -e here would leave it ON for every later test.
+  for verb in bogus-verb crewe secondmate-harness ' '; do
+    out=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" "$verb" 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "fm-harness.sh '$verb' exited 0 (silently fell through to detect_own)"
+    assert_contains "$out" "unknown fm-harness.sh verb '$verb'" "'$verb' error did not name the verb"
+    assert_contains "$out" "secondmate-effort" "'$verb' error did not list the known verbs"
+    [ "$out" != claude ] || fail "fm-harness.sh '$verb' still printed a detected harness"
+  done
+
+  # Every real verb must survive the tightened dispatch.
+  for verb in adapters efforts crew secondmate secondmate-model secondmate-effort; do
+    CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" "$verb" >/dev/null 2>&1 \
+      || fail "known verb '$verb' was rejected by the unknown-verb guard"
+  done
+  pass "A2 fm-harness.sh: bare invocation detects own harness; an unknown verb errors with the verb list"
+}
+
 # ===========================================================================
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
 # ===========================================================================
@@ -2049,6 +2084,7 @@ SH
 }
 
 test_harness_resolution
+test_harness_unknown_verb_errors
 test_secondmate_model_effort_tokens
 test_propagate_lib
 test_spawn_split_and_inherit

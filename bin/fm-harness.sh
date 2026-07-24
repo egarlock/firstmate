@@ -154,5 +154,13 @@ case "${1:-}" in
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
-  *) detect_own ;;
+  # A bare invocation prints firstmate's own harness (the documented default).
+  # An unrecognized non-empty verb must error: falling through to detect_own
+  # printed a plausible adapter name and exited 0, so a typoed or renamed verb
+  # in a caller looked like a successful query and silently substituted the
+  # detecting process's own harness for the answer.
+  '') detect_own ;;
+  *)
+    echo "error: unknown fm-harness.sh verb '$1' (known: adapters, efforts, crew, secondmate, secondmate-model, secondmate-effort; no verb prints the detected own harness)" >&2
+    exit 1 ;;
 esac
