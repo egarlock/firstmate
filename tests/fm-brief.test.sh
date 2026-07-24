@@ -341,6 +341,55 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# fm-brief.sh runs under set -eu and collects positionals into POS after flag
+# filtering, so a missing <task-id> or <repo-name> used to die on a raw
+# "POS[n]: unbound variable" instead of usage. Pin the guards, that they fire
+# before the first side effect, and that they do not over-reject a valid call.
+test_missing_positionals_print_usage() {
+  local home out rc
+  home="$TMP_ROOT/usage-guard-home"
+  mkdir -p "$home/data"
+
+  # No arguments at all, and the flags-only shapes that still supply no task id.
+  for args in "" "--scout" "--secondmate" "--secondmate --no-projects"; do
+    # shellcheck disable=SC2086  # deliberate word-splitting of the arg fixture
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    rc=$?
+    expect_code 1 "$rc" "fm-brief.sh '$args' should exit 1 on a missing task id"
+    assert_contains "$out" "usage: fm-brief.sh <task-id>" "'$args' did not print usage"
+    assert_not_contains "$out" "unbound variable" "'$args' crashed on an unbound positional"
+  done
+
+  # A ship or scout brief also needs the repo name; id-only must print the
+  # two-positional usage rather than dying on POS[1].
+  for args in "brief-usage-a1" "brief-usage-a2 --scout" "brief-usage-a3 --herdr-lab"; do
+    # shellcheck disable=SC2086  # deliberate word-splitting of the arg fixture
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    rc=$?
+    expect_code 1 "$rc" "fm-brief.sh '$args' should exit 1 on a missing repo name"
+    assert_contains "$out" "usage: fm-brief.sh <task-id> <repo-name>" "'$args' did not print usage"
+    assert_not_contains "$out" "unbound variable" "'$args' crashed on an unbound positional"
+  done
+
+  # Both guards precede the mkdir, so a usage-guarded run leaves no stray
+  # data/<task-id>/ behind for the caller to clean up.
+  assert_absent "$home/data/brief-usage-a1" "id-only run created a task data dir before failing"
+  assert_absent "$home/data/brief-usage-a2" "id-only --scout run created a task data dir before failing"
+
+  # The guards must not over-reject: a valid secondmate charter has exactly one
+  # positional beyond the id, and --no-projects has none at all.
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-usage-ok1 --secondmate alpha >/dev/null 2>&1 \
+    || fail "usage guard rejected a valid --secondmate invocation"
+  FM_SECONDMATE_CHARTER='Supervise this firstmate repo.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-usage-ok2 --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "usage guard rejected a valid --secondmate --no-projects invocation"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-usage-ok3 alpha --scout >/dev/null 2>&1 \
+    || fail "usage guard rejected a valid scout invocation"
+  assert_present "$home/data/brief-usage-ok3/brief.md" "valid scout brief was not scaffolded"
+  pass "fm-brief.sh: missing positionals print usage and exit 1 with no side effects"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -355,3 +404,4 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_missing_positionals_print_usage

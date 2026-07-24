@@ -14,6 +14,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
+# Without this, a bare invocation dies on a raw set -u "$1: unbound variable"
+# instead of saying which argument is missing.
+[ $# -ge 1 ] || { echo "usage: fm-promote.sh <task-id>" >&2; exit 1; }
 ID=$1
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }

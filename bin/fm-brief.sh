@@ -83,6 +83,15 @@ for a in "$@"; do
     *) POS+=("$a") ;;
   esac
 done
+# Positionals are collected after flag filtering, so a missing <task-id> or
+# <repo-name> would otherwise die on a raw set -u "POS[n]: unbound variable"
+# instead of saying what the caller got wrong. Both arity checks run before the
+# first side effect (the mkdir below), so a usage-guarded run writes nothing.
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-brief.sh <task-id> {<repo-name> [--scout] [--herdr-lab] | --secondmate {<project>...|--no-projects}}" >&2; exit 1; }
+if [ "$KIND" != secondmate ] && [ "${#POS[@]}" -lt 2 ]; then
+  echo "usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]" >&2
+  exit 1
+fi
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
