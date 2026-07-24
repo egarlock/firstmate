@@ -23,6 +23,9 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
+# Only the verbs above are accepted. Any other non-empty argument exits 1 rather
+# than falling through to the no-verb detection, so a typoed verb cannot read as
+# a successful query that quietly answered with this process's own harness.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here; the adapter allowlist and the
 # name-matching used by ancestry detection live in bin/fm-harness-policy.sh.
