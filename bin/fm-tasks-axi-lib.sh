@@ -11,31 +11,26 @@
 # Absent or any other value keeps the default tasks-axi backend path, falling
 # back to manual mutation when the tool is not compatible.
 
-fm_tasks_axi_version_parts() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" |
-    sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
-    head -1
-}
+# The version probe and compare live in the shared policy lib
+# (fm_harness_version_parts / fm_version_ge), the ONE parser for every
+# version-gated tool. The probe this replaced took the LAST dotted triple on
+# the version line, so a trailing build or runtime stamp won the match and
+# `tasks-axi 0.0.9 build 2026.1.15` parsed as 6.1.15 - an incompatible CLI
+# passing the gate. The shared parser anchors to the FIRST triple.
+_FM_TASKS_AXI_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-harness-policy.sh
+. "$_FM_TASKS_AXI_LIB_DIR/fm-harness-policy.sh"
 
 fm_tasks_axi_compatible() {
   local parts major minor patch rest
-  parts=$(fm_tasks_axi_version_parts) || return 1
-  [ -n "$parts" ] || return 1
+  parts=$(fm_harness_version_parts tasks-axi) || return 1
   major=${parts%% *}
   rest=${parts#* }
   minor=${rest%% *}
   patch=${rest##* }
 
-  if [ "$major" -gt 0 ] ||
-    { [ "$major" -eq 0 ] && [ "$minor" -gt 1 ]; } ||
-    { [ "$major" -eq 0 ] && [ "$minor" -eq 1 ] && [ "$patch" -ge 1 ]; }; then
-    fm_tasks_axi_update_has_archive_body && fm_tasks_axi_mv_has_multi_id
-    return $?
-  fi
-  return 1
+  fm_version_ge "$major" "$minor" "$patch" 0 1 1 || return 1
+  fm_tasks_axi_update_has_archive_body && fm_tasks_axi_mv_has_multi_id
 }
 
 fm_tasks_axi_update_has_archive_body() {

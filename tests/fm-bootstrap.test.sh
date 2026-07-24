@@ -284,6 +284,8 @@ missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (insta
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+old tasks-axi with a trailing build stamp is still required^1^0.0.9 build 2026.1.15^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+compatible tasks-axi with a trailing build stamp is silent^1^0.2.2 build 2026.1.15^1^-^empty^^
 missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
@@ -318,6 +320,8 @@ newer no-mistakes minor is accepted^no-mistakes version v1.32.0 (fake)^empty
 newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty
 older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^missing
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
+older no-mistakes with a trailing runtime version reports an upgrade^no-mistakes version v1.30.0 (go1.21.5)^missing
+accepted no-mistakes with a trailing runtime version stays silent^no-mistakes version v1.32.0 (go1.21.5)^empty
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }

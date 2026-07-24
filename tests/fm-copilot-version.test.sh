@@ -98,6 +98,33 @@ test_compatible_rejects_old_cli_with_noisy_version_line() {
   pass "fm_copilot_compatible: noisy version lines gate on the tool's own version"
 }
 
+# Single-owner contract for the version parser. bootstrap's no-mistakes gate and
+# fm-tasks-axi-lib's tasks-axi gate each carried their own sed, and both took the
+# LAST dotted triple on the line: a trailing build or runtime stamp won the
+# match, so `tasks-axi 0.0.9 build 2026.1.15` parsed as 6.1.15 and PASSED its
+# floor, while `no-mistakes version v1.32.0 (go1.21.5)` parsed as 1.21.5 and was
+# falsely reported as needing an upgrade. Both now resolve through the shared
+# first-triple parser; keep it that way rather than re-rolling a third copy.
+test_version_probe_has_one_owner() {
+  local f
+  for f in bin/fm-bootstrap.sh bin/fm-tasks-axi-lib.sh; do
+    grep -q 'fm_harness_version_parts' "$ROOT/$f" \
+      || fail "$f no longer resolves its version gate through fm_harness_version_parts"
+    grep -q 'fm_version_ge' "$ROOT/$f" \
+      || fail "$f no longer compares versions through fm_version_ge"
+    grep -qE '^[a-z_]*version_parts\(\)' "$ROOT/$f" \
+      && fail "$f re-declared a private version parser instead of using the shared one"
+  done
+  # fm-harness-policy.sh must remain the only dotted-triple parser in bin/.
+  # (fm-teardown.sh's anchored `git version <maj>.<min>` probe is a different,
+  # two-field shape and is deliberately not covered by the shared helper.)
+  local owners
+  owners=$(grep -rlE 'sed .*\[0-9\].*\\\.' "$ROOT"/bin/*.sh | grep -v 'fm-teardown\.sh' | xargs -n1 basename | sort | tr '\n' ' ')
+  [ "$owners" = "fm-harness-policy.sh " ] \
+    || fail "expected fm-harness-policy.sh to own the only dotted-triple version parser, found: $owners"
+  pass "fm_harness_version_parts is the single owner of the version probe (bootstrap + tasks-axi included)"
+}
+
 test_compatible_accepts_and_rejects() {
   local fb
   fb=$(fake_copilot "$TMP_ROOT/good" 'GitHub Copilot CLI 1.0.68.')
@@ -166,6 +193,7 @@ test_version_ge_orders_numerically
 test_version_parts_extracts_fields
 test_version_parts_anchors_to_first_triple
 test_compatible_rejects_old_cli_with_noisy_version_line
+test_version_probe_has_one_owner
 test_compatible_accepts_and_rejects
 test_spawn_aborts_on_incompatible_copilot
 test_spawn_skip_env_bypasses_gate
