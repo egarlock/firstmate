@@ -91,6 +91,22 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+# The housekeeping cadence knob is FM_HOUSEKEEPING_TICK (documented in the
+# script header, and what the tests set). The non-wake idle path once expanded
+# the unprefixed ${HOUSEKEEPING_TICK:-...}, a name nothing ever sets, so the
+# knob was silently ignored exactly there while the housekeeping gate honored
+# it. Pin that every expansion carries the FM_ prefix; the bare name may still
+# appear as the HOUSEKEEPING_TICK_DEFAULT constant or in comments.
+test_housekeeping_tick_env_var_prefixed() {
+  local hits
+  hits=$(grep -nE '\$\{HOUSEKEEPING_TICK[:}-]' "$ROOT/bin/fm-supervise-daemon.sh" || true)
+  [ -z "$hits" ] \
+    || fail "fm-supervise-daemon.sh expands unprefixed \${HOUSEKEEPING_TICK} (the knob is FM_HOUSEKEEPING_TICK): $hits"
+  grep -qE '\$\{FM_HOUSEKEEPING_TICK[:}-]' "$ROOT/bin/fm-supervise-daemon.sh" \
+    || fail "fm-supervise-daemon.sh no longer reads FM_HOUSEKEEPING_TICK at all"
+  pass "supervise daemon reads the FM_HOUSEKEEPING_TICK knob everywhere (no unprefixed expansion)"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -1728,6 +1744,7 @@ test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
+test_housekeeping_tick_env_var_prefixed
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate

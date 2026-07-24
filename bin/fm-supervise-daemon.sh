@@ -1483,7 +1483,10 @@ fm_super_main() {
         if ! is_wake_reason "$reason"; then
           log "watcher non-wake stdout, idling: $reason"
           WATCHER_PID=""
-          sleep "${HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}"
+          # The documented knob is FM_HOUSEKEEPING_TICK; reading the unprefixed
+          # name here silently ignored it on this idle path while the
+          # housekeeping gate below honored it.
+          sleep "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}"
           continue
         fi
         log "wake: $reason"
