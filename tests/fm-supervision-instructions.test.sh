@@ -19,6 +19,16 @@ test_selected_harness_block_only() {
   pass "renderer prints exactly the selected harness block"
 }
 
+test_copilot_selected_harness_block() {
+  local out
+  out=$("$RENDER" --harness copilot)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: copilot" "copilot heading missing"
+  assert_contains "$out" "Mode: Copilot background-notify supervision." "copilot snippet missing"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "copilot snippet missing watcher arm command"
+  assert_not_contains "$out" "primary harness: unknown" "copilot render fell back to unknown"
+  pass "renderer prints the copilot protocol for a copilot primary"
+}
+
 test_unknown_fallback() {
   local out
   out=$("$RENDER" --harness not-real)
@@ -52,6 +62,10 @@ test_repair_lines() {
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
   assert_contains "$out" "Claude Code background task" "claude repair line missing background-task mechanism"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness copilot --repair-line)
+  assert_contains "$out" "Copilot Bash tool call" "copilot repair line missing tracked Bash tool mechanism"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "copilot repair line missing watcher arm command"
 
   : > "$home/config/x-mode.env"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
@@ -92,6 +106,15 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   out=$("$RENDER" --harness claude --repair-line)
   assert_contains "$out" "Claude Code background task" "claude recovery line lost its tracked background repair"
   assert_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line lost the arm command"
+
+  out=$("$RENDER" --harness copilot)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "re-arm" "copilot ordinary-wake line does not tell the model to re-arm"
+  assert_contains "$ordinary" "Copilot Bash tool call" "copilot ordinary-wake line lost Bash tool ownership"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "copilot ordinary-wake line lost the watcher arm command"
+  out=$("$RENDER" --harness copilot --repair-line)
+  assert_contains "$out" "Copilot Bash tool call" "copilot recovery line lost its tracked Bash tool repair"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "copilot recovery line lost the arm command"
 
   out=$("$RENDER" --harness grok)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
@@ -155,6 +178,7 @@ test_pi_snippet_uses_effective_extension_path() {
 }
 
 test_selected_harness_block_only
+test_copilot_selected_harness_block
 test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines

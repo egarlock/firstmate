@@ -22,6 +22,7 @@ run_command() {
   : > "$OUT"
   : > "$ERR"
   FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+    CLAUDECODE=1 \
     "$CHECK" --command "$command" > "$OUT" 2> "$ERR" || rc=$?
   return "$rc"
 }
@@ -41,7 +42,7 @@ expect_deny() {
   [ ! -s "$OUT" ] || fail "$label deny wrote stdout: $(cat "$OUT")"
   jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"' "$ERR" >/dev/null 2>&1 \
     || fail "$label deny omitted Claude's permission decision: $(cat "$ERR")"
-  [ -n "$expected" ] || expected="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $blocked)"
+  [ -n "$expected" ] || expected="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, run bin/fm-session-start.sh if startup or lock recovery is needed, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $blocked)"
   actual=$(jq -r '.systemMessage' "$ERR")
   [ "$actual" = "$expected" ] || fail "$label recovery guidance changed: $actual"
 }
@@ -53,6 +54,7 @@ test_gate_scope_and_recovery_exceptions() {
   expect_allow "ordinary shell command" 'git status --short'
   expect_allow "fleet-script text as data" "rg -n 'bin/fm-send.sh' docs"
   expect_allow "wake drain recovery" 'bin/fm-wake-drain.sh'
+  expect_allow "session-start recovery" 'bin/fm-session-start.sh'
   expect_allow "watch arm recovery" 'bin/fm-watch-arm.sh'
   expect_allow "drain then arm recovery" 'bin/fm-wake-drain.sh; bin/fm-watch-arm.sh'
   expect_allow "fail-closed teardown recovery" 'bin/fm-teardown.sh task'
@@ -61,6 +63,7 @@ test_gate_scope_and_recovery_exceptions() {
   expect_deny "nested forced teardown is not recovery" "bash -lc 'bin/fm-teardown.sh task --force'" 'fm-teardown.sh' "$unsafe_teardown_reason"
   # shellcheck disable=SC2016  # single quotes are deliberate: "$TEARDOWN_MODE" is literal test data (an unsafe shell-expanded arg the gate must deny), not an expansion here
   expect_deny "dynamic teardown mode is not recovery" 'bin/fm-teardown.sh task "$TEARDOWN_MODE"' 'fm-teardown.sh' "$unsafe_teardown_reason"
+  expect_deny "bootstrap stays denied during recovery" 'bin/fm-bootstrap.sh' 'fm-bootstrap.sh'
   expect_deny "unrelated fleet command" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
   expect_deny "recovery bundled with unrelated fleet command" 'bin/fm-wake-drain.sh; bin/fm-send.sh task hi' 'fm-send.sh'
   expect_deny "literal nested fleet command" "bash -lc 'bin/fm-bootstrap.sh'" 'fm-bootstrap.sh'

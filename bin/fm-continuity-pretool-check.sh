@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# Claude primary watcher-continuity PreToolUse gate.
+# Claude and Copilot primary watcher-continuity PreToolUse gate.
 #
 # This hook is deliberately narrow. It denies only an executed bin/fm-*.sh fleet
-# command other than bin/fm-wake-drain.sh, bin/fm-watch-arm.sh, or the
-# independently fail-closed bin/fm-teardown.sh, and only when the active primary
-# home has task metadata in flight but no identity-matched live watcher holds the
-# home lock. Ordinary shell commands, recovery commands, healthy supervision,
+# command other than bin/fm-wake-drain.sh, bin/fm-session-start.sh,
+# bin/fm-watch-arm.sh, or the independently fail-closed bin/fm-teardown.sh, and
+# only when the active primary home has task metadata in flight but no
+# identity-matched live watcher holds the home lock. Ordinary shell commands,
+# recovery commands, healthy supervision,
 # fleet-idle homes, and child worktrees are always allowed.
 #
 # The existing turn-end guard remains the unchanged final backstop. This gate
 # closes the long-turn gap before another fleet mutation, but does not replace or
 # weaken the Stop hook.
 #
-# Input is Claude PreToolUse JSON on stdin. Tests may pass --command directly.
-# Malformed transport, missing jq/Node, a missing classifier, or classifier
-# failure all fail open. A deny writes Claude's hook decision to stderr only and
-# exits 2.
+# Input is Claude-compatible PreToolUse JSON on stdin. Tests may pass --command
+# directly. Malformed transport, missing jq/Node, a missing classifier, or
+# classifier failure all fail open. A deny writes a Claude-compatible hook
+# decision to stderr only and exits 2.
 set -u
 
 COMMAND=
@@ -25,7 +26,7 @@ usage() {
   cat <<'EOF'
 Usage: fm-continuity-pretool-check.sh [--command <shell-command>]
 
-Reads Claude PreToolUse JSON from stdin unless --command is supplied.
+Reads Claude-compatible PreToolUse JSON from stdin unless --command is supplied.
 Exits 0 to allow. Exits 2 with a Claude deny object on stderr only when an
 unhealthy primary tries to execute a non-recovery firstmate fleet script.
 EOF
@@ -100,12 +101,18 @@ REST=${CLASSIFICATION#*"$TAB"}
 BLOCKED_SCRIPT=${REST%%"$TAB"*}
 REASON_CODE=${REST#*"$TAB"}
 [ "$REASON_CODE" != "$REST" ] || REASON_CODE=""
+HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+case "$HARNESS" in
+  claude) ARM_GUIDANCE='a tracked Claude background task' ;;
+  copilot) ARM_GUIDANCE='a tracked Copilot Bash tool call' ;;
+  *) ARM_GUIDANCE='a tracked harness call' ;;
+esac
 case "$REASON_CODE" in
   unsafe-teardown)
     REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; during recovery only the ordinary literal bin/fm-teardown.sh is allowed, so drop --force and any shell-expanded arguments and retry the literal invocation (blocked: $BLOCKED_SCRIPT)"
     ;;
   *)
-    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $BLOCKED_SCRIPT)"
+    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, run bin/fm-session-start.sh if startup or lock recovery is needed, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as $ARM_GUIDANCE before running other fleet commands (blocked: $BLOCKED_SCRIPT)"
     ;;
 esac
 ESCAPED=$(printf '%s' "$REASON" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' ')

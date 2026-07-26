@@ -72,6 +72,7 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+Copilot is also verified and supported as a primary harness, and it uses the same background-notify watcher-arm protocol as Claude through the tracked `.claude/settings.json` hook surface.
 
 ### Install and launch
 

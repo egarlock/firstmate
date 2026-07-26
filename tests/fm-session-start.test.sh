@@ -252,13 +252,14 @@ SH
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT (pi), GROK_AGENT (grok).
+# Markers today: CLAUDECODE (claude), PI_CODING_AGENT (pi), GROK_AGENT (grok),
+# and COPILOT_CLI (copilot).
 # codex and opencode have no env markers (ancestry only). Without this, a local
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u COPILOT_CLI \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START"
 }
@@ -787,6 +788,23 @@ EOF
   pass "next step delegates watcher ownership to the AFK daemon"
 }
 
+test_supervision_block_detects_copilot_protocol() {
+  local rec root home fakebin out
+  rec=$(new_world copilot-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" copilot
+
+  out=$(FM_FAKE_HARNESS=copilot run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: copilot" "copilot supervision block missing"
+  assert_contains "$out" "Mode: Copilot background-notify supervision." "copilot supervision mode snippet missing"
+  assert_not_contains "$out" "primary harness: unknown" "copilot supervision fell back to unknown"
+
+  pass "session start renders the copilot harness supervision block"
+}
+
 test_supervision_block_exactly_one_and_pi_diagnostic() {
   local rec root home fakebin out block_count wake_line sup_line context_line
   rec=$(new_world pi-supervision-block)
@@ -933,6 +951,7 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_supervision_block_detects_copilot_protocol
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
