@@ -233,6 +233,40 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Harbor watch (config/harbor-watch.json)
+
+`config/harbor-watch.json` is the optional local, gitignored watch list for harbor watch: captain-approved observe-and-escalate supervision of the captain's OWN cmux tabs (the wave-1 shape recorded in the primary home's `data/fm-tab-watch-s7` design and decision).
+This section is the single owner of the file's schema; `bin/fm-harbor-watch.sh`'s header owns the sweep, chat-op, and arm/disarm mechanics, and the `harbor-watch` skill owns escalation policy and the captain-facing procedures.
+The file has TWO writers - firstmate chat ops through `bin/fm-harbor-watch.sh add`/`remove`, and the cmux-dashboard's per-tab toggle, which reads and writes the same file through its `HARBOR_WATCH_FILE` environment setting.
+Both writers replace the file atomically (a temp file in `config/` renamed over the target), last write wins, and the sweep re-reads and re-validates the document on every run, so neither writer ever needs to coordinate with the other.
+
+```json
+{
+  "version": 1,
+  "watches": [
+    {
+      "id": "hw-1c5bfbf9",
+      "machine": "<hostname at opt-in>",
+      "workspace_title": "OpenCode",
+      "surface_title": "<tab title at opt-in>",
+      "surface_uuid": "<surface uuid at opt-in>",
+      "addedAt": "2026-07-25T21:40:54Z",
+      "active": true,
+      "classes": []
+    }
+  ]
+}
+```
+
+`version` must be 1 and `watches` must be an array; any other document shape is escalated as a config error and never partially applied.
+`id` is the stable per-entry key (path-safe: letters, digits, `.`, `_`, `-`), used in event lines, the dedupe ledger, and the audit log.
+`machine` records the opt-in host, and the sweep only observes entries whose `machine` matches the local hostname, so one file can safely describe tabs on more than one machine.
+`surface_uuid` confirmed under `workspace_title` is the identity pair a watch is resolved by; `surface_title` is display and re-confirmation context only, because cmux surface titles auto-retitle while a tab is in use.
+On any identity mismatch - the uuid is gone (tab closed, or every uuid reset by a cmux relaunch) or the uuid now lives under a different workspace title - the sweep sets `active` to false and escalates one `mismatch` event for captain re-confirmation; a watch never silently migrates to a different tab.
+`active` false keeps the entry (and the captain's intent) durable without observing it; re-confirmation is a `remove` plus a fresh `add`.
+`classes` names the per-tab auto-approval classes for later waves; wave 1 is observe-only, records `[]` at opt-in, and the sweep ignores the field entirely.
+Runtime artifacts live under `state/` (`harbor-watch.check.sh`, `harbor-watch.log`, `.harbor-watch-reported`) and are owned by `bin/fm-harbor-watch.sh`.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

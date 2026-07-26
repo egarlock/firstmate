@@ -72,6 +72,7 @@ config/herdr-presentation-spaces  optional presence flag for Herdr's default-off
 config/cmux-container  cmux-backend task-container shape; LOCAL, gitignored; absent or "workspace" = one fm-titled workspace per task (the default), "tab" = task tabs join firstmate's own cmux workspace, or a shared per-home workspace outside cmux (docs/cmux-backend.md "Task container shape"); not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/harbor-watch.json  optional two-writer harbor-watch list of the captain's own opted-in cmux tabs; LOCAL, gitignored; schema owned by docs/configuration.md "Harbor watch", mechanics by bin/fm-harbor-watch.sh, chat ops and escalation policy by the harbor-watch skill (section 13)
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -98,6 +99,7 @@ state/               volatile runtime signals; gitignored
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
+  harbor-watch.check.sh harbor-watch.log .harbor-watch-reported  harbor-watch sweep shim (present only while armed), append-only audit log, and escalation dedupe ledger (bin/fm-harbor-watch.sh; section 13 harbor-watch skill)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
@@ -335,7 +337,7 @@ Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
-3. For `check:`, act on the named poll result, including merges and X-mode events.
+3. For `check:`, act on the named poll result, including merges, X-mode events, and harbor-watch tab events (section 13's `harbor-watch` skill).
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
@@ -466,6 +468,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
+- `harbor-watch` - load on any `check:` wake from `state/harbor-watch.check.sh`, before opting one of the captain's own cmux tabs in or out of harbor watch or listing the watches, and before relaying a harbor-watch escalation; wave 1 is observe-only and the skill owns that contract.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
