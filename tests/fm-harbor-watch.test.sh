@@ -393,8 +393,11 @@ test_arm_registers_and_shim_sweeps() {
   assert_contains "$out" "registered: state/harbor-watch.check.sh" "arm registers the check"
   assert_present "$HOME_DIR/state/harbor-watch.check.sh" "shim exists"
   assert_present "$HOME_DIR/state/harbor-watch.check-trust" "trust binding exists"
-  mode=$(stat -f '%Lp' "$HOME_DIR/state/harbor-watch.check.sh" 2>/dev/null \
-    || stat -c '%a' "$HOME_DIR/state/harbor-watch.check.sh")
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f '%Lp' "$HOME_DIR/state/harbor-watch.check.sh")
+  else
+    mode=$(stat -c '%a' "$HOME_DIR/state/harbor-watch.check.sh")
+  fi
   [ "$mode" = 700 ] || fail "shim mode is $mode, not 700"
   out=$(hw_run arm)
   assert_contains "$out" "registered:" "arm is idempotent"
