@@ -44,15 +44,18 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 `tmux` is the verified reference backend (see [`docs/tmux-backend.md`](tmux-backend.md)); `herdr`, `zellij`, `orca`, and `cmux` are experimental spawn backends (see [`docs/herdr-backend.md`](herdr-backend.md), [`docs/zellij-backend.md`](zellij-backend.md), [`docs/orca-backend.md`](orca-backend.md), and [`docs/cmux-backend.md`](cmux-backend.md)).
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
 New spawns choose the backend in this order: an explicit `--backend` flag firstmate passes when it spawns a task, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
+A `--secondmate` spawn resolves its backend separately: an explicit `--backend` still always wins, a respawn reuses the backend recorded in the mate's existing `state/<id>.meta` so a mate stays on its recorded backend across recovery and restarts, then the first non-empty line of local gitignored `config/secondmate-backend` applies when it is not `default`, and only then does the shared chain above take over (`fm_backend_secondmate_name` in `bin/fm-backend.sh`).
+`config/secondmate-backend` mirrors `config/secondmate-harness`: it is the primary's own setting, never inherited into secondmate homes, and when present it outranks `FM_BACKEND` and `config/backend` for secondmate spawns because it is the more specific knob.
+Its value must be `default` or a backend with a verified secondmate launch design (`tmux`, `herdr`, `zellij`, or `cmux`; `FM_BACKEND_SECONDMATE_SPAWN` in `bin/fm-backend.sh`); bootstrap flags anything else with a `BACKEND_INVALID:` line naming the file.
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-auto-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
 Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
 Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
-`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
+`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `--secondmate` is supported on `tmux`, `herdr`, `zellij`, and `cmux` (see [`docs/cmux-backend.md`](cmux-backend.md#secondmate-support) for cmux's dedicated-workspace design), while `backend=orca` still refuses it until an orca secondmate launch design exists.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
-The session-start secondmate liveness sweep uses a deeper `fm_backend_agent_alive` probe where verified.
-Today that probe can classify tmux and herdr secondmate endpoints as `alive`, `dead`, or `unknown`; zellij, Orca, and cmux report `unknown` until their own agent-process classifiers are verified.
+The session-start secondmate liveness sweep resolves each mate's endpoint first (`fm_backend_secondmate_resolve` - cmux's title-sync and relaunch-recovery touch, a pass-through elsewhere), then uses the deeper `fm_backend_agent_alive` probe where verified.
+Today that probe can classify tmux, herdr, and cmux secondmate endpoints as `alive`, `dead`, or `unknown`; zellij and Orca report `unknown` until their own agent-process classifiers are verified.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
@@ -61,7 +64,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
-A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
+A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`; a cmux secondmate also records `cmux_workspace_title=`, the last-synced workspace title that anchors relaunch recovery ([`docs/cmux-backend.md`](cmux-backend.md#secondmate-support)).
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
 Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
@@ -82,7 +85,8 @@ cmux has no session layer at all, and its socket password (when configured) is r
 The cmux task-container shape is configurable via `FM_CMUX_CONTAINER` or the first word of local, gitignored `config/cmux-container`: absent or `workspace` (the default) gives one fm-titled workspace per task, while `tab` puts each task in its own tab inside firstmate's own cmux workspace (or a shared per-home workspace when firstmate is not itself running inside cmux) - see [`docs/cmux-backend.md`](cmux-backend.md)'s "Task container shape".
 The caller-facing label remains `fm-<id>`, but the actual cmux title - on the task workspace, or on the task's tab in tab mode - is scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
 Test cleanup must use the guarded path described in [`docs/cmux-backend.md`](cmux-backend.md)'s "Test safety" section, never enumerate-and-close every workspace.
-The `config/backend` and `config/cmux-container` files are not inherited by secondmate homes.
+A cmux secondmate instead gets one dedicated workspace per mate, created at the mate's home with a free-form (captain-retitlable) workspace title and identified id-primary with synced-title recovery; [`docs/cmux-backend.md`](cmux-backend.md#secondmate-support) owns that design.
+The `config/backend`, `config/secondmate-backend`, and `config/cmux-container` files are not inherited by secondmate homes.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
@@ -162,7 +166,7 @@ For the herdr backend, `FM_HOME` also determines the workspace label used by the
 For the zellij backend, `FM_HOME` does not split containers, but it determines the readable home prefix embedded in visible tab titles; use `FM_ZELLIJ_SESSION` when a separate zellij session is needed.
 The full zellij home label also includes a short hash of the resolved `FM_ROOT` path.
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` and `config/cmux-container` are read from, while `FM_HOME` determines the default config path and readable home prefix embedded in scoped titles.
-The full cmux home label also includes a short hash of the resolved `FM_ROOT` path; tab mode's shared container workspace (`fm-<home-label>`) is a per-home title split only, not a secondmate container design.
+The full cmux home label also includes a short hash of the resolved `FM_ROOT` path; a cmux secondmate's dedicated workspace defaults to that same `fm-<home-label>` title for its own home, so the mate's workspace doubles as its home's tab-mode shared container ([`docs/cmux-backend.md`](cmux-backend.md#secondmate-support)).
 
 ## Harness support
 

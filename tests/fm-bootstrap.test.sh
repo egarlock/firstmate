@@ -485,6 +485,37 @@ test_unknown_backend_reports_invalid_configuration() {
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
 }
 
+test_secondmate_backend_config_validation() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/secondmate-backend-config"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/secondmate-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "BACKEND_INVALID: orca (config/secondmate-backend; secondmate-supported: tmux herdr zellij cmux or default)" \
+    "bootstrap should flag a config/secondmate-backend value with no secondmate launch design"
+
+  printf '%s\n' bogus > "$case_dir/home/config/secondmate-backend"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "BACKEND_INVALID: bogus (config/secondmate-backend" \
+    "bootstrap should flag an unknown config/secondmate-backend value"
+
+  printf '%s\n' default > "$case_dir/home/config/secondmate-backend"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "BACKEND_INVALID" "a 'default' secondmate-backend must stay silent"
+
+  printf '%s\n' tmux > "$case_dir/home/config/secondmate-backend"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "BACKEND_INVALID" "a valid secondmate-backend value must stay silent"
+
+  pass "bootstrap: config/secondmate-backend values are validated (orca/unknown flagged, default/valid silent)"
+}
+
 test_json_backends_require_jq_not_tmux() {
   local backend case_dir fakebin bash_env out
   # herdr/zellij/cmux parse their backend's JSON output, so jq is a genuine dep.
@@ -807,6 +838,7 @@ test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
+test_secondmate_backend_config_validation
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count

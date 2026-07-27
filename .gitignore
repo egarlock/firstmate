@@ -11,8 +11,10 @@ __pycache__/
 config/crew-harness
 config/crew-dispatch.json
 config/secondmate-harness
+config/secondmate-backend
 config/backlog-backend
 config/backend
+config/cmux-container
 config/x-mode.env
 config/cmux-socket-password
 config/wedge-alarm

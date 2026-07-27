@@ -513,6 +513,61 @@ test_backend_validate_spawn_accepts_orca() {
   pass "fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported"
 }
 
+test_backend_validate_secondmate_spawn() {
+  local out
+  fm_backend_validate_secondmate_spawn tmux 2>/dev/null || fail "secondmate validate should accept tmux"
+  fm_backend_validate_secondmate_spawn herdr 2>/dev/null || fail "secondmate validate should accept herdr"
+  fm_backend_validate_secondmate_spawn zellij 2>/dev/null || fail "secondmate validate should accept zellij"
+  fm_backend_validate_secondmate_spawn cmux 2>/dev/null || fail "secondmate validate should accept cmux"
+  out=$(fm_backend_validate_secondmate_spawn orca 2>&1) && fail "secondmate validate should refuse orca (no secondmate launch design)"
+  assert_contains "$out" "does not support --secondmate" "the orca refusal should name the missing secondmate support"
+  out=$(fm_backend_validate_secondmate_spawn bogus 2>&1) && fail "secondmate validate should refuse unknown backends"
+  assert_contains "$out" "unknown backend 'bogus'" "unknown-backend validation should still fire first"
+  pass "fm_backend_validate_secondmate_spawn: tmux/herdr/zellij/cmux accepted, orca and unknown refused"
+}
+
+test_backend_secondmate_name_precedence() {
+  local dir cfg
+  dir="$TMP_ROOT/sm-name-precedence"; cfg="$dir/config"
+  mkdir -p "$cfg"
+
+  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_secondmate_name)" = tmux ] \
+    || fail "fm_backend_secondmate_name should fall through to the shared resolution when the knob is absent"
+
+  printf 'default\n' > "$cfg/secondmate-backend"
+  printf 'zellij\n' > "$cfg/backend"
+  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_secondmate_name)" = zellij ] \
+    || fail "a 'default' secondmate-backend should defer to config/backend"
+
+  printf 'cmux\n' > "$cfg/secondmate-backend"
+  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_secondmate_name)" = cmux ] \
+    || fail "config/secondmate-backend should outrank FM_BACKEND for secondmate spawns"
+
+  pass "fm_backend_secondmate_name: config/secondmate-backend > shared resolution; 'default' defers"
+}
+
+test_backend_secondmate_resolve_and_kill_default_arms() {
+  local dir meta out killargs
+  dir="$TMP_ROOT/sm-dispatch-default"; mkdir -p "$dir"
+  meta="$dir/mate.meta"
+  {
+    printf 'window=firstmate:fm-mate\n'
+    printf 'kind=secondmate\n'
+    printf 'zellij_tab_id=tab7\n'
+  } > "$meta"
+
+  out=$(fm_backend_secondmate_resolve tmux "$meta") || fail "the default resolve arm should succeed"
+  [ "$out" = "firstmate:fm-mate" ] || fail "the default resolve arm should echo the meta target unchanged, got '$out'"
+
+  # The default kill arm must call the generic kill with the exact
+  # teardown-shaped arguments (target, zellij tab id, fm-<id> label).
+  killargs=$(fm_backend_kill() { printf '%s|%s|%s|%s' "$1" "$2" "$3" "$4"; }; fm_backend_secondmate_kill tmux "$meta")
+  [ "$killargs" = "tmux|firstmate:fm-mate|tab7|fm-mate" ] \
+    || fail "the default kill arm should pass backend, target, zellij tab id, and label, got '$killargs'"
+
+  pass "fm_backend_secondmate_resolve/kill: non-cmux backends keep the recorded target and generic kill shape"
+}
+
 test_meta_get_and_backend_of_meta() {
   local meta=$TMP_ROOT/meta-get.meta
   fm_write_meta "$meta" "window=firstmate:fm-x1" "harness=claude"
@@ -1094,6 +1149,9 @@ test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
+test_backend_validate_secondmate_spawn
+test_backend_secondmate_name_precedence
+test_backend_secondmate_resolve_and_kill_default_arms
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
