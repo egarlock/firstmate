@@ -15,6 +15,11 @@
 #   $TMUX, HERDR_ENV=1, or cmux runtime signals; bin/fm-backend.sh's
 #   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
 #   then tmux.
+#   A --secondmate spawn resolves differently without an explicit --backend:
+#   the backend recorded in the mate's existing meta wins (a respawn keeps the
+#   mate on its recorded backend), then config/secondmate-backend when present
+#   and not "default", then the shared resolution above
+#   (fm_backend_secondmate_name; docs/configuration.md "Runtime backend").
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
@@ -23,7 +28,10 @@
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. A cmux --secondmate spawn creates the mate's
+#   own dedicated workspace (docs/cmux-backend.md "Secondmate support") and
+#   additionally records cmux_workspace_title=; orca does not support
+#   --secondmate spawns yet (fm_backend_validate_secondmate_spawn).
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -113,7 +121,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -199,31 +207,6 @@ case "$EFFORT" in
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
-# Backend selection (data/fm-backend-design-d7): explicit --backend, else
-# FM_BACKEND env, else config/backend, else runtime auto-detection, else
-# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
-# non-spawn-capable backends. The resolved value is
-# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
-# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
-if [ "$BACKEND_SET" -eq 1 ]; then
-  BACKEND=$BACKEND_ARG
-else
-  BACKEND=$(fm_backend_name)
-fi
-fm_backend_validate_spawn "$BACKEND" || exit 1
-fm_backend_source "$BACKEND" || exit 1
-if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=orca does not support --secondmate spawns yet" >&2
-  exit 1
-fi
-if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=cmux does not support --secondmate spawns yet" >&2
-  exit 1
-fi
-if [ "$BACKEND" = orca ]; then
-  fm_backend_orca_runtime_check || exit 1
-fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -385,6 +368,40 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+
+# Backend selection (data/fm-backend-design-d7): explicit --backend, else -
+# for a --secondmate spawn - the backend already recorded in the mate's meta
+# (a respawn keeps the mate on its recorded backend regardless of later
+# config changes), else config/secondmate-backend, else the shared resolution
+# (FM_BACKEND env, config/backend, runtime auto-detection, default tmux;
+# fm_backend_name/fm_backend_secondmate_name in bin/fm-backend.sh).
+# fm_backend_validate_spawn refuses unknown or non-spawn-capable backends,
+# and fm_backend_validate_secondmate_spawn additionally refuses --secondmate
+# on a backend with no verified secondmate launch design (orca today). The
+# resolved value is recorded in meta only when it is NOT tmux (fm-teardown.sh
+# and fm-watch.sh's window_backend/fm_backend_of_meta already treat an absent
+# backend= as tmux), so the default path's meta stays byte-identical.
+if [ "$BACKEND_SET" -eq 1 ]; then
+  BACKEND=$BACKEND_ARG
+elif [ "$KIND" = secondmate ]; then
+  if [ -f "$STATE/$ID.meta" ]; then
+    BACKEND=$(fm_backend_of_meta "$STATE/$ID.meta")
+  else
+    BACKEND=$(fm_backend_secondmate_name)
+  fi
+else
+  BACKEND=$(fm_backend_name)
+fi
+if [ "$KIND" = secondmate ]; then
+  fm_backend_validate_secondmate_spawn "$BACKEND" || exit 1
+else
+  fm_backend_validate_spawn "$BACKEND" || exit 1
+fi
+fm_backend_source "$BACKEND" || exit 1
+if [ "$BACKEND" = orca ]; then
+  fm_backend_orca_runtime_check || exit 1
+fi
+
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -949,25 +966,43 @@ EOF
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
-    # fm_backend_cmux_container_ensure echoes the container token: the
-    # literal "workspace" (workspace-per-task, the default) or the container
-    # workspace's UUID (tab mode - firstmate's own workspace inside cmux, or
-    # the shared per-home one; config/cmux-container, docs/cmux-backend.md
-    # "Task container shape"). create_task echoes "<workspace> <surface>" in
-    # both modes, so everything downstream is mode-agnostic.
-    CMUX_CONTAINER=$(fm_backend_cmux_container_ensure "$PROJ_ABS") || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$CMUX_CONTAINER" "$W" "$PROJ_ABS") || exit 1
-    # _TASK-suffixed names, never bare CMUX_WORKSPACE_ID: that is the ambient
-    # env marker cmux injects into its own terminals, which container_ensure
-    # reads (tab mode joins firstmate's own workspace) and the cmux CLI
-    # itself consults as an ambient-target fallback - overwriting it
-    # mid-script would silently repoint both.
-    read -r CMUX_WORKSPACE_ID_TASK CMUX_SURFACE_ID_TASK <<EOF
+    CMUX_SECONDMATE_TITLE=
+    if [ "$KIND" = secondmate ]; then
+      # A secondmate gets ONE dedicated workspace at its home, in EVERY
+      # container mode (a tab-mode primary must never land a mate as a tab in
+      # the PRIMARY's own workspace). create_secondmate echoes
+      # "<workspace> <surface> <initial-title>"; the title is recorded in
+      # meta as the mate's synced-title recovery anchor (docs/cmux-backend.md
+      # "Secondmate support").
+      CMUX_TASK_IDS=$(fm_backend_cmux_create_secondmate "$PROJ_ABS" "$W") || exit 1
+      read -r CMUX_WORKSPACE_ID_TASK CMUX_SURFACE_ID_TASK CMUX_SECONDMATE_TITLE <<EOF
 $CMUX_TASK_IDS
 EOF
-    if [ -z "$CMUX_WORKSPACE_ID_TASK" ] || [ -z "$CMUX_SURFACE_ID_TASK" ]; then
-      echo "error: cmux did not return a workspace/surface id for $W" >&2
-      exit 1
+      if [ -z "$CMUX_WORKSPACE_ID_TASK" ] || [ -z "$CMUX_SURFACE_ID_TASK" ] || [ -z "$CMUX_SECONDMATE_TITLE" ]; then
+        echo "error: cmux did not return a workspace/surface id and title for secondmate $W" >&2
+        exit 1
+      fi
+    else
+      # fm_backend_cmux_container_ensure echoes the container token: the
+      # literal "workspace" (workspace-per-task, the default) or the container
+      # workspace's UUID (tab mode - firstmate's own workspace inside cmux, or
+      # the shared per-home one; config/cmux-container, docs/cmux-backend.md
+      # "Task container shape"). create_task echoes "<workspace> <surface>" in
+      # both modes, so everything downstream is mode-agnostic.
+      CMUX_CONTAINER=$(fm_backend_cmux_container_ensure "$PROJ_ABS") || exit 1
+      CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$CMUX_CONTAINER" "$W" "$PROJ_ABS") || exit 1
+      # _TASK-suffixed names, never bare CMUX_WORKSPACE_ID: that is the ambient
+      # env marker cmux injects into its own terminals, which container_ensure
+      # reads (tab mode joins firstmate's own workspace) and the cmux CLI
+      # itself consults as an ambient-target fallback - overwriting it
+      # mid-script would silently repoint both.
+      read -r CMUX_WORKSPACE_ID_TASK CMUX_SURFACE_ID_TASK <<EOF
+$CMUX_TASK_IDS
+EOF
+      if [ -z "$CMUX_WORKSPACE_ID_TASK" ] || [ -z "$CMUX_SURFACE_ID_TASK" ]; then
+        echo "error: cmux did not return a workspace/surface id for $W" >&2
+        exit 1
+      fi
     fi
     T="$CMUX_WORKSPACE_ID_TASK:$CMUX_SURFACE_ID_TASK"
     ;;
@@ -1313,6 +1348,11 @@ META_WINDOW=$T
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID_TASK"
     echo "cmux_surface_id=$CMUX_SURFACE_ID_TASK"
+    # The mate workspace's last-synced title: the relaunch-recovery anchor for
+    # the id-primary + synced-title design (docs/cmux-backend.md "Secondmate
+    # support"). Ordinary task workspaces resolve by generated scoped titles
+    # and record no title field.
+    [ -z "${CMUX_SECONDMATE_TITLE:-}" ] || echo "cmux_workspace_title=$CMUX_SECONDMATE_TITLE"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

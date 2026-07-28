@@ -1188,6 +1188,342 @@ fm_backend_cmux_list_live() {
   done < <(printf '%s' "$wss" | jq -r '.workspaces[]? | .id' 2>/dev/null)
 }
 
+# --- secondmate support (docs/cmux-backend.md "Secondmate support") ---------
+#
+# A cmux secondmate gets ONE dedicated workspace per mate: the mate agent's
+# tab inside it, created at the mate's own home directory, in EVERY container
+# mode (a tab-mode primary must never land a secondmate as a tab in the
+# PRIMARY's own workspace). Identity is ID-PRIMARY with synced-title recovery
+# (captain-resolved design, 2026-07-27): the recorded workspace/surface UUIDs
+# are the operational handle while the app is alive; the workspace TITLE is
+# free-form (the captain may retitle it at will), so the mate's meta records
+# the last-seen title (cmux_workspace_title=) and every liveness touch
+# re-syncs it by id. After an app relaunch (socket-reported workspace ids are
+# re-minted; re-verified against the 0.64.20 source, docs/cmux-backend.md
+# "Workspace ids do not survive a relaunch"), recovery matches the mate's OWN
+# recorded title, then its scoped tab title, then a home-cwd fingerprint -
+# never a broad namespace sweep, and any ambiguity refuses loudly with the
+# candidates rather than guessing.
+
+# fm_backend_cmux_workspaces_all_windows: every live workspace across EVERY
+# window, one "<id>\t<title>\t<current_directory>" line each, deduplicated by
+# id. `workspace list --json` without `--window` is scoped to the CURRENT
+# window only (verified live; docs/cmux-backend.md "Closing the last workspace
+# in a window"), which is fine for task-title lookups but NOT for secondmate
+# recovery - a mate's workspace parked in a non-current window must still be
+# findable. Falls back to the current-window list when list-windows yields
+# nothing, degrading to the existing scope rather than failing.
+fm_backend_cmux_workspaces_all_windows() {
+  local wins wid out
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || wins=""
+  out=""
+  if [ -n "$wins" ]; then
+    out=$(while IFS= read -r wid; do
+      [ -n "$wid" ] || continue
+      fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null \
+        | jq -r '.workspaces[]? | "\(.id)\t\(.title)\t\(.current_directory // "")"' 2>/dev/null
+    done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null) | awk -F'\t' '!seen[$1]++')
+  fi
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
+    | jq -r '.workspaces[]? | "\(.id)\t\(.title)\t\(.current_directory // "")"' 2>/dev/null
+}
+
+# fm_backend_cmux_secondmate_initial_title: the mate workspace's DEFAULT title
+# at creation, "fm-<mate-home-label>" (e.g. fm-2ndmate-<id>-<8hex>). Derived
+# with FM_HOME AND FM_ROOT both pointed at the mate's home: a secondmate home
+# is a worktree of this same repo, so its own processes resolve FM_ROOT to the
+# home path - shadowing both here makes the primary-computed title
+# byte-identical to what the mate's own crew spawns later derive, so the
+# mate's workspace doubles as its home's tab-mode shared container. Purely a
+# default: the captain may retitle the workspace freely afterward.
+fm_backend_cmux_secondmate_initial_title() {  # <home-abs>
+  local home=$1
+  printf 'fm-%s' "$(FM_HOME="$home" FM_ROOT="$home" fm_backend_hometag)"
+}
+
+# fm_backend_cmux_create_secondmate: create a secondmate's dedicated
+# workspace at its home directory, in every container mode. The workspace
+# gets the initial per-home title above; the mate's single tab is renamed to
+# the PRIMARY's scoped task title (fm-<primary-home-label>-<id>), which is
+# what fm_backend_cmux_target_ready's tab arm recovers ordinary send/peek
+# operations by - the workspace title stays free for the captain. The rename
+# is FATAL on failure (mirroring the tab-mode create): an untitled mate tab
+# would defeat both routine ops and relaunch recovery, and cleanup is still
+# one targeted workspace close. Echoes "<workspace_id> <surface_id> <title>".
+fm_backend_cmux_create_secondmate() {  # <home-abs> <label>
+  local home=$1 label=$2 title scoped out wsid sfid pair dup
+  fm_backend_cmux_version_check || return 1
+  fm_backend_cmux_ensure_running || return 1
+  title=$(fm_backend_cmux_secondmate_initial_title "$home")
+  scoped=$(fm_backend_cmux_scoped_title "$label")
+  dup=$(fm_backend_cmux_workspaces_all_windows | awk -F'\t' -v t="$title" '$2 == t { print $1; exit }')
+  if [ -n "$dup" ]; then
+    echo "error: cmux workspace '$title' already exists ($dup); tear the stale secondmate endpoint down first" >&2
+    return 1
+  fi
+  if pair=$(fm_backend_cmux_surface_for_title_anywhere "$scoped"); then
+    echo "error: cmux tab '$scoped' already exists (${pair% *}); tear the stale secondmate endpoint down first" >&2
+    return 1
+  fi
+  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$home" --focus false --id-format uuids 2>&1) || {
+    echo "error: cmux new-workspace failed for secondmate workspace '$title': $out" >&2
+    return 1
+  }
+  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
+  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for secondmate workspace '$title' after creation" >&2; return 1; }
+  sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
+  [ -n "$sfid" ] || { echo "error: could not resolve the default surface for secondmate workspace '$title' ($wsid)" >&2; return 1; }
+  if ! fm_backend_cmux_cli rename-tab --workspace "$wsid" --surface "$sfid" "$scoped" >/dev/null 2>&1; then
+    echo "error: could not rename the secondmate tab to '$scoped'; closing the new workspace (the scoped tab title is what routine ops and relaunch recovery verify the mate by)" >&2
+    fm_backend_cmux_close_workspace_safely "$wsid"
+    return 1
+  fi
+  printf '%s %s %s' "$wsid" "$sfid" "$title"
+}
+
+# fm_backend_cmux_meta_update: replace (or append) key=value lines in a task
+# meta file, atomically via tmp+mv. Small helper for the resolver's title
+# sync and post-relaunch id re-recording; every reader uses fm_meta_get
+# (last-value-wins) so re-ordering replaced keys to the end is safe.
+fm_backend_cmux_meta_update() {  # <meta-file> <key=value>...
+  local meta=$1 tmp kv cur
+  shift
+  [ -f "$meta" ] || return 1
+  tmp="$meta.tmp.$$"
+  cur=$(cat "$meta")
+  for kv in "$@"; do
+    cur=$(printf '%s\n' "$cur" | grep -v "^${kv%%=*}=" || true)
+  done
+  {
+    [ -z "$cur" ] || printf '%s\n' "$cur"
+    for kv in "$@"; do printf '%s\n' "$kv"; done
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$meta"
+}
+
+# fm_backend_cmux_surface_home_cwd_matches: every surface UUID in <workspace>
+# whose terminal's PASSIVE tty-derived cwd (tty from `cmux tree`, foreground
+# pid via ps, cwd via lsof - fm_backend_cmux_current_path's tier 1) resolves
+# to <home>, one per line. Passive tiers ONLY: the fingerprint scan runs
+# against workspaces not yet proven to be the mate's, so it must never type
+# into a candidate terminal (the active pwd-marker probe is forbidden here).
+fm_backend_cmux_surface_home_cwd_matches() {  # <workspace_id> <home-abs>
+  local wsid=$1 home=$2 home_real sfid tty pid cwd cwd_real
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || home_real=$home
+  while IFS= read -r sfid; do
+    [ -n "$sfid" ] || continue
+    tty=$(fm_backend_cmux_surface_tty "$wsid" "$sfid")
+    [ -n "$tty" ] || continue
+    pid=$(ps -t "$tty" -o pid=,stat= 2>/dev/null | awk '$2 ~ /\+/ { p=$1 } END { if (p) print p }')
+    [ -n "$pid" ] || continue
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    [ -n "$cwd" ] || continue
+    cwd_real=$(cd "$cwd" 2>/dev/null && pwd -P) || cwd_real=$cwd
+    [ "$cwd_real" = "$home_real" ] && printf '%s\n' "$sfid"
+  done < <(fm_backend_cmux_surface_ids "$wsid")
+}
+
+# fm_backend_cmux_secondmate_resolve: resolve a secondmate meta's endpoint to
+# a live "<workspace_id>:<surface_id>", syncing the recorded workspace title
+# and re-recording stale ids in the meta as a side effect. The recovery
+# ladder, strictly record-driven (this home's OWN recorded identity only):
+#   A. Recorded workspace id still live -> use it; re-sync the recorded title
+#      when the captain retitled it; re-resolve the mate's tab by id, then by
+#      its scoped title, then by home-cwd fingerprint WITHIN that workspace.
+#   B. Id gone (relaunch re-mints socket-reported workspace ids) -> match the
+#      last-synced recorded title across every window; a unique match is
+#      adopted, multiple matches tie-break on the home-cwd fingerprint.
+#   C. Scoped tab title (fm-<primary-home-label>-<id>) found anywhere - tab
+#      custom titles survive a relaunch via session restore (verified from
+#      the 0.64.20 source) - adopts its workspace.
+#   D. Fingerprint of last resort for a stale/duplicated title: a workspace
+#      whose creation cwd is the mate's home AND holding a surface whose
+#      passive tty-derived cwd is that home. Both conditions together keep a
+#      captain's stray tab that merely cd'd into the home from matching.
+# Exactly one candidate is required at every rung: multiple candidates refuse
+# loudly (rc 3) with the candidates on stderr - never guess, never claim
+# another home's workspace. No candidate at all is rc 2 (endpoint gone).
+# An unreachable/unauthenticated socket is rc 1 (nothing can be inspected).
+fm_backend_cmux_secondmate_resolve() {  # <meta-file>
+  local meta=$1 id scoped wsid sfid rec_title home window rows row cur_title cands title_cands n line updates
+  [ -f "$meta" ] || return 1
+  id=$(basename "$meta" .meta)
+  scoped=$(fm_backend_cmux_scoped_title "fm-$id")
+  wsid=$(fm_meta_get "$meta" cmux_workspace_id)
+  sfid=$(fm_meta_get "$meta" cmux_surface_id)
+  if [ -z "$wsid" ] || [ -z "$sfid" ]; then
+    window=$(fm_meta_get "$meta" window)
+    if fm_backend_cmux_parse_target "$window"; then
+      wsid=$FM_BACKEND_CMUX_WORKSPACE
+      sfid=$FM_BACKEND_CMUX_SURFACE
+    fi
+  fi
+  rec_title=$(fm_meta_get "$meta" cmux_workspace_title)
+  home=$(fm_meta_get "$meta" home)
+  if [ "$(fm_backend_cmux_ping_state)" != ok ]; then
+    echo "error: cmux socket is unreachable; secondmate $id endpoint cannot be inspected" >&2
+    return 1
+  fi
+  rows=$(fm_backend_cmux_workspaces_all_windows)
+  row=""
+  if [ -n "$wsid" ]; then
+    row=$(printf '%s\n' "$rows" | awk -F'\t' -v w="$wsid" '$1 == w { print; exit }')
+  fi
+  if [ -z "$row" ] && [ -n "$rec_title" ]; then
+    cands=$(printf '%s\n' "$rows" | awk -F'\t' -v t="$rec_title" '$2 == t')
+    n=$(printf '%s' "$cands" | grep -c . || true)
+    if [ "$n" -gt 1 ]; then
+      # A duplicated recorded title stays AMBIGUOUS unless the home-cwd
+      # fingerprint singles out exactly one candidate: eliminating every
+      # candidate is not "gone" - one of them may still be the live mate.
+      title_cands=$cands
+      cands=$(printf '%s\n' "$cands" | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        if [ -n "$(fm_backend_cmux_surface_home_cwd_matches "${line%%$'\t'*}" "$home" | head -1)" ]; then
+          printf '%s\n' "$line"
+        fi
+      done)
+      n=$(printf '%s' "$cands" | grep -c . || true)
+      if [ "$n" -ne 1 ]; then
+        echo "error: secondmate $id title '$rec_title' matches multiple cmux workspaces and the home-cwd fingerprint could not single one out; refusing to guess. Candidates:" >&2
+        printf '%s\n' "$title_cands" | awk -F'\t' '{ print "  " $1 "  title=" $2 "  cwd=" $3 }' >&2
+        return 3
+      fi
+    fi
+    [ "$n" -eq 1 ] && row=$(printf '%s\n' "$cands" | head -1)
+  fi
+  if [ -z "$row" ]; then
+    cands=$(printf '%s\n' "$rows" | while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      if [ -n "$(fm_backend_cmux_surface_by_title "${line%%$'\t'*}" "$scoped")" ]; then
+        printf '%s\n' "$line"
+      fi
+    done)
+    n=$(printf '%s' "$cands" | grep -c . || true)
+    if [ "$n" -gt 1 ]; then
+      echo "error: secondmate $id scoped tab title '$scoped' matches surfaces in $n cmux workspaces; refusing to guess. Candidates:" >&2
+      printf '%s\n' "$cands" | awk -F'\t' '{ print "  " $1 "  title=" $2 "  cwd=" $3 }' >&2
+      return 3
+    fi
+    [ "$n" -eq 1 ] && row=$(printf '%s\n' "$cands" | head -1)
+  fi
+  if [ -z "$row" ] && [ -n "$home" ]; then
+    cands=$(printf '%s\n' "$rows" | while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      [ "$(printf '%s\n' "$line" | cut -f3)" = "$home" ] || continue
+      if [ -n "$(fm_backend_cmux_surface_home_cwd_matches "${line%%$'\t'*}" "$home" | head -1)" ]; then
+        printf '%s\n' "$line"
+      fi
+    done)
+    n=$(printf '%s' "$cands" | grep -c . || true)
+    if [ "$n" -gt 1 ]; then
+      echo "error: secondmate $id home-cwd fingerprint ($home) matches $n cmux workspaces; refusing to guess. Candidates:" >&2
+      printf '%s\n' "$cands" | awk -F'\t' '{ print "  " $1 "  title=" $2 "  cwd=" $3 }' >&2
+      return 3
+    fi
+    [ "$n" -eq 1 ] && row=$(printf '%s\n' "$cands" | head -1)
+  fi
+  [ -n "$row" ] || return 2
+  wsid=${row%%$'\t'*}
+  cur_title=$(printf '%s\n' "$row" | cut -f2)
+  if ! fm_backend_cmux_surface_exists "$wsid" "$sfid"; then
+    sfid=$(fm_backend_cmux_surface_by_title "$wsid" "$scoped")
+    [ -n "$sfid" ] || sfid=$(fm_backend_cmux_surface_home_cwd_matches "$wsid" "$home" | head -1)
+    if [ -z "$sfid" ]; then
+      echo "error: secondmate $id workspace $wsid was identified but the mate's own tab could not be (no recorded id, scoped title '$scoped', or home-cwd match); refusing to guess" >&2
+      return 3
+    fi
+  fi
+  updates=""
+  [ "$(fm_meta_get "$meta" cmux_workspace_id)" = "$wsid" ] || updates=1
+  [ "$(fm_meta_get "$meta" cmux_surface_id)" = "$sfid" ] || updates=1
+  [ "$rec_title" = "$cur_title" ] || updates=1
+  if [ -n "$updates" ]; then
+    fm_backend_cmux_meta_update "$meta" \
+      "window=$wsid:$sfid" \
+      "cmux_workspace_id=$wsid" \
+      "cmux_surface_id=$sfid" \
+      "cmux_workspace_title=$cur_title" || {
+      echo "error: could not update secondmate $id meta after endpoint resolution" >&2
+      return 1
+    }
+  fi
+  printf '%s:%s' "$wsid" "$sfid"
+}
+
+# fm_backend_cmux_secondmate_kill: close a secondmate's WHOLE dedicated
+# workspace, identified through the resolver above (id-primary, synced title,
+# fingerprint), never by title alone and never another home's workspace. A
+# gone endpoint (rc 2) is a successful no-op; an ambiguous or uninspectable
+# endpoint refuses rather than closing anything.
+fm_backend_cmux_secondmate_kill() {  # <meta-file>
+  local meta=$1 target rc
+  target=$(fm_backend_cmux_secondmate_resolve "$meta")
+  rc=$?
+  case "$rc" in
+    0) fm_backend_cmux_close_workspace_safely "${target%%:*}" ;;
+    2) return 0 ;;
+    *)
+      echo "error: refusing cmux secondmate cleanup for $(basename "$meta" .meta): endpoint could not be safely identified" >&2
+      return 1
+      ;;
+  esac
+}
+
+# fm_backend_cmux_agent_alive: CONFIDENT liveness of a live harness-agent
+# PROCESS under <target>, for bin/fm-backend.sh's fm_backend_agent_alive
+# (the session-start secondmate-liveness sweep's probe; docs/cmux-backend.md
+# "Secondmate support" records the empirical basis). Classification:
+#   - socket `down` (app not running) -> dead: cmux hosts every task pty, so
+#     no cmux-backed agent process can exist without the app.
+#   - denied/unauth/error sockets -> unknown: nothing can be inspected, and
+#     an uninspectable endpoint must never read as confidently dead.
+#   - live surface with a started terminal: classify EVERY process on the
+#     surface's tty (never just the last foreground entry - a live agent's
+#     tool child, e.g. a bash it shelled out to, can transiently be the
+#     foreground process and must not read as a dead shell):
+#       any verified-harness process name -> alive;
+#       nothing but bare shells and the resident /usr/bin/login wrapper cmux
+#       parents every tab shell through -> dead (the agent exited);
+#       anything else (pi's bare "node", an editor, an unreadable ps)
+#                                       -> unknown, same posture as tmux's
+#     classifier (docs/tmux-backend.md "Agent liveness probe").
+#   - a fresh surface whose terminal never started (no tty), or a target that
+#     cannot be re-resolved -> unknown: stale ids are a RECOVERY problem
+#     (fm_backend_cmux_secondmate_resolve), not proof of death.
+fm_backend_cmux_agent_alive() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} state tty comms line base only_shells=1 any=0
+  state=$(fm_backend_cmux_ping_state)
+  case "$state" in
+    ok) : ;;
+    down) printf 'dead'; return 0 ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  fm_backend_cmux_target_ready "$target" "$expected_label" || { printf 'unknown'; return 0; }
+  tty=$(fm_backend_cmux_surface_tty "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE")
+  [ -n "$tty" ] || { printf 'unknown'; return 0; }
+  comms=$(ps -t "$tty" -o comm= 2>/dev/null)
+  while IFS= read -r line; do
+    line=${line#-}
+    base=${line##*/}
+    [ -n "$base" ] || continue
+    any=1
+    case "$base" in
+      *claude*|*codex*|*opencode*|*grok*|*copilot*) printf 'alive'; return 0 ;;
+      zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish|login) : ;;
+      *) only_shells=0 ;;
+    esac
+  done <<EOF
+$comms
+EOF
+  [ "$any" -eq 1 ] || { printf 'unknown'; return 0; }
+  if [ "$only_shells" -eq 1 ]; then printf 'dead'; else printf 'unknown'; fi
+}
+
 # fm_backend_cmux_busy_state: semantic busy state. cmux tracks per-workspace
 # agent activity through its agent hooks (the sidebar's working/waiting
 # indicators), but the verified workspace list exposes NO stable

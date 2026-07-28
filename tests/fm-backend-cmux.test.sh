@@ -119,43 +119,9 @@ cmux_read_screen_response() {  # <dir> <n> <text>
   jq -n --arg t "$3" '{text:$t}' > "$1/responses/$2.out"
 }
 
-cmux_expected_root_hash() {  # <root>
-  local root real
-  root=$1
-  real=$(cd "$root" && pwd -P) || return 1
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,8)}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$real" | sha256sum | awk '{print substr($1,1,8)}'
-  else
-    printf '%s' "$real" | cksum | awk '{printf "%08x", $1}'
-  fi
-}
-
-cmux_expected_home_label() {  # [home] [root]
-  local home=${1:-$ROOT} root=${2:-$ROOT} marker id prefix
-  marker="$home/.fm-secondmate-home"
-  if [ -f "$marker" ]; then
-    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
-    if [ -n "$id" ]; then
-      prefix="2ndmate-$id"
-    else
-      prefix="firstmate"
-    fi
-  else
-    prefix="firstmate"
-  fi
-  printf '%s-%s' "$prefix" "$(cmux_expected_root_hash "$root")"
-}
-
-cmux_expected_scoped_title() {  # <fm-task-label> [home] [root]
-  local label=$1 home=${2:-$ROOT} root=${3:-$ROOT} rest
-  case "$label" in
-    fm-*) rest=${label#fm-} ;;
-    *) rest=$label ;;
-  esac
-  printf 'fm-%s-%s' "$(cmux_expected_home_label "$home" "$root")" "$rest"
-}
+# cmux_expected_root_hash / cmux_expected_home_label / cmux_expected_scoped_title
+# live in tests/cmux-fake-lib.sh (sourced in the secondmate section below),
+# shared with the other cmux suites.
 
 cmux_assert_call_order() {
   local log=$1 before=$2 after=$3 msg=$4 before_line after_line
@@ -1657,16 +1623,325 @@ test_list_live_includes_tab_mode_tasks() {
 
 # --- fm-spawn.sh: --secondmate refuses backend=cmux --------------------------
 
-test_secondmate_spawn_refuses_cmux_backend() {
-  local dir state data config projects out status
-  dir="$TMP_ROOT/secondmate-refuse"; state="$dir/state"; data="$dir/data"; config="$dir/config"; projects="$dir/projects"
-  mkdir -p "$state" "$data" "$config" "$projects"
-  out=$( FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_PROJECTS_OVERRIDE="$projects" \
-    "$ROOT/bin/fm-spawn.sh" sm-cmux-test --secondmate --backend cmux 2>&1 )
+# --- secondmate support (docs/cmux-backend.md "Secondmate support") ----------
+# These flows are multi-phase (create -> resolve -> kill -> respawn), so they
+# use the STATEFUL fake cmux from tests/cmux-fake-lib.sh instead of the
+# ordered canned-response fake above.
+
+# shellcheck source=tests/cmux-fake-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/cmux-fake-lib.sh"
+
+# make_sm_home <dir> <id>: a minimal seeded-looking secondmate home fixture
+# (marker, AGENTS.md, bin/, charter) that fm-spawn.sh's home validation and
+# the adapter's initial-title derivation both accept.
+make_sm_home() {  # <dir> <id> -> echoes home path
+  local dir=$1 id=$2 home
+  home="$dir/sm-home-$id"
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' "$home"
+}
+
+# write_sm_meta <meta> <ws> <sf> <title> <home>: a cmux secondmate meta shaped
+# like fm-spawn.sh writes it.
+write_sm_meta() {
+  local meta=$1 ws=$2 sf=$3 title=$4 home=$5
+  {
+    printf 'window=%s:%s\n' "$ws" "$sf"
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'backend=cmux\n'
+    printf 'cmux_workspace_id=%s\n' "$ws"
+    printf 'cmux_surface_id=%s\n' "$sf"
+    printf 'cmux_workspace_title=%s\n' "$title"
+    printf 'home=%s\n' "$home"
+  } > "$meta"
+}
+
+run_cmux_sm() {  # <dir> <fakebin> <shell-snippet> [VAR=VAL...] -- [<bash-args>...]
+  local dir=$1 fb=$2 snippet=$3 envs=()
+  shift 3
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+  [ "${1:-}" != "--" ] || shift
+  # shellcheck disable=SC2016  # $0 expands in the child bash, not here
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_STATE="$dir/cmux-state" \
+    env "${envs[@]+"${envs[@]}"}" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source cmux; '"$snippet" "$ROOT" "$@"
+}
+
+# The positional parameters expand in the CHILD bash run_cmux_sm spawns, so
+# these snippets are deliberately single-quoted.
+# shellcheck disable=SC2016
+SNIP_CREATE='fm_backend_cmux_create_secondmate "$1" "$2"'
+# shellcheck disable=SC2016
+SNIP_RESOLVE='fm_backend_cmux_secondmate_resolve "$1"'
+# shellcheck disable=SC2016
+SNIP_KILL='fm_backend_cmux_secondmate_kill "$1"'
+
+test_secondmate_create_dedicated_workspace() {
+  local dir fb home out status expected_title expected_scoped log
+  dir="$TMP_ROOT/sm-create"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate1)
+  expected_title="fm-$(cmux_expected_home_label "$home" "$home")"
+  expected_scoped=$(cmux_expected_scoped_title fm-mate1)
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" -- "$home" fm-mate1)
   status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn.sh should refuse a --secondmate spawn with --backend cmux"
-  assert_contains "$out" "does not support --secondmate" "fm-spawn.sh did not report the cmux secondmate refusal"
-  pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
+  expect_code 0 "$status" "create_secondmate should succeed on an empty app"
+  case "$out" in
+    "WS-NEW-1 SF-NEW-1 $expected_title") : ;;
+    *) fail "create_secondmate should echo '<ws> <sf> <initial-title>', got '$out' (expected title $expected_title)" ;;
+  esac
+  log=$(cat "$dir/log")
+  assert_contains "$log" "new-workspace$(printf '\x1f')--name$(printf '\x1f')$expected_title$(printf '\x1f')--cwd$(printf '\x1f')$home" \
+    "the mate workspace must be created at the mate's home with the per-home initial title"
+  assert_contains "$log" "rename-tab" "the mate's tab must be renamed to the primary-scoped task title"
+  grep -q "	SF-NEW-1	$expected_scoped	" "$dir/cmux-state/surfaces.tsv" \
+    || fail "the mate's tab title should now be the scoped task title '$expected_scoped': $(cat "$dir/cmux-state/surfaces.tsv")"
+
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" -- "$home" fm-mate1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a second create for the same mate should refuse the duplicate initial title"
+  assert_contains "$out" "already exists" "the duplicate refusal should name the collision"
+  pass "fm_backend_cmux_create_secondmate: dedicated workspace at the mate's home, scoped tab rename, duplicate refusal"
+}
+
+test_secondmate_resolve_syncs_retitled_workspace() {
+  local dir fb home meta out status
+  dir="$TMP_ROOT/sm-resolve-sync"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate2)
+  cmux_state_add_workspace "$dir/cmux-state" WS-A "captains pick" "$home" SF-A "$(cmux_expected_scoped_title fm-mate2)"
+  meta="$dir/mate2.meta"
+  write_sm_meta "$meta" WS-A SF-A "fm-2ndmate-mate2-old" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_RESOLVE" -- "$meta")
+  status=$?
+  expect_code 0 "$status" "resolve should succeed for a live recorded workspace id"
+  [ "$out" = "WS-A:SF-A" ] || fail "resolve should echo the live target, got '$out'"
+  assert_contains "$(cat "$meta")" "cmux_workspace_title=captains pick" \
+    "a captain retitle must be synced into the meta on the supervision touch"
+  pass "fm_backend_cmux_secondmate_resolve: id-primary resolution syncs a captain retitle into the meta"
+}
+
+test_secondmate_resolve_recovers_by_recorded_title() {
+  local dir fb home meta out status scoped
+  dir="$TMP_ROOT/sm-resolve-title"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate3)
+  scoped=$(cmux_expected_scoped_title fm-mate3)
+  # Relaunch shape: fresh ids, same restored custom title and tab title.
+  cmux_state_add_workspace "$dir/cmux-state" WS-FRESH "my mate" "$home" SF-FRESH "$scoped"
+  meta="$dir/mate3.meta"
+  write_sm_meta "$meta" WS-STALE SF-STALE "my mate" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_RESOLVE" -- "$meta")
+  status=$?
+  expect_code 0 "$status" "resolve should recover a relaunch-stale id by the recorded title"
+  [ "$out" = "WS-FRESH:SF-FRESH" ] || fail "resolve should adopt the title-matched workspace, got '$out'"
+  assert_contains "$(cat "$meta")" "window=WS-FRESH:SF-FRESH" "the refreshed ids must be re-recorded in window="
+  assert_contains "$(cat "$meta")" "cmux_workspace_id=WS-FRESH" "the refreshed workspace id must be re-recorded"
+  assert_contains "$(cat "$meta")" "cmux_surface_id=SF-FRESH" "the refreshed surface id must be re-recorded"
+  pass "fm_backend_cmux_secondmate_resolve: relaunch recovery by last-synced title re-records fresh ids"
+}
+
+test_secondmate_resolve_recovers_by_scoped_tab_title() {
+  local dir fb home meta out status scoped
+  dir="$TMP_ROOT/sm-resolve-tab"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate4)
+  scoped=$(cmux_expected_scoped_title fm-mate4)
+  # Renamed-then-quit race: the restored workspace title matches NOTHING the
+  # meta recorded, but the restored tab still carries the scoped title.
+  cmux_state_add_workspace "$dir/cmux-state" WS-R "renamed after last sync" "$home" SF-R "$scoped"
+  meta="$dir/mate4.meta"
+  write_sm_meta "$meta" WS-STALE SF-STALE "old recorded title" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_RESOLVE" -- "$meta")
+  status=$?
+  expect_code 0 "$status" "resolve should recover via the scoped tab title when the workspace title is stale"
+  [ "$out" = "WS-R:SF-R" ] || fail "resolve should adopt the scoped-tab workspace, got '$out'"
+  assert_contains "$(cat "$meta")" "cmux_workspace_title=renamed after last sync" \
+    "the workspace's CURRENT title must become the new synced title"
+  pass "fm_backend_cmux_secondmate_resolve: scoped tab title recovers a stale recorded workspace title"
+}
+
+test_secondmate_resolve_fingerprint_fallback() {
+  local dir fb home meta out status
+  dir="$TMP_ROOT/sm-resolve-fp"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate5)
+  # Worst case: stale ids, stale title, and the tab title was lost too - only
+  # the home-cwd fingerprint identifies the mate's workspace.
+  cmux_state_add_workspace "$dir/cmux-state" WS-F "unrelated title" "$home" SF-F "zsh"
+  cmux_state_set_tty "$dir/cmux-state" SF-F ttys009
+  meta="$dir/mate5.meta"
+  write_sm_meta "$meta" WS-STALE SF-STALE "old title" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_RESOLVE" \
+    FM_FAKE_PS_TTY_PIDSTAT='1234 S+' FM_FAKE_LSOF_CWD="$home" -- "$meta")
+  status=$?
+  expect_code 0 "$status" "resolve should fall back to the home-cwd fingerprint"
+  [ "$out" = "WS-F:SF-F" ] || fail "resolve should adopt the fingerprinted workspace and surface, got '$out'"
+  assert_contains "$(cat "$meta")" "cmux_workspace_title=unrelated title" \
+    "the fingerprinted workspace's current title must be synced as the new anchor"
+  pass "fm_backend_cmux_secondmate_resolve: home-cwd fingerprint (passive tiers) recovers a stale/lost title"
+}
+
+test_secondmate_resolve_ambiguous_refuses() {
+  local dir fb home meta out err status
+  dir="$TMP_ROOT/sm-resolve-ambig"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate6)
+  cmux_state_add_workspace "$dir/cmux-state" WS-1 "shared title" "/elsewhere" SF-1 "zsh"
+  cmux_state_add_workspace "$dir/cmux-state" WS-2 "shared title" "/elsewhere-too" SF-2 "zsh"
+  meta="$dir/mate6.meta"
+  write_sm_meta "$meta" WS-STALE SF-STALE "shared title" "$home"
+  cp "$meta" "$meta.orig"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_RESOLVE" -- "$meta" 2>"$dir/err")
+  status=$?
+  err=$(cat "$dir/err")
+  expect_code 3 "$status" "two title matches with no fingerprint tiebreak must refuse (rc 3)"
+  [ -z "$out" ] || fail "an ambiguous resolve must echo no target, got '$out'"
+  assert_contains "$err" "WS-1" "the refusal must report candidate WS-1"
+  assert_contains "$err" "WS-2" "the refusal must report candidate WS-2"
+  cmp -s "$meta" "$meta.orig" || fail "an ambiguous resolve must leave the meta untouched"
+  pass "fm_backend_cmux_secondmate_resolve: duplicated titles refuse loudly with candidates, never guess"
+}
+
+test_secondmate_resolve_gone() {
+  local dir fb home meta out status
+  dir="$TMP_ROOT/sm-resolve-gone"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate7)
+  meta="$dir/mate7.meta"
+  write_sm_meta "$meta" WS-STALE SF-STALE "gone title" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_RESOLVE" -- "$meta" 2>/dev/null)
+  status=$?
+  expect_code 2 "$status" "no id, title, tab, or fingerprint match should report the endpoint gone (rc 2)"
+  [ -z "$out" ] || fail "a gone endpoint must echo no target, got '$out'"
+  pass "fm_backend_cmux_secondmate_resolve: a definitively absent endpoint reports gone"
+}
+
+test_secondmate_kill_closes_whole_workspace() {
+  local dir fb home meta status
+  dir="$TMP_ROOT/sm-kill"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate8)
+  cmux_state_add_workspace "$dir/cmux-state" WS-K "any title" "$home" SF-K "$(cmux_expected_scoped_title fm-mate8)"
+  meta="$dir/mate8.meta"
+  write_sm_meta "$meta" WS-K SF-K "any title" "$home"
+  run_cmux_sm "$dir" "$fb" "$SNIP_KILL" -- "$meta" >/dev/null 2>&1
+  status=$?
+  expect_code 0 "$status" "secondmate kill should succeed for a live identified workspace"
+  grep -q "^WS-K	" "$dir/cmux-state/workspaces.tsv" && fail "the mate's whole workspace must be closed"
+  run_cmux_sm "$dir" "$fb" "$SNIP_KILL" -- "$meta" >/dev/null 2>&1
+  status=$?
+  expect_code 0 "$status" "a second kill (endpoint already gone) must be a successful no-op"
+  pass "fm_backend_cmux_secondmate_kill: closes the mate's whole dedicated workspace; gone is a no-op"
+}
+
+test_secondmate_kill_refuses_ambiguous() {
+  local dir fb home meta status
+  dir="$TMP_ROOT/sm-kill-ambig"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate9)
+  cmux_state_add_workspace "$dir/cmux-state" WS-1 "same" "/a" SF-1 "zsh"
+  cmux_state_add_workspace "$dir/cmux-state" WS-2 "same" "/b" SF-2 "zsh"
+  meta="$dir/mate9.meta"
+  write_sm_meta "$meta" WS-STALE SF-STALE "same" "$home"
+  run_cmux_sm "$dir" "$fb" "$SNIP_KILL" -- "$meta" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "an ambiguous endpoint must refuse the kill"
+  grep -q "^WS-1	" "$dir/cmux-state/workspaces.tsv" || fail "candidate WS-1 must be left untouched"
+  grep -q "^WS-2	" "$dir/cmux-state/workspaces.tsv" || fail "candidate WS-2 must be left untouched"
+  pass "fm_backend_cmux_secondmate_kill: an ambiguous endpoint refuses and closes nothing"
+}
+
+test_spawn_secondmate_cmux_end_to_end() {
+  local dir fb pd home out status meta expected_title expected_scoped
+  dir="$TMP_ROOT/sm-spawn"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  pd="$dir/primary"
+  mkdir -p "$pd/state" "$pd/data" "$pd/config" "$pd/projects"
+  printf 'claude\n' > "$pd/config/secondmate-harness"
+  home=$(make_sm_home "$dir" matee2e)
+  expected_title="fm-$(cmux_expected_home_label "$home" "$home")"
+  expected_scoped=$(cmux_expected_scoped_title fm-matee2e "$pd" "$ROOT")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_STATE="$dir/cmux-state" \
+    FM_HOME="$pd" FM_STATE_OVERRIDE="$pd/state" FM_DATA_OVERRIDE="$pd/data" \
+    FM_CONFIG_OVERRIDE="$pd/config" FM_PROJECTS_OVERRIDE="$pd/projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" matee2e "$home" --secondmate --backend cmux 2>&1 )
+  status=$?
+  expect_code 0 "$status" "fm-spawn.sh --secondmate --backend cmux should succeed: $out"
+  assert_contains "$out" "spawned matee2e" "spawn should report success"
+  assert_contains "$out" "kind=secondmate" "spawn should report kind=secondmate"
+  assert_contains "$out" "window=WS-NEW-1:SF-NEW-1" "spawn should report the mate's workspace:surface target"
+  meta="$pd/state/matee2e.meta"
+  [ -f "$meta" ] || fail "spawn must write the secondmate meta"
+  assert_contains "$(cat "$meta")" "backend=cmux" "meta must record backend=cmux"
+  assert_contains "$(cat "$meta")" "cmux_workspace_id=WS-NEW-1" "meta must record the mate workspace id"
+  assert_contains "$(cat "$meta")" "cmux_surface_id=SF-NEW-1" "meta must record the mate surface id"
+  assert_contains "$(cat "$meta")" "cmux_workspace_title=$expected_title" "meta must record the initial synced title"
+  assert_contains "$(cat "$meta")" "home=$(cd "$home" && pwd -P)" "meta must record the mate home"
+  grep -q "	SF-NEW-1	$expected_scoped	" "$dir/cmux-state/surfaces.tsv" \
+    || fail "the mate's tab must carry the primary-scoped title '$expected_scoped': $(cat "$dir/cmux-state/surfaces.tsv")"
+  assert_contains "$(cat "$dir/log")" "send-key" "the launch must have been submitted into the mate's tab"
+  pass "fm-spawn.sh: a cmux --secondmate spawn creates the dedicated workspace and records full identity"
+}
+
+test_spawn_secondmate_uses_config_secondmate_backend() {
+  local dir fb pd home out status meta
+  dir="$TMP_ROOT/sm-spawn-config"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  pd="$dir/primary"
+  mkdir -p "$pd/state" "$pd/data" "$pd/config" "$pd/projects"
+  printf 'claude\n' > "$pd/config/secondmate-harness"
+  printf 'cmux\n' > "$pd/config/secondmate-backend"
+  home=$(make_sm_home "$dir" mateconf)
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_STATE="$dir/cmux-state" \
+    FM_HOME="$pd" FM_STATE_OVERRIDE="$pd/state" FM_DATA_OVERRIDE="$pd/data" \
+    FM_CONFIG_OVERRIDE="$pd/config" FM_PROJECTS_OVERRIDE="$pd/projects" FM_SPAWN_NO_GUARD=1 \
+    FM_BACKEND=tmux \
+    "$ROOT/bin/fm-spawn.sh" mateconf "$home" --secondmate 2>&1 )
+  status=$?
+  expect_code 0 "$status" "a config/secondmate-backend=cmux spawn should succeed with no --backend flag: $out"
+  meta="$pd/state/mateconf.meta"
+  assert_contains "$(cat "$meta")" "backend=cmux" \
+    "config/secondmate-backend must outrank FM_BACKEND for a secondmate spawn"
+  pass "fm-spawn.sh: config/secondmate-backend selects the secondmate backend over FM_BACKEND"
+}
+
+test_spawn_secondmate_reuses_meta_backend_on_respawn() {
+  local dir fb pd home out status meta
+  dir="$TMP_ROOT/sm-spawn-respawn"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  pd="$dir/primary"
+  mkdir -p "$pd/state" "$pd/data" "$pd/config" "$pd/projects"
+  printf 'claude\n' > "$pd/config/secondmate-harness"
+  # A LATER config change to tmux must not migrate an existing cmux mate.
+  printf 'tmux\n' > "$pd/config/secondmate-backend"
+  home=$(make_sm_home "$dir" materesp)
+  meta="$pd/state/materesp.meta"
+  write_sm_meta "$meta" WS-DEAD SF-DEAD "old title" "$home"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_STATE="$dir/cmux-state" \
+    FM_HOME="$pd" FM_STATE_OVERRIDE="$pd/state" FM_DATA_OVERRIDE="$pd/data" \
+    FM_CONFIG_OVERRIDE="$pd/config" FM_PROJECTS_OVERRIDE="$pd/projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" materesp --secondmate 2>&1 )
+  status=$?
+  expect_code 0 "$status" "a respawn should reuse the meta-recorded cmux backend: $out"
+  assert_contains "$(cat "$meta")" "backend=cmux" \
+    "the respawned mate must stay on its recorded backend despite config/secondmate-backend=tmux"
+  pass "fm-spawn.sh: a secondmate respawn reuses the backend recorded in the mate's meta"
 }
 
 # shellcheck source=bin/fm-backend.sh
@@ -1756,4 +2031,15 @@ test_busy_state_maps_agent_status_when_task_owned
 test_busy_state_unknown_without_field
 test_busy_state_unknown_for_tab_container
 test_list_live_includes_tab_mode_tasks
-test_secondmate_spawn_refuses_cmux_backend
+test_secondmate_create_dedicated_workspace
+test_secondmate_resolve_syncs_retitled_workspace
+test_secondmate_resolve_recovers_by_recorded_title
+test_secondmate_resolve_recovers_by_scoped_tab_title
+test_secondmate_resolve_fingerprint_fallback
+test_secondmate_resolve_ambiguous_refuses
+test_secondmate_resolve_gone
+test_secondmate_kill_closes_whole_workspace
+test_secondmate_kill_refuses_ambiguous
+test_spawn_secondmate_cmux_end_to_end
+test_spawn_secondmate_uses_config_secondmate_backend
+test_spawn_secondmate_reuses_meta_backend_on_respawn

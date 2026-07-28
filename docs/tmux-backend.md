@@ -7,7 +7,7 @@ This is the setup guide; for the shared runtime-backend abstraction and selectio
 
 tmux is a terminal multiplexer.
 Firstmate gives each crewmate its own tmux window inside a session, so you can attach and watch a task work, or type into its window to intervene directly.
-Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, Orca, or cmux) - it is the fully verified reference path for secondmate homes, while Orca and cmux are the backends that do not support secondmate spawns.
+Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, Orca, or cmux) - it is the fully verified reference path for secondmate homes, while Orca is the one backend that does not support secondmate spawns (cmux's design lives in [`docs/cmux-backend.md`](cmux-backend.md#secondmate-support)).
 
 ## Prerequisites
 
@@ -125,5 +125,5 @@ Resolving this would need either a `pi`-specific env marker inspectable from out
 
 ## Limitations
 
-None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
+None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca is the one backend without secondmate support (cmux's secondmate design lives in [`docs/cmux-backend.md`](cmux-backend.md#secondmate-support)).
 The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).

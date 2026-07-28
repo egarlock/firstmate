@@ -46,11 +46,16 @@ WS1=""
 WS2=""
 WS_H=""
 TAB_SF=""
+WS_M=""
+WS_M_TITLE=""
+SM_SCRATCH=""
 cleanup_all() {
   [ -z "$TAB_SF" ] || cmux_safe_close_surface "$WS_H" "$TAB_SF" "fm-test-tabtask"
   [ -z "$WS_H" ] || cmux_safe_close_workspace "$WS_H" "fm-test-tabhost"
   [ -z "$WS1" ] || cmux_safe_close_workspace "$WS1" "fm-test-smoke1"
   [ -z "$WS2" ] || cmux_safe_close_workspace "$WS2" "fm-test-smoke2"
+  [ -z "$WS_M" ] || cmux_safe_close_secondmate_workspace "$WS_M" "$WS_M_TITLE"
+  [ -z "$SM_SCRATCH" ] || rm -rf "$SM_SCRATCH"
 }
 trap cleanup_all EXIT
 
@@ -265,6 +270,106 @@ host_alive=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/
 [ -n "$host_alive" ] || fail "tab-mode kill must close ONLY the surface - the container workspace vanished"
 TAB_SF=""
 pass "real cmux: tab-mode kill closes only the task's surface and leaves the container workspace alive"
+
+# --- secondmate support: dedicated workspace, title sync, recovery, kill ------
+# Everything here is scoped to a scratch home whose marker id carries the
+# test- prefix, so the mate workspace's initial title is fm-2ndmate-test-*
+# and the guarded secondmate close applies (tests/cmux-test-safety.sh). No
+# real agent is launched; the mate's tab holds only its login shell.
+
+SM_SCRATCH=$(mktemp -d /tmp/fm-cmux-sm-smoke.XXXXXX)
+SM_ID="test-smk$$"
+SM_HOME="$SM_SCRATCH/home"
+mkdir -p "$SM_HOME/bin" "$SM_HOME/data" "$SM_HOME/state"
+printf '%s\n' "$SM_ID" > "$SM_HOME/.fm-secondmate-home"
+printf '# Firstmate\n' > "$SM_HOME/AGENTS.md"
+SM_HOME_REAL=$(cd "$SM_HOME" && pwd -P)
+
+SM_IDS=$(fm_backend_cmux_create_secondmate "$SM_HOME_REAL" "fm-$SM_ID") || fail "create_secondmate failed"
+read -r WS_M SF_M WS_M_TITLE <<EOF
+$SM_IDS
+EOF
+[ -n "$WS_M" ] && [ -n "$SF_M" ] && [ -n "$WS_M_TITLE" ] \
+  || fail "create_secondmate did not return '<ws> <sf> <title>' (got '$SM_IDS')"
+case "$WS_M_TITLE" in
+  fm-2ndmate-test-*) : ;;
+  *) fail "the mate workspace's initial title should derive from the test- marker id, got '$WS_M_TITLE'" ;;
+esac
+SM_SCOPED=$(fm_backend_cmux_scoped_title "fm-$SM_ID")
+sm_tab_title=$(fm_backend_cmux_cli list-pane-surfaces --workspace "$WS_M" --json --id-format uuids 2>/dev/null \
+  | jq -r --arg id "$SF_M" '.surfaces[]? | select(.id == $id) | .title')
+[ "$sm_tab_title" = "$SM_SCOPED" ] || fail "the mate's tab should carry the scoped title '$SM_SCOPED', got '${sm_tab_title:-<none>}'"
+pass "real cmux: create_secondmate makes a dedicated workspace at the mate home with the scoped tab title"
+
+SM_META="$SM_SCRATCH/$SM_ID.meta"
+{
+  printf 'window=%s:%s\n' "$WS_M" "$SF_M"
+  printf 'kind=secondmate\n'
+  printf 'harness=claude\n'
+  printf 'backend=cmux\n'
+  printf 'cmux_workspace_id=%s\n' "$WS_M"
+  printf 'cmux_surface_id=%s\n' "$SF_M"
+  printf 'cmux_workspace_title=%s\n' "$WS_M_TITLE"
+  printf 'home=%s\n' "$SM_HOME_REAL"
+} > "$SM_META"
+
+sm_target=$(fm_backend_cmux_secondmate_resolve "$SM_META") || fail "resolve failed on a live recorded id"
+[ "$sm_target" = "$WS_M:$SF_M" ] || fail "resolve should return the live recorded target, got '$sm_target'"
+pass "real cmux: secondmate_resolve confirms a live recorded endpoint by id"
+
+# A captain retitle (simulated with the CLI's own workspace rename verb) must
+# sync into the meta on the next supervision touch and never break routing.
+WS_M_RETITLE="fm-test-sm-retitled-$$"
+fm_backend_cmux_cli workspace rename "$WS_M" --title "$WS_M_RETITLE" >/dev/null 2>&1 \
+  || fail "cmux workspace rename failed (needed to simulate a captain retitle)"
+WS_M_TITLE=$WS_M_RETITLE
+sm_target=$(fm_backend_cmux_secondmate_resolve "$SM_META") || fail "resolve failed after a retitle"
+[ "$sm_target" = "$WS_M:$SF_M" ] || fail "resolve should keep the id-primary target after a retitle, got '$sm_target'"
+grep -q "^cmux_workspace_title=$WS_M_RETITLE$" "$SM_META" \
+  || fail "the retitle was not synced into the meta: $(cat "$SM_META")"
+pass "real cmux: a captain retitle is synced into the durable record on the next supervision touch"
+
+# Relaunch-shaped recovery: break the recorded ids and recover by the synced
+# title, then re-record the fresh (real) ids.
+fm_backend_cmux_meta_update "$SM_META" \
+  "window=BOGUS-WS:BOGUS-SF" "cmux_workspace_id=BOGUS-WS" "cmux_surface_id=BOGUS-SF" \
+  || fail "meta_update failed"
+sm_target=$(fm_backend_cmux_secondmate_resolve "$SM_META") || fail "resolve failed on stale ids"
+[ "$sm_target" = "$WS_M:$SF_M" ] || fail "resolve should recover stale ids by the synced title, got '$sm_target'"
+grep -q "^cmux_workspace_id=$WS_M$" "$SM_META" || fail "recovery did not re-record the live workspace id"
+pass "real cmux: stale recorded ids recover by last-synced title and re-record the live ids"
+
+# Agent liveness: wake the lazily-started terminal, then classify - a bare
+# login shell must read as confidently dead (no agent was ever launched).
+fm_backend_cmux_send_key "$WS_M:$SF_M" Enter || fail "wake Enter failed"
+sleep 2
+sm_alive=$(fm_backend_cmux_agent_alive "$WS_M:$SF_M")
+[ "$sm_alive" = dead ] || fail "a woken mate tab holding only its shell should classify as dead, got '$sm_alive'"
+pass "real cmux: agent_alive reads the surface tty's processes and calls a bare shell confidently dead"
+
+# Fingerprint fallback: lose BOTH the recorded title and the scoped tab title,
+# then recover purely by the home-cwd fingerprint (passive tiers).
+fm_backend_cmux_cli rename-tab --workspace "$WS_M" --surface "$SF_M" "plain tab" >/dev/null 2>&1 \
+  || fail "rename-tab away from the scoped title failed"
+fm_backend_cmux_meta_update "$SM_META" \
+  "window=BOGUS-WS:BOGUS-SF" "cmux_workspace_id=BOGUS-WS" "cmux_surface_id=BOGUS-SF" \
+  "cmux_workspace_title=totally-forgotten-title" \
+  || fail "meta_update failed"
+sm_target=$(fm_backend_cmux_secondmate_resolve "$SM_META") || fail "fingerprint resolve failed"
+[ "$sm_target" = "$WS_M:$SF_M" ] || fail "resolve should recover by the home-cwd fingerprint, got '$sm_target'"
+pass "real cmux: the home-cwd fingerprint recovers a mate whose titles were all lost, without typing into any terminal"
+
+# Kill: the meta-driven secondmate kill closes the WHOLE dedicated workspace.
+cmux_secondmate_refuse_if_unsafe "$WS_M" "$WS_M_RETITLE" \
+  || fail "safety pre-flight refused our own test mate workspace"
+fm_backend_cmux_secondmate_kill "$SM_META" || fail "secondmate kill failed"
+sleep 0.5
+sm_gone=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
+  | jq -r --arg id "$WS_M" '.workspaces[]? | select(.id == $id) | .id')
+[ -z "$sm_gone" ] || fail "secondmate kill did not close the mate's workspace"
+WS_M=""
+fm_backend_cmux_secondmate_kill "$SM_META" || fail "a second kill (gone endpoint) must be a successful no-op"
+pass "real cmux: secondmate kill closes the mate's whole workspace via identity checks and is idempotent"
 
 cleanup_all
 trap - EXIT

@@ -68,6 +68,12 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+# Backends with a verified --secondmate launch design: tmux (reference), herdr
+# (workspace-per-home), zellij (home-scoped titles), and cmux (dedicated
+# workspace per mate with id-primary + synced-title recovery;
+# docs/cmux-backend.md "Secondmate support"). orca stays refused until a
+# per-home design exists for it.
+FM_BACKEND_SECONDMATE_SPAWN="tmux herdr zellij cmux"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -276,6 +282,33 @@ fm_backend_name() {
   printf 'tmux'
 }
 
+# fm_backend_secondmate_name: resolve the backend for a NEW secondmate spawn,
+# absent an explicit per-spawn --backend and an existing meta to reuse (both
+# owned by fm-spawn.sh, which resolves: explicit --backend, then the backend
+# recorded in the mate's meta on a respawn, then this function). The first
+# non-empty line of local gitignored config/secondmate-backend wins when it is
+# not "default"; absent or "default" falls through to fm_backend_name's
+# existing resolution (FM_BACKEND -> config/backend -> auto-detect -> tmux).
+# The primary's own setting, mirroring config/secondmate-harness: never
+# inherited into secondmate homes, because secondmates do not spawn
+# secondmates.
+fm_backend_secondmate_name() {
+  local line v
+  if [ -f "$FM_BACKEND_CONFIG_DIR/secondmate-backend" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      v=$(printf '%s' "$line" | tr -d '[:space:]')
+      if [ -n "$v" ]; then
+        if [ "$v" != default ]; then
+          printf '%s' "$v"
+          return 0
+        fi
+        break
+      fi
+    done < "$FM_BACKEND_CONFIG_DIR/secondmate-backend"
+  fi
+  fm_backend_name
+}
+
 # fm_backend_validate: refuse an unknown backend LOUDLY. Silent on success.
 fm_backend_validate() {  # <name>
   local name=$1
@@ -291,6 +324,16 @@ fm_backend_validate_spawn() {  # <name>
   fm_backend_validate "$name" || return 1
   fm_backend_list_contains "$FM_BACKEND_SPAWN" "$name" && return 0
   echo "error: backend '$name' does not support task spawning yet (spawn-supported: $FM_BACKEND_SPAWN)" >&2
+  return 1
+}
+
+# fm_backend_validate_secondmate_spawn: refuse a backend with no verified
+# --secondmate launch design LOUDLY. Silent on success.
+fm_backend_validate_secondmate_spawn() {  # <name>
+  local name=$1
+  fm_backend_validate_spawn "$name" || return 1
+  fm_backend_list_contains "$FM_BACKEND_SECONDMATE_SPAWN" "$name" && return 0
+  echo "error: backend=$name does not support --secondmate spawns yet (secondmate-supported: $FM_BACKEND_SECONDMATE_SPAWN)" >&2
   return 1
 }
 
@@ -710,23 +753,72 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
-# Scoped to today's --secondmate-spawn-capable backends with an empirically
-# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
-# herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
-# verified - future work, not a functional gap for the two backends
-# --secondmate spawns actually support today plus tmux's reference path.
+# Backends with an empirically verified classifier: tmux (docs/tmux-backend.md
+# "Agent liveness probe"), herdr (docs/herdr-backend.md "Agent liveness probe
+# reuses the husk classifier"), and cmux (a tty-process classification of the
+# task surface's terminal; docs/cmux-backend.md "Secondmate support"). zellij
+# and orca report unknown until independently verified - not a functional gap
+# for the backends --secondmate spawns actually support today, since zellij
+# mates predate this probe and orca refuses --secondmate entirely.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target>
-  local backend=$1 target=$2
+fm_backend_agent_alive() {  # <backend> <target> [expected-label]
+  local backend=$1
+  shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" ;;
-    herdr) fm_backend_herdr_agent_alive "$target" ;;
+    tmux) fm_backend_tmux_agent_alive "$1" ;;
+    herdr) fm_backend_herdr_agent_alive "$1" ;;
+    cmux) fm_backend_cmux_agent_alive "$@" ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_secondmate_resolve: resolve a SECONDMATE meta's endpoint to a
+# live target, refreshing stale recorded identity where the backend needs it.
+# cmux is the one backend whose recorded ids can go stale while the mate is
+# still recoverable (an app relaunch re-mints socket-reported workspace ids),
+# so its arm runs the id-primary + synced-title + fingerprint resolver, which
+# also re-records refreshed identity in the meta as a side effect. Every
+# other backend echoes the meta's recorded target unchanged. Echoes the
+# target; returns 0 resolved, 2 endpoint definitively gone, 3 ambiguous
+# (candidates on stderr; the caller must act on NOTHING), 1 uninspectable.
+fm_backend_secondmate_resolve() {  # <backend> <meta-file>
+  local backend=$1 meta=$2 target
+  case "$backend" in
+    cmux)
+      fm_backend_source cmux || return 1
+      fm_backend_cmux_secondmate_resolve "$meta"
+      ;;
+    *)
+      target=$(fm_backend_target_of_meta "$meta")
+      [ -n "$target" ] || return 1
+      printf '%s' "$target"
+      ;;
+  esac
+}
+
+# fm_backend_secondmate_kill: remove a SECONDMATE's endpoint, best-effort for
+# a gone endpoint but REFUSING an ambiguous one. The cmux arm closes the
+# mate's whole dedicated workspace through the resolver's identity checks
+# (never by title alone, never another home's workspace); every other backend
+# keeps the exact teardown-shaped generic kill (target, zellij tab id when
+# recorded, and the fm-<id> expected label).
+fm_backend_secondmate_kill() {  # <backend> <meta-file>
+  local backend=$1 meta=$2 id target
+  case "$backend" in
+    cmux)
+      fm_backend_source cmux || return 1
+      fm_backend_cmux_secondmate_kill "$meta"
+      ;;
+    *)
+      id=$(basename "$meta" .meta)
+      target=$(fm_backend_target_of_meta "$meta")
+      [ -n "$target" ] || return 1
+      fm_backend_kill "$backend" "$target" "$(fm_meta_get "$meta" zellij_tab_id)" "fm-$id"
+      ;;
   esac
 }
 
