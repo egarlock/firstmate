@@ -1944,6 +1944,132 @@ test_spawn_secondmate_reuses_meta_backend_on_respawn() {
   pass "fm-spawn.sh: a secondmate respawn reuses the backend recorded in the mate's meta"
 }
 
+# --- label-gated ops on a RENAMED secondmate workspace (id-primary routing) --
+# Live-found bug (2026-07-28): a captain-renamed secondmate workspace broke
+# every label-gated op (send/peek/state and the liveness sweep's probe)
+# because fm_backend_cmux_target_ready re-imposed the scoped-title gate that
+# secondmate workspace titles are exempt from by design. These tests pin the
+# resolver delegation for secondmate labels while proving the ordinary-task
+# gate is unchanged.
+
+# shellcheck disable=SC2016
+SNIP_SEND='fm_backend_cmux_send_literal "$1" "$2" "$3"'
+# shellcheck disable=SC2016
+SNIP_CAPTURE='fm_backend_cmux_capture "$1" "$2" "$3"'
+# shellcheck disable=SC2016
+SNIP_ALIVE='fm_backend_cmux_agent_alive "$1" "$2"'
+
+test_secondmate_send_peek_route_by_id_after_rename() {
+  local dir fb home pstate out status
+  dir="$TMP_ROOT/sm-ops-rename"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate10)
+  # Captain renamed the workspace, and the agent's own terminal-title updates
+  # overwrote the scoped tab title too - identity is carried by the ids alone.
+  cmux_state_add_workspace "$dir/cmux-state" WS-A "Mate - Dashboard" "$home" SF-A "claude - idle"
+  pstate="$dir/pstate"; mkdir -p "$pstate"
+  write_sm_meta "$pstate/mate10.meta" WS-A SF-A "Mate - Dashboard" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_SEND" FM_STATE_OVERRIDE="$pstate" -- "WS-A:SF-A" "hello mate" fm-mate10)
+  status=$?
+  expect_code 0 "$status" "send to a renamed mate workspace must pass the label gate via the resolver"
+  assert_contains "$(cat "$dir/log")" "send$(printf '\x1f')--workspace$(printf '\x1f')WS-A$(printf '\x1f')--surface$(printf '\x1f')SF-A" \
+    "the send must land on the mate's own resolved endpoint"
+  printf 'mate pane content\n' > "$dir/cmux-state/screen.txt"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CAPTURE" FM_STATE_OVERRIDE="$pstate" -- "WS-A:SF-A" 5 fm-mate10)
+  status=$?
+  expect_code 0 "$status" "peek/state capture of a renamed mate workspace must pass the label gate"
+  assert_contains "$out" "mate pane content" "capture must return the mate pane's content"
+  pass "cmux secondmate ops: send and capture route by id through the resolver after a captain rename"
+}
+
+test_secondmate_send_recovers_stale_target_after_rename() {
+  local dir fb home pstate meta out status scoped
+  dir="$TMP_ROOT/sm-ops-stale"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate11)
+  scoped=$(cmux_expected_scoped_title fm-mate11)
+  # Relaunch shape: fresh ids, the captain's free-form title and the scoped
+  # tab title both restored by session restore.
+  cmux_state_add_workspace "$dir/cmux-state" WS-FRESH "Mate - Copilot Setup" "$home" SF-FRESH "$scoped"
+  pstate="$dir/pstate"; mkdir -p "$pstate"
+  meta="$pstate/mate11.meta"
+  write_sm_meta "$meta" WS-STALE SF-STALE "Mate - Copilot Setup" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_SEND" FM_STATE_OVERRIDE="$pstate" -- "WS-STALE:SF-STALE" "hello" fm-mate11)
+  status=$?
+  expect_code 0 "$status" "a stale recorded target must be re-resolved through the mate's recorded title"
+  assert_contains "$(cat "$dir/log")" "send$(printf '\x1f')--workspace$(printf '\x1f')WS-FRESH$(printf '\x1f')--surface$(printf '\x1f')SF-FRESH" \
+    "the send must land on the freshly resolved endpoint, never the stale ids"
+  assert_contains "$(cat "$meta")" "cmux_workspace_id=WS-FRESH" "the refreshed ids must be re-recorded in the meta"
+  pass "cmux secondmate ops: a relaunch-stale target re-resolves and re-records before the send"
+}
+
+test_secondmate_agent_alive_confident_after_rename() {
+  local dir fb home pstate out
+  dir="$TMP_ROOT/sm-ops-alive"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate12)
+  cmux_state_add_workspace "$dir/cmux-state" WS-L "Mate - Dashboard" "$home" SF-L "claude - idle"
+  cmux_state_set_tty "$dir/cmux-state" SF-L ttys011
+  pstate="$dir/pstate"; mkdir -p "$pstate"
+  write_sm_meta "$pstate/mate12.meta" WS-L SF-L "Mate - Dashboard" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_ALIVE" FM_STATE_OVERRIDE="$pstate" \
+    FM_FAKE_PS_TTY_COMMS='login\n-zsh\nclaude' -- "WS-L:SF-L" fm-mate12)
+  [ "$out" = alive ] || fail "a live agent under a renamed mate workspace must read alive, got '$out'"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_ALIVE" FM_STATE_OVERRIDE="$pstate" \
+    FM_FAKE_PS_TTY_COMMS='login\n-zsh' -- "WS-L:SF-L" fm-mate12)
+  [ "$out" = dead ] || fail "a bare-shell tty under a renamed mate workspace must read dead, got '$out'"
+  pass "fm_backend_cmux_agent_alive: confident alive/dead for a renamed mate (the liveness sweep's probe)"
+}
+
+test_secondmate_ops_ambiguous_still_refuses() {
+  local dir fb home pstate out status
+  dir="$TMP_ROOT/sm-ops-ambig"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  home=$(make_sm_home "$dir" mate13)
+  cmux_state_add_workspace "$dir/cmux-state" WS-1 "Mate - Twins" "/a" SF-1 "zsh"
+  cmux_state_add_workspace "$dir/cmux-state" WS-2 "Mate - Twins" "/b" SF-2 "zsh"
+  pstate="$dir/pstate"; mkdir -p "$pstate"
+  write_sm_meta "$pstate/mate13.meta" WS-STALE SF-STALE "Mate - Twins" "$home"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_SEND" FM_STATE_OVERRIDE="$pstate" -- "WS-STALE:SF-STALE" "hello" fm-mate13 2>"$dir/err")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an ambiguous mate endpoint must refuse the send"
+  assert_contains "$(cat "$dir/err")" "matches multiple" "the refusal must be loud with candidates"
+  if grep -qF "$(printf '\x1f')send$(printf '\x1f')" "$dir/log"; then
+    fail "nothing may be sent to an ambiguous endpoint"
+  fi
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_ALIVE" FM_STATE_OVERRIDE="$pstate" -- "WS-STALE:SF-STALE" fm-mate13 2>/dev/null)
+  [ "$out" = unknown ] || fail "an ambiguous mate endpoint must read unknown to the liveness probe, got '$out'"
+  pass "cmux secondmate ops: ambiguity still refuses loudly and reads unknown - never a guessed route"
+}
+
+test_ordinary_task_gate_unchanged_by_meta_presence() {
+  local dir fb pstate out status
+  dir="$TMP_ROOT/sm-ops-ordinary"; mkdir -p "$dir"
+  fb=$(make_cmux_state_fakebin "$dir")
+  cmux_state_init "$dir/cmux-state"
+  # An ordinary task's workspace renamed away from its scoped title, with a
+  # meta present whose kind is NOT secondmate: the scoped-title gate must
+  # still refuse - meta presence alone never relaxes it.
+  cmux_state_add_workspace "$dir/cmux-state" WS-O "renamed by captain" "/tmp" SF-O "zsh"
+  pstate="$dir/pstate"; mkdir -p "$pstate"
+  {
+    printf 'window=WS-O:SF-O\n'
+    printf 'kind=crew\n'
+    printf 'backend=cmux\n'
+  } > "$pstate/task9.meta"
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_SEND" FM_STATE_OVERRIDE="$pstate" -- "WS-O:SF-O" "hello" fm-task9 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an ordinary task whose workspace title no longer matches must still be refused"
+  if grep -qF "$(printf '\x1f')send$(printf '\x1f')" "$dir/log"; then
+    fail "nothing may be sent through a failed ordinary-task gate"
+  fi
+  pass "cmux ordinary tasks: the scoped-title gate is unchanged - a non-secondmate meta never bypasses it"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -2043,3 +2169,8 @@ test_secondmate_kill_refuses_ambiguous
 test_spawn_secondmate_cmux_end_to_end
 test_spawn_secondmate_uses_config_secondmate_backend
 test_spawn_secondmate_reuses_meta_backend_on_respawn
+test_secondmate_send_peek_route_by_id_after_rename
+test_secondmate_send_recovers_stale_target_after_rename
+test_secondmate_agent_alive_confident_after_rename
+test_secondmate_ops_ambiguous_still_refuses
+test_ordinary_task_gate_unchanged_by_meta_presence
