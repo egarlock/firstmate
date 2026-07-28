@@ -719,6 +719,23 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
     | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 
+# fm_backend_cmux_secondmate_meta_for_label: the task meta behind
+# <expected-label> when (and only when) it records kind=secondmate in this
+# home's state dir. Echoes the meta path; echoes nothing (rc 0) for an
+# ordinary task, an unrecorded label, or a non-label. Lets the label-gated ops
+# funnel (fm_backend_cmux_target_ready) recognize a secondmate target and
+# delegate its identity to the id-primary resolver instead of the scoped-title
+# gate. Uses the same state-dir resolution as the callers that produce
+# expected labels (fm-send.sh/fm-peek.sh/fm-crew-state.sh).
+fm_backend_cmux_secondmate_meta_for_label() {  # <expected-label>
+  local label=$1 meta
+  case "$label" in fm-?*) : ;; *) return 0 ;; esac
+  meta="${FM_STATE_OVERRIDE:-$FM_HOME/state}/${label#fm-}.meta"
+  [ -f "$meta" ] || return 0
+  [ "$(fm_meta_get "$meta" kind 2>/dev/null)" = secondmate ] || return 0
+  printf '%s' "$meta"
+}
+
 # fm_backend_cmux_target_ready: parse the target and verify it is live via
 # fm_backend_cmux_surface_exists (never read-screen - see that function's
 # header for the fresh-surface pitfall this avoids). When the caller knows
@@ -734,10 +751,29 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
 #                   relaunch-stale container workspace id.
 # A live target whose workspace AND surface titles both fail to match the
 # expected label still fails - ops can never route to another task's endpoint.
+#
+# SECONDMATE exception (id-primary identity, docs/cmux-backend.md "Secondmate
+# support"): a mate's workspace title is FREE-FORM (the captain may retitle it
+# at will) and its tab title can be overwritten by the agent's own
+# terminal-title updates, so the scoped-title rungs below would wrongly refuse
+# the mate's own live endpoint after a rename (live evidence 2026-07-28).
+# When the expected label's task meta records kind=secondmate, identity is
+# delegated to fm_backend_cmux_secondmate_resolve instead - recorded ids
+# first, then synced recorded title, scoped tab title, and home-cwd
+# fingerprint, with loud ambiguity refusal - and ONLY its resolved endpoint is
+# adopted, never the caller's unverified target, so the anti-misroute property
+# is preserved. Ordinary task targets keep the scoped-title gate unchanged.
 fm_backend_cmux_target_ready() {  # <target> [expected-label]
-  local expected_label=${2:-} expected_title title wsid sfid pair
+  local expected_label=${2:-} expected_title title wsid sfid pair meta
   fm_backend_cmux_parse_target "$1" || return 1
   if [ -n "$expected_label" ]; then
+    meta=$(fm_backend_cmux_secondmate_meta_for_label "$expected_label")
+    if [ -n "$meta" ]; then
+      pair=$(fm_backend_cmux_secondmate_resolve "$meta") || return 1
+      FM_BACKEND_CMUX_WORKSPACE=${pair%%:*}
+      FM_BACKEND_CMUX_SURFACE=${pair#*:}
+      return 0
+    fi
     expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
     title=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
     if [ "$title" = "$expected_title" ]; then
@@ -1249,11 +1285,14 @@ fm_backend_cmux_secondmate_initial_title() {  # <home-abs>
 # workspace at its home directory, in every container mode. The workspace
 # gets the initial per-home title above; the mate's single tab is renamed to
 # the PRIMARY's scoped task title (fm-<primary-home-label>-<id>), which is
-# what fm_backend_cmux_target_ready's tab arm recovers ordinary send/peek
-# operations by - the workspace title stays free for the captain. The rename
+# what fm_backend_cmux_secondmate_resolve's scoped-tab rung recovers the mate
+# by after an app relaunch - routine ops on a secondmate label go through
+# that same id-primary resolver (fm_backend_cmux_target_ready's secondmate
+# delegation), so the workspace title stays free for the captain. The rename
 # is FATAL on failure (mirroring the tab-mode create): an untitled mate tab
-# would defeat both routine ops and relaunch recovery, and cleanup is still
-# one targeted workspace close. Echoes "<workspace_id> <surface_id> <title>".
+# would weaken relaunch recovery down to the home-cwd fingerprint of last
+# resort, and cleanup is still one targeted workspace close. Echoes
+# "<workspace_id> <surface_id> <title>".
 fm_backend_cmux_create_secondmate() {  # <home-abs> <label>
   local home=$1 label=$2 title scoped out wsid sfid pair dup
   fm_backend_cmux_version_check || return 1
