@@ -459,11 +459,13 @@ test_create_task_creates_and_parses_ids() {
   title=$(cmux_expected_scoped_title fm-newtask)
   # 1: workspace list --json (pre-create duplicate check) -> no match
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
-  # 2: new-workspace (silent on success)
-  # 3: workspace list --json (post-create id resolution) -> match
-  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
-  # 4: list-panes --json --id-format uuids -> default surface id
-  cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
+  # 2: identify with no focused surface -> restoration skipped
+  printf '{"focused":{"window_ref":"window:1"}}' > "$dir/responses/2.out"
+  # 3: new-workspace (silent on success)
+  # 4: workspace list --json (post-create id resolution) -> match
+  cmux_workspace_list_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  # 5: list-panes --json --id-format uuids -> default surface id
+  cmux_panes_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task workspace fm-newtask /tmp/proj' "$ROOT" )
@@ -471,9 +473,34 @@ test_create_task_creates_and_parses_ids() {
     || fail "create_task should echo '<workspace_id> <surface_id>', got '$out'"
   assert_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--name'$'\x1f'"$title"$'\x1f''--cwd'$'\x1f''/tmp/proj' \
     "create_task did not call new-workspace with the right name/cwd"
-  assert_contains "$(cat "$dir/log")" $'\x1f''--focus'$'\x1f''false' \
-    "create_task did not pass --focus false"
-  pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--focus'$'\x1f''true' \
+    "create_task did not pass --focus true for a TUI-hosting workspace"
+  pass "fm_backend_cmux_create_task: workspace mode creates focused and parses workspace_id/surface_id from list responses"
+}
+
+test_create_task_workspace_restore_failure_cleans_up_workspace() {
+  local dir fb status title wsid="bbbbbbbb-1111-1111-1111-111111111111"
+  dir="$TMP_ROOT/create-task-restore-fail"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-wstx)
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: identify with focused workspace/surface so restoration is required
+  printf '{"focused":{"workspace_ref":"workspace:5","surface_ref":"surface:9"}}' > "$dir/responses/2.out"
+  # 3: new-workspace (silent on success)
+  # 4: workspace list --json (post-create id resolution) -> match
+  cmux_workspace_list_response "$dir" 4 "$wsid" "$title"
+  # 5: list-panes --json --id-format uuids -> default surface id
+  cmux_panes_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222"
+  # 6: select-workspace fails inside restore_focus, forcing transactional cleanup
+  printf '1\n' > "$dir/responses/6.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task workspace fm-wstx /tmp/proj' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "workspace create_task must fail when focus restoration fails"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f'"$wsid" \
+    "workspace create_task must close the new workspace on restoration failure"
+  pass "fm_backend_cmux_create_task: workspace mode restore failure closes the new workspace"
 }
 
 # --- target_ready / capture ---------------------------------------------------
@@ -2100,6 +2127,7 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_workspace_restore_failure_cleans_up_workspace
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch

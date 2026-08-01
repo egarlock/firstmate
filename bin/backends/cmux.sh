@@ -578,13 +578,14 @@ fm_backend_cmux_restore_focus() {  # <context: "window workspace pane surface">
 # surfaces). Echoes "<workspace_id> <surface_id>" on success in BOTH modes,
 # so callers see one shape.
 #
-# Workspace mode (<container> = "workspace"): upstream's original, verified
-# sequence - one workspace per task. Resolves the fresh workspace's default
-# surface via one list-panes call (finding: a freshly created workspace
-# already has exactly one surface, so no separate new-surface call is
-# needed). --focus false is passed for defense in depth though verified to
-# already be the default (finding: workspace/surface/pane create all default
-# focus to false).
+# Workspace mode (<container> = "workspace"): one workspace per task.
+# Resolves the fresh workspace's default surface via one list-panes call
+# (finding: a freshly created workspace already has exactly one surface, so
+# no separate new-surface call is needed). The workspace is created
+# --focus true and the FULL previously focused context is then restored
+# (fm_backend_cmux_restore_focus), for the same reason as tab mode and
+# secondmate create: an unfocused-created surface that later hosts a
+# full-screen TUI agent can stay black forever after a late resize.
 #
 # CORRECTION (0.64.20 build 100, observed on a real secondmate launch): the
 # earlier claim here - that a fresh WORKSPACE needs no focus-restore dance
@@ -595,11 +596,10 @@ fm_backend_cmux_restore_focus() {  # <context: "window workspace pane surface">
 # resolves its SIZE until first displayed, and copilot CLI cannot recover
 # from that late resize, so its pane stays black forever. The secondmate
 # create path was corrected to focus-at-birth plus restore for this reason
-# (fm_backend_cmux_create_secondmate). Ordinary task WORKSPACE mode below
-# still passes --focus false and has the same latent defect whenever it
-# hosts a TUI agent; it is untouched only because config/cmux-container=tab
-# is the path in use (docs/cmux-backend.md "Tab creation requires focus at
-# birth").
+# (fm_backend_cmux_create_secondmate). Task WORKSPACE mode now uses the same
+# focus-at-birth plus restore pattern, so all three task/secondmate creation
+# paths follow one renderer-safe rule (docs/cmux-backend.md "Task and
+# secondmate creation requires focus at birth on cmux 0.64.18+").
 #
 # Tab mode (<container> = the container workspace UUID): one surface (tab)
 # per task in the container workspace, titled with the scoped task title.
@@ -630,7 +630,8 @@ fm_backend_cmux_create_task() {  # <container> <label> <cwd>
       echo "error: cmux workspace '$title' already exists" >&2
       return 1
     fi
-    out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids 2>&1) || {
+    prior_context=$(fm_backend_cmux_focus_context)
+    out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus true --id-format uuids 2>&1) || {
       echo "error: cmux new-workspace failed for '$title': $out" >&2
       return 1
     }
@@ -638,6 +639,10 @@ fm_backend_cmux_create_task() {  # <container> <label> <cwd>
     [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
     sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
     [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
+    if ! fm_backend_cmux_restore_focus "$prior_context"; then
+      fm_backend_cmux_close_workspace_safely "$wsid"
+      return 1
+    fi
     printf '%s %s' "$wsid" "$sfid"
     return 0
   fi

@@ -16,7 +16,7 @@
 # test itself creates, never the captain's own, and exercises the real
 # focused-create + transactional focus restore end to end - expect one brief
 # focus flicker while it runs, the same flicker a real tab-mode spawn
-# produces (docs/cmux-backend.md "Tab creation requires focus at birth").
+# produces (docs/cmux-backend.md "Task and secondmate creation requires focus at birth").
 #
 # Skips cleanly when cmux (or jq) is not installed/reachable, so CI/dev
 # machines without cmux, or without the one-time password-mode setup
