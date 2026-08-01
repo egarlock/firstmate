@@ -14,6 +14,10 @@
 #   surfaces.tsv    <workspace_id>\t<surface_id>\t<title>\t<index>
 #   ttys.tsv        <surface_id>\t<tty>   (optional; else FM_CMUX_FAKE_TTY)
 #   counter         monotonically increasing id suffix for new-workspace
+#
+# FM_CMUX_FAKE_FOCUSED holds the raw `identify --no-caller` JSON the fake
+# answers with (default: empty, i.e. no focused surface, so focus restoration
+# is a supported no-op).
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -211,7 +215,13 @@ case "${1:-}" in
     fi
     echo "Error: internal_error: Failed to read terminal text" >&2
     exit 1 ;;
-  send|send-key|identify|focus-window|select-workspace|focus-pane|reorder-surface)
+  send|send-key|focus-window|select-workspace|focus-pane|reorder-surface)
+    exit 0 ;;
+  identify)
+    # Empty by default (no focused surface -> restoration is skipped). Tests
+    # that need the focused-at-birth restore exercised set FM_CMUX_FAKE_FOCUSED
+    # to an `identify --no-caller` JSON payload.
+    [ -z "${FM_CMUX_FAKE_FOCUSED:-}" ] || printf '%s\n' "$FM_CMUX_FAKE_FOCUSED"
     exit 0 ;;
 esac
 exit 0

@@ -194,11 +194,13 @@ If cmux reports no focused surface, restoration is skipped; a reported context w
 Restoration causes a brief focus flicker while the new terminal's drawable is realized.
 
 Creation is transactional: the new surface's exact UUID is resolved by diffing `list-pane-surfaces --json --id-format uuids` around the create (the `new-surface` acknowledgment carries only short refs, `OK surface:<n> pane:<m> workspace:<k>`, and it inserts the tab adjacent to the focused tab, not at the end, so position cannot identify it), and the create is acknowledged, **before** the fallible focus restoration runs.
-Any pre-return failure - the restoration, the scoped-title rename, or the post-create cwd setup - closes ONLY that new surface (`close-surface --surface <new>`), never a pre-existing tab; an unresolvable new UUID fails without closing anything.
+Any pre-return failure - the restoration, the scoped-title rename, or the post-create cwd setup - closes ONLY that new surface (`close-surface --surface <new>`), never a pre-existing tab; an unresolvable new UUID, or an unparseable create acknowledgment, fails without closing anything but still restores the captured focus context best-effort, so the captain is never left parked on a tab firstmate cannot address.
 The rename is fatal on failure (a divergence from the fork's non-fatal warning): every later operation verifies the task by that scoped surface title, so an untitled tab would fail every send/capture/kill anyway - better to fail the spawn while cleanup is still one targeted close.
 **Never** close, move, reorder, or rename a pre-existing surface: restoration only reactivates/refocuses them in place, and the sole `rename-tab` targets the new surface.
 
-Workspace-mode task creation and secondmate creation are transactional in the same way (`fm_backend_cmux_abandon_new_workspace`): once the workspace exists focused, any pre-return failure - unresolvable workspace id or default surface, or a failed restoration - closes ONLY that new workspace (`fm_backend_cmux_close_workspace_safely`, skipped when its id could not be resolved, so nothing pre-existing is ever guessed at) and then restores the captured focus context best-effort, so a failed spawn leaves neither an orphan workspace nor the captain parked on it.
+Workspace-mode task creation is transactional in the same way (`fm_backend_cmux_abandon_new_workspace`): once the workspace exists focused, an unresolvable workspace id or default surface closes ONLY that new workspace (`fm_backend_cmux_close_workspace_safely`, skipped when its id could not be resolved, so nothing pre-existing is ever guessed at) and then restores the captured focus context best-effort, so a failed spawn leaves neither an orphan workspace nor the captain parked on it.
+A failed restoration is the reverse order and stops there: the restore has already failed, so the new workspace is simply closed afterward and no second restore is attempted.
+Secondmate creation is left exactly as device-verified: a failed restoration likewise closes the new workspace, but its id/surface resolution failures fail fast without the abandon unwind.
 
 ## Verified CLI facts
 
@@ -417,10 +419,11 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
 
 **Screenshot request (best-effort, explicitly skippable):** the captain separately asked for a screenshot of the cmux window while multiple concurrent tasks were running, to be kept only if it showed a genuinely healthy fleet with no visible errors.
 One `screencapture -x` (full-screen) attempt was made while all three tasks above were live.
-It did NOT capture cmux at all: because firstmate restores the prior focus immediately after focused-at-birth creates, cmux was not the frontmost/active application, so a full-screen capture on this shared machine captured a completely different, unrelated live terminal session's frontmost window instead - one that turned out to show real, sensitive operational content (a different active firstmate/herdr fleet with real secondmate names and conversation).
+It did NOT capture cmux at all: that pass ran under the pre-change behavior in which every firstmate cmux workspace was created with `new-workspace --focus false`, so nothing ever raised cmux and it was not the frontmost/active application, and a full-screen capture on this shared machine captured a completely different, unrelated live terminal session's frontmost window instead - one that turned out to show real, sensitive operational content (a different active firstmate/herdr fleet with real secondmate names and conversation).
 That file was deleted immediately without being viewed further or retained anywhere.
-No second attempt was made: bringing cmux to the foreground to make it capturable would mean actively focusing/raising its window, which would yank focus away from whatever the captain or another live session currently has in the foreground, and enumerating other windows to target a background-window capture of just cmux risks the same kind of unrelated-content exposure.
+No second attempt was made: bringing cmux to the foreground to make it capturable would have meant deliberately focusing/raising its window and leaving it there, which would yank focus away from whatever the captain or another live session had in the foreground, and enumerating other windows to target a background-window capture of just cmux risks the same kind of unrelated-content exposure.
 Per the captain's explicit allowance, this request was skipped rather than risk either disruption or another accidental capture.
+This conclusion still holds under the current focus-at-birth rule: a spawn does briefly raise cmux, but `fm_backend_cmux_restore_focus` issues only cmux-internal window/workspace/pane/tab commands and cannot hand macOS app-level focus back to another application, so a capture timed to that flicker would be neither reliable nor less risky.
 
 ## Secondmate support
 

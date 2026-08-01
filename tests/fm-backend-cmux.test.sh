@@ -1544,6 +1544,9 @@ test_create_task_tab_unresolvable_uuid_touches_nothing() {
   printf 'OK surface:10 pane:2 workspace:5\n' > "$dir/responses/5.out"
   # 6: after-ids identical to before -> new UUID unresolvable
   cmux_surfaces_response "$dir" 6 "$sp" "zsh" 0
+  # Nothing may be closed, but the captured focus is still restored:
+  # 7 select-workspace, 8 list-pane-surfaces, 9 reorder-surface
+  printf '{"surfaces":[{"id":"aaaa","ref":"surface:9","index":2,"title":"x"}]}' > "$dir/responses/8.out"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task "'"$c"'" fm-tabnx /tmp/proj' "$ROOT" 2>/dev/null
@@ -1551,7 +1554,9 @@ test_create_task_tab_unresolvable_uuid_touches_nothing() {
   [ "$status" -ne 0 ] || fail "create_task must fail when the new surface UUID cannot be resolved"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-surface' \
     "with no resolvable UUID, no close may be attempted (it could hit a pre-existing tab)"
-  pass "fm_backend_cmux_create_task: an unresolvable new-surface UUID fails without touching any surface"
+  assert_contains "$(cat "$dir/log")" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:9' \
+    "the focused-at-birth tab must not strand the captain: the prior focus is restored even when the new UUID is unresolvable"
+  pass "fm_backend_cmux_create_task: an unresolvable new-surface UUID fails without touching any surface, but still restores focus"
 }
 
 # --- target_ready: tab arm (surface-title lookup and recovery) ----------------
@@ -1764,14 +1769,18 @@ SNIP_RESOLVE='fm_backend_cmux_secondmate_resolve "$1"'
 SNIP_KILL='fm_backend_cmux_secondmate_kill "$1"'
 
 test_secondmate_create_dedicated_workspace() {
-  local dir fb home out status expected_title expected_scoped log
+  local dir fb home out status expected_title expected_scoped log focused
   dir="$TMP_ROOT/sm-create"; mkdir -p "$dir"
   fb=$(make_cmux_state_fakebin "$dir")
   cmux_state_init "$dir/cmux-state"
+  # A pre-existing focused workspace/tab so the focused-at-birth restore is
+  # genuinely exercised rather than short-circuited by an empty context.
+  cmux_state_add_workspace "$dir/cmux-state" WS-PRIOR "captains own" /tmp SF-PRIOR "captains tab"
+  focused='{"focused":{"window_ref":"WIN-1","workspace_ref":"WS-PRIOR","pane_ref":"PANE-1","surface_ref":"SF-PRIOR"}}'
   home=$(make_sm_home "$dir" mate1)
   expected_title="fm-$(cmux_expected_home_label "$home" "$home")"
   expected_scoped=$(cmux_expected_scoped_title fm-mate1)
-  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" -- "$home" fm-mate1)
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" "FM_CMUX_FAKE_FOCUSED=$focused" -- "$home" fm-mate1)
   status=$?
   expect_code 0 "$status" "create_secondmate should succeed on an empty app"
   case "$out" in
@@ -1781,15 +1790,19 @@ test_secondmate_create_dedicated_workspace() {
   log=$(cat "$dir/log")
   assert_contains "$log" "new-workspace$(printf '\x1f')--name$(printf '\x1f')$expected_title$(printf '\x1f')--cwd$(printf '\x1f')$home" \
     "the mate workspace must be created at the mate's home with the per-home initial title"
+  assert_contains "$log" "new-workspace$(printf '\x1f')--name$(printf '\x1f')$expected_title$(printf '\x1f')--cwd$(printf '\x1f')$home$(printf '\x1f')--focus$(printf '\x1f')true" \
+    "the mate workspace must be created FOCUSED (an unfocused surface never resolves its size, so a TUI agent paints black)"
+  assert_contains "$log" "reorder-surface$(printf '\x1f')--surface$(printf '\x1f')SF-PRIOR" \
+    "create_secondmate must restore the captain's previously focused tab after the focused-at-birth create"
   assert_contains "$log" "rename-tab" "the mate's tab must be renamed to the primary-scoped task title"
   grep -q "	SF-NEW-1	$expected_scoped	" "$dir/cmux-state/surfaces.tsv" \
     || fail "the mate's tab title should now be the scoped task title '$expected_scoped': $(cat "$dir/cmux-state/surfaces.tsv")"
 
-  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" -- "$home" fm-mate1 2>&1)
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" "FM_CMUX_FAKE_FOCUSED=$focused" -- "$home" fm-mate1 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a second create for the same mate should refuse the duplicate initial title"
   assert_contains "$out" "already exists" "the duplicate refusal should name the collision"
-  pass "fm_backend_cmux_create_secondmate: dedicated workspace at the mate's home, scoped tab rename, duplicate refusal"
+  pass "fm_backend_cmux_create_secondmate: focused-at-birth workspace at the mate's home with focus restore, scoped tab rename, duplicate refusal"
 }
 
 test_secondmate_resolve_syncs_retitled_workspace() {
