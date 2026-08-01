@@ -459,11 +459,13 @@ test_create_task_creates_and_parses_ids() {
   title=$(cmux_expected_scoped_title fm-newtask)
   # 1: workspace list --json (pre-create duplicate check) -> no match
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
-  # 2: new-workspace (silent on success)
-  # 3: workspace list --json (post-create id resolution) -> match
-  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
-  # 4: list-panes --json --id-format uuids -> default surface id
-  cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
+  # 2: identify with no focused surface -> restoration skipped
+  printf '{"focused":{"window_ref":"window:1"}}' > "$dir/responses/2.out"
+  # 3: new-workspace (silent on success)
+  # 4: workspace list --json (post-create id resolution) -> match
+  cmux_workspace_list_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  # 5: list-panes --json --id-format uuids -> default surface id
+  cmux_panes_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task workspace fm-newtask /tmp/proj' "$ROOT" )
@@ -471,9 +473,91 @@ test_create_task_creates_and_parses_ids() {
     || fail "create_task should echo '<workspace_id> <surface_id>', got '$out'"
   assert_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--name'$'\x1f'"$title"$'\x1f''--cwd'$'\x1f''/tmp/proj' \
     "create_task did not call new-workspace with the right name/cwd"
-  assert_contains "$(cat "$dir/log")" $'\x1f''--focus'$'\x1f''false' \
-    "create_task did not pass --focus false"
-  pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--focus'$'\x1f''true' \
+    "create_task did not pass --focus true for a TUI-hosting workspace"
+  pass "fm_backend_cmux_create_task: workspace mode creates focused and parses workspace_id/surface_id from list responses"
+}
+
+test_create_task_workspace_restore_failure_cleans_up_workspace() {
+  local dir fb status title wsid="bbbbbbbb-1111-1111-1111-111111111111"
+  dir="$TMP_ROOT/create-task-restore-fail"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-wstx)
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: identify with focused workspace/surface so restoration is required
+  printf '{"focused":{"workspace_ref":"workspace:5","surface_ref":"surface:9"}}' > "$dir/responses/2.out"
+  # 3: new-workspace (silent on success)
+  # 4: workspace list --json (post-create id resolution) -> match
+  cmux_workspace_list_response "$dir" 4 "$wsid" "$title"
+  # 5: list-panes --json --id-format uuids -> default surface id
+  cmux_panes_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222"
+  # 6: select-workspace fails inside restore_focus, forcing transactional cleanup
+  printf '1\n' > "$dir/responses/6.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task workspace fm-wstx /tmp/proj' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "workspace create_task must fail when focus restoration fails"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f'"$wsid" \
+    "workspace create_task must close the new workspace on restoration failure"
+  pass "fm_backend_cmux_create_task: workspace mode restore failure closes the new workspace"
+}
+
+test_create_task_workspace_unresolvable_surface_closes_and_restores() {
+  local dir fb status title log wsid="bbbbbbbb-1111-1111-1111-111111111111"
+  dir="$TMP_ROOT/create-task-no-surface"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-wsnosf)
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: identify with focused workspace/surface so restoration is required
+  printf '{"focused":{"workspace_ref":"workspace:5","surface_ref":"surface:9"}}' > "$dir/responses/2.out"
+  # 3: new-workspace (silent on success)
+  # 4: workspace list --json (post-create id resolution) -> match
+  cmux_workspace_list_response "$dir" 4 "$wsid" "$title"
+  # 5: list-panes --json -> no panes, so the default surface is unresolvable
+  cmux_panes_empty_response "$dir" 5
+  # cleanup: 6 list-windows (empty -> no throwaway sibling needed),
+  # 7 close-workspace, then restore: 8 select-workspace, 9 list-pane-surfaces,
+  # 10 reorder-surface
+  printf '{"surfaces":[{"id":"aaaa","ref":"surface:9","index":2,"title":"x"}]}' > "$dir/responses/9.out"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task workspace fm-wsnosf /tmp/proj' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "workspace create_task must fail when the default surface cannot be resolved"
+  log=$(cat "$dir/log")
+  assert_contains "$log" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f'"$wsid" \
+    "workspace create_task must close the orphan workspace when its surface cannot be resolved"
+  assert_contains "$log" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:9' \
+    "workspace create_task must restore the captain's focus after a focused-at-birth create it cannot complete"
+  cmux_assert_call_order "$dir/log" $'\x1f''close-workspace'$'\x1f' $'\x1f''reorder-surface'$'\x1f' \
+    "the orphan workspace must be closed before the prior focus is restored"
+  pass "fm_backend_cmux_create_task: workspace mode closes the orphan workspace and restores focus when the surface is unresolvable"
+}
+
+test_create_task_workspace_unresolvable_id_restores_without_closing() {
+  local dir fb status log
+  dir="$TMP_ROOT/create-task-no-wsid"; mkdir -p "$dir/responses"
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: identify with focused workspace/surface so restoration is required
+  printf '{"focused":{"workspace_ref":"workspace:5","surface_ref":"surface:9"}}' > "$dir/responses/2.out"
+  # 3: new-workspace (silent on success)
+  # 4: workspace list --json (post-create id resolution) -> still no match
+  printf '{"workspaces":[]}' > "$dir/responses/4.out"
+  # restore: 5 select-workspace, 6 list-pane-surfaces, 7 reorder-surface
+  printf '{"surfaces":[{"id":"aaaa","ref":"surface:9","index":2,"title":"x"}]}' > "$dir/responses/6.out"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task workspace fm-wsnoid /tmp/proj' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "workspace create_task must fail when the new workspace id cannot be resolved"
+  log=$(cat "$dir/log")
+  assert_not_contains "$log" $'\x1f''close-workspace'$'\x1f' \
+    "an unresolvable workspace id must never be guessed at with a close (it could hit a pre-existing workspace)"
+  assert_contains "$log" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:9' \
+    "workspace create_task must still restore the captain's focus when the new workspace id is unresolvable"
+  pass "fm_backend_cmux_create_task: workspace mode restores focus without closing anything when the workspace id is unresolvable"
 }
 
 # --- target_ready / capture ---------------------------------------------------
@@ -1460,6 +1544,9 @@ test_create_task_tab_unresolvable_uuid_touches_nothing() {
   printf 'OK surface:10 pane:2 workspace:5\n' > "$dir/responses/5.out"
   # 6: after-ids identical to before -> new UUID unresolvable
   cmux_surfaces_response "$dir" 6 "$sp" "zsh" 0
+  # Nothing may be closed, but the captured focus is still restored:
+  # 7 select-workspace, 8 list-pane-surfaces, 9 reorder-surface
+  printf '{"surfaces":[{"id":"aaaa","ref":"surface:9","index":2,"title":"x"}]}' > "$dir/responses/8.out"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task "'"$c"'" fm-tabnx /tmp/proj' "$ROOT" 2>/dev/null
@@ -1467,7 +1554,9 @@ test_create_task_tab_unresolvable_uuid_touches_nothing() {
   [ "$status" -ne 0 ] || fail "create_task must fail when the new surface UUID cannot be resolved"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-surface' \
     "with no resolvable UUID, no close may be attempted (it could hit a pre-existing tab)"
-  pass "fm_backend_cmux_create_task: an unresolvable new-surface UUID fails without touching any surface"
+  assert_contains "$(cat "$dir/log")" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:9' \
+    "the focused-at-birth tab must not strand the captain: the prior focus is restored even when the new UUID is unresolvable"
+  pass "fm_backend_cmux_create_task: an unresolvable new-surface UUID fails without touching any surface, but still restores focus"
 }
 
 # --- target_ready: tab arm (surface-title lookup and recovery) ----------------
@@ -1680,14 +1769,18 @@ SNIP_RESOLVE='fm_backend_cmux_secondmate_resolve "$1"'
 SNIP_KILL='fm_backend_cmux_secondmate_kill "$1"'
 
 test_secondmate_create_dedicated_workspace() {
-  local dir fb home out status expected_title expected_scoped log
+  local dir fb home out status expected_title expected_scoped log focused
   dir="$TMP_ROOT/sm-create"; mkdir -p "$dir"
   fb=$(make_cmux_state_fakebin "$dir")
   cmux_state_init "$dir/cmux-state"
+  # A pre-existing focused workspace/tab so the focused-at-birth restore is
+  # genuinely exercised rather than short-circuited by an empty context.
+  cmux_state_add_workspace "$dir/cmux-state" WS-PRIOR "captains own" /tmp SF-PRIOR "captains tab"
+  focused='{"focused":{"window_ref":"WIN-1","workspace_ref":"WS-PRIOR","pane_ref":"PANE-1","surface_ref":"SF-PRIOR"}}'
   home=$(make_sm_home "$dir" mate1)
   expected_title="fm-$(cmux_expected_home_label "$home" "$home")"
   expected_scoped=$(cmux_expected_scoped_title fm-mate1)
-  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" -- "$home" fm-mate1)
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" "FM_CMUX_FAKE_FOCUSED=$focused" -- "$home" fm-mate1)
   status=$?
   expect_code 0 "$status" "create_secondmate should succeed on an empty app"
   case "$out" in
@@ -1697,15 +1790,19 @@ test_secondmate_create_dedicated_workspace() {
   log=$(cat "$dir/log")
   assert_contains "$log" "new-workspace$(printf '\x1f')--name$(printf '\x1f')$expected_title$(printf '\x1f')--cwd$(printf '\x1f')$home" \
     "the mate workspace must be created at the mate's home with the per-home initial title"
+  assert_contains "$log" "new-workspace$(printf '\x1f')--name$(printf '\x1f')$expected_title$(printf '\x1f')--cwd$(printf '\x1f')$home$(printf '\x1f')--focus$(printf '\x1f')true" \
+    "the mate workspace must be created FOCUSED (an unfocused surface never resolves its size, so a TUI agent paints black)"
+  assert_contains "$log" "reorder-surface$(printf '\x1f')--surface$(printf '\x1f')SF-PRIOR" \
+    "create_secondmate must restore the captain's previously focused tab after the focused-at-birth create"
   assert_contains "$log" "rename-tab" "the mate's tab must be renamed to the primary-scoped task title"
   grep -q "	SF-NEW-1	$expected_scoped	" "$dir/cmux-state/surfaces.tsv" \
     || fail "the mate's tab title should now be the scoped task title '$expected_scoped': $(cat "$dir/cmux-state/surfaces.tsv")"
 
-  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" -- "$home" fm-mate1 2>&1)
+  out=$(run_cmux_sm "$dir" "$fb" "$SNIP_CREATE" "FM_CMUX_FAKE_FOCUSED=$focused" -- "$home" fm-mate1 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a second create for the same mate should refuse the duplicate initial title"
   assert_contains "$out" "already exists" "the duplicate refusal should name the collision"
-  pass "fm_backend_cmux_create_secondmate: dedicated workspace at the mate's home, scoped tab rename, duplicate refusal"
+  pass "fm_backend_cmux_create_secondmate: focused-at-birth workspace at the mate's home with focus restore, scoped tab rename, duplicate refusal"
 }
 
 test_secondmate_resolve_syncs_retitled_workspace() {
@@ -2100,6 +2197,9 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_workspace_restore_failure_cleans_up_workspace
+test_create_task_workspace_unresolvable_surface_closes_and_restores
+test_create_task_workspace_unresolvable_id_restores_without_closing
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
