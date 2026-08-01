@@ -584,11 +584,22 @@ fm_backend_cmux_restore_focus() {  # <context: "window workspace pane surface">
 # already has exactly one surface, so no separate new-surface call is
 # needed). --focus false is passed for defense in depth though verified to
 # already be the default (finding: workspace/surface/pane create all default
-# focus to false) - no focus-restore dance is needed for a fresh WORKSPACE:
-# the 0.64.18+ renderer regression below concerns surfaces created into an
-# existing workspace's tab bar, not workspace default surfaces (re-checked on
-# 0.64.20 build 100: the default surface's terminal starts and reads fine
-# after wake; docs/cmux-backend.md "Tab creation requires focus at birth").
+# focus to false).
+#
+# CORRECTION (0.64.20 build 100, observed on a real secondmate launch): the
+# earlier claim here - that a fresh WORKSPACE needs no focus-restore dance
+# because the 0.64.18+ regression only affects surfaces created into an
+# existing workspace's tab bar - is WRONG for any surface that then hosts a
+# full-screen TUI agent. A bare shell in an unfocused default surface does
+# render (which is what the original re-check saw), but the surface never
+# resolves its SIZE until first displayed, and copilot CLI cannot recover
+# from that late resize, so its pane stays black forever. The secondmate
+# create path was corrected to focus-at-birth plus restore for this reason
+# (fm_backend_cmux_create_secondmate). Ordinary task WORKSPACE mode below
+# still passes --focus false and has the same latent defect whenever it
+# hosts a TUI agent; it is untouched only because config/cmux-container=tab
+# is the path in use (docs/cmux-backend.md "Tab creation requires focus at
+# birth").
 #
 # Tab mode (<container> = the container workspace UUID): one surface (tab)
 # per task in the container workspace, titled with the scoped task title.
@@ -1291,10 +1302,14 @@ fm_backend_cmux_secondmate_initial_title() {  # <home-abs>
 # delegation), so the workspace title stays free for the captain. The rename
 # is FATAL on failure (mirroring the tab-mode create): an untitled mate tab
 # would weaken relaunch recovery down to the home-cwd fingerprint of last
-# resort, and cleanup is still one targeted workspace close. Echoes
-# "<workspace_id> <surface_id> <title>".
+# resort, and cleanup is still one targeted workspace close. The workspace is
+# created --focus true and the FULL previously focused context is then
+# restored (fm_backend_cmux_restore_focus), because an unfocused surface
+# never resolves its size until first displayed and copilot CLI cannot
+# recover from that late resize - see the CORRECTION note on
+# fm_backend_cmux_create_task. Echoes "<workspace_id> <surface_id> <title>".
 fm_backend_cmux_create_secondmate() {  # <home-abs> <label>
-  local home=$1 label=$2 title scoped out wsid sfid pair dup
+  local home=$1 label=$2 title scoped out wsid sfid pair dup prior_context
   fm_backend_cmux_version_check || return 1
   fm_backend_cmux_ensure_running || return 1
   title=$(fm_backend_cmux_secondmate_initial_title "$home")
@@ -1308,7 +1323,8 @@ fm_backend_cmux_create_secondmate() {  # <home-abs> <label>
     echo "error: cmux tab '$scoped' already exists (${pair% *}); tear the stale secondmate endpoint down first" >&2
     return 1
   fi
-  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$home" --focus false --id-format uuids 2>&1) || {
+  prior_context=$(fm_backend_cmux_focus_context)
+  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$home" --focus true --id-format uuids 2>&1) || {
     echo "error: cmux new-workspace failed for secondmate workspace '$title': $out" >&2
     return 1
   }
@@ -1316,6 +1332,10 @@ fm_backend_cmux_create_secondmate() {  # <home-abs> <label>
   [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for secondmate workspace '$title' after creation" >&2; return 1; }
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for secondmate workspace '$title' ($wsid)" >&2; return 1; }
+  if ! fm_backend_cmux_restore_focus "$prior_context"; then
+    fm_backend_cmux_close_workspace_safely "$wsid"
+    return 1
+  fi
   if ! fm_backend_cmux_cli rename-tab --workspace "$wsid" --surface "$sfid" "$scoped" >/dev/null 2>&1; then
     echo "error: could not rename the secondmate tab to '$scoped'; closing the new workspace (the scoped tab title is what routine ops and relaunch recovery verify the mate by)" >&2
     fm_backend_cmux_close_workspace_safely "$wsid"
