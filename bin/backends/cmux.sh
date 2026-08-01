@@ -540,7 +540,7 @@ fm_backend_cmux_restore_focus() {  # <context: "window workspace pane surface">
   set -- $ctx
   window=${1:-} workspace=${2:-} pane=${3:-} surface=${4:-}
   if [ -z "$workspace" ] || [ "$workspace" = "-" ] || [ -z "$surface" ] || [ "$surface" = "-" ]; then
-    echo "error: created cmux task tab but the captured focus context is incomplete ($ctx)" >&2
+    echo "error: created the cmux endpoint but the captured focus context is incomplete ($ctx)" >&2
     return 1
   fi
   # Reused window context so a workspace/pane/surface ref resolves in the right
@@ -552,7 +552,7 @@ fm_backend_cmux_restore_focus() {  # <context: "window workspace pane surface">
   fi
   # shellcheck disable=SC2086
   if ! fm_backend_cmux_cli select-workspace --workspace "$workspace" $win_flag >/dev/null 2>&1; then
-    echo "error: created cmux task tab but could not reactivate the previously focused workspace $workspace" >&2
+    echo "error: created the cmux endpoint but could not reactivate the previously focused workspace $workspace" >&2
     return 1
   fi
   if [ -n "$pane" ] && [ "$pane" != "-" ]; then
@@ -561,15 +561,29 @@ fm_backend_cmux_restore_focus() {  # <context: "window workspace pane surface">
   fi
   idx=$(fm_backend_cmux_surface_index "$workspace" "$surface")
   if [ -z "$idx" ]; then
-    echo "error: created cmux task tab but the previously focused surface $surface is no longer present to restore" >&2
+    echo "error: created the cmux endpoint but the previously focused surface $surface is no longer present to restore" >&2
     return 1
   fi
   # shellcheck disable=SC2086
   if ! fm_backend_cmux_cli reorder-surface --surface "$surface" --workspace "$workspace" $win_flag --index "$idx" --focus true >/dev/null 2>&1; then
-    echo "error: created cmux task tab but could not restore focus to the previously focused surface $surface" >&2
+    echo "error: created the cmux endpoint but could not restore focus to the previously focused surface $surface" >&2
     return 1
   fi
   return 0
+}
+
+# fm_backend_cmux_abandon_new_workspace: unwind a focused-at-birth workspace
+# create that cannot be completed. Every creation path that passes
+# --focus true owns the captain's view until it restores it, so ANY
+# pre-return failure must both reclaim the half-built workspace (when its id
+# is already known - an unknown id is never guessed, so nothing pre-existing
+# can be closed) and put the captain back where they were. The restore is
+# best-effort here: the caller has already reported the primary failure and
+# returns non-zero regardless.
+fm_backend_cmux_abandon_new_workspace() {  # <prior-context> [<workspace_id>]
+  local ctx=${1:-} wsid=${2:-}
+  [ -z "$wsid" ] || fm_backend_cmux_close_workspace_safely "$wsid"
+  fm_backend_cmux_restore_focus "$ctx" || true
 }
 
 # fm_backend_cmux_create_task: create the task's endpoint in <container>
@@ -600,6 +614,10 @@ fm_backend_cmux_restore_focus() {  # <context: "window workspace pane surface">
 # focus-at-birth plus restore pattern, so all three task/secondmate creation
 # paths follow one renderer-safe rule (docs/cmux-backend.md "Task and
 # secondmate creation requires focus at birth on cmux 0.64.18+").
+# Transactional like tab mode: once the workspace is created focused, every
+# fallible pre-return step (id/surface resolution and the focus restoration)
+# unwinds through fm_backend_cmux_abandon_new_workspace, so a failed create
+# never leaves an orphan workspace or the captain parked on it.
 #
 # Tab mode (<container> = the container workspace UUID): one surface (tab)
 # per task in the container workspace, titled with the scoped task title.
@@ -636,9 +654,17 @@ fm_backend_cmux_create_task() {  # <container> <label> <cwd>
       return 1
     }
     wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-    [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
+    if [ -z "$wsid" ]; then
+      echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2
+      fm_backend_cmux_abandon_new_workspace "$prior_context"
+      return 1
+    fi
     sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-    [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
+    if [ -z "$sfid" ]; then
+      echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2
+      fm_backend_cmux_abandon_new_workspace "$prior_context" "$wsid"
+      return 1
+    fi
     if ! fm_backend_cmux_restore_focus "$prior_context"; then
       fm_backend_cmux_close_workspace_safely "$wsid"
       return 1
@@ -1334,9 +1360,17 @@ fm_backend_cmux_create_secondmate() {  # <home-abs> <label>
     return 1
   }
   wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for secondmate workspace '$title' after creation" >&2; return 1; }
+  if [ -z "$wsid" ]; then
+    echo "error: could not resolve a cmux workspace id for secondmate workspace '$title' after creation" >&2
+    fm_backend_cmux_abandon_new_workspace "$prior_context"
+    return 1
+  fi
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-  [ -n "$sfid" ] || { echo "error: could not resolve the default surface for secondmate workspace '$title' ($wsid)" >&2; return 1; }
+  if [ -z "$sfid" ]; then
+    echo "error: could not resolve the default surface for secondmate workspace '$title' ($wsid)" >&2
+    fm_backend_cmux_abandon_new_workspace "$prior_context" "$wsid"
+    return 1
+  fi
   if ! fm_backend_cmux_restore_focus "$prior_context"; then
     fm_backend_cmux_close_workspace_safely "$wsid"
     return 1

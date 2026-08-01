@@ -57,7 +57,7 @@ No first-run provisioning beyond the socket-access setup above and having `jq` i
 
 Watching and attaching: firstmate uses one workspace per task in whatever cmux window is currently open.
 Task selectors resolve through the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend"), while the actual cmux workspace title is home-scoped as `fm-<home-label>-<id>`, for example `fm-firstmate-<8hex>-cmux-e2e-t1` in the primary home or `fm-2ndmate-<secondmate-id>-<8hex>-cmux-e2e-t1` in a secondmate home.
-You do not need to bring the window forward for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's surface without focusing it, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home - workspace/surface/pane creation all default `focus` to `false`, so an unattended spawn never steals your view.
+You do not need to bring the window forward for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's surface without focusing it, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home - a spawn does briefly take focus while the new terminal is created (it must, see "Task and secondmate creation requires focus at birth on cmux 0.64.18+" below), then immediately restores the exact window/workspace/pane/tab you were on, so the only cost is a short flicker rather than a lasting steal.
 
 Verify it works by spawning a trivial task with `--backend cmux` and confirming the task's meta records `backend=cmux` plus `cmux_workspace_id=` and `cmux_surface_id=`.
 The cmux sidebar should show a new `fm-firstmate-<8hex>-<id>` workspace in the primary home.
@@ -197,6 +197,8 @@ Creation is transactional: the new surface's exact UUID is resolved by diffing `
 Any pre-return failure - the restoration, the scoped-title rename, or the post-create cwd setup - closes ONLY that new surface (`close-surface --surface <new>`), never a pre-existing tab; an unresolvable new UUID fails without closing anything.
 The rename is fatal on failure (a divergence from the fork's non-fatal warning): every later operation verifies the task by that scoped surface title, so an untitled tab would fail every send/capture/kill anyway - better to fail the spawn while cleanup is still one targeted close.
 **Never** close, move, reorder, or rename a pre-existing surface: restoration only reactivates/refocuses them in place, and the sole `rename-tab` targets the new surface.
+
+Workspace-mode task creation and secondmate creation are transactional in the same way (`fm_backend_cmux_abandon_new_workspace`): once the workspace exists focused, any pre-return failure - unresolvable workspace id or default surface, or a failed restoration - closes ONLY that new workspace (`fm_backend_cmux_close_workspace_safely`, skipped when its id could not be resolved, so nothing pre-existing is ever guessed at) and then restores the captured focus context best-effort, so a failed spawn leaves neither an orphan workspace nor the captain parked on it.
 
 ## Verified CLI facts
 

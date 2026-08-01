@@ -503,6 +503,63 @@ test_create_task_workspace_restore_failure_cleans_up_workspace() {
   pass "fm_backend_cmux_create_task: workspace mode restore failure closes the new workspace"
 }
 
+test_create_task_workspace_unresolvable_surface_closes_and_restores() {
+  local dir fb status title log wsid="bbbbbbbb-1111-1111-1111-111111111111"
+  dir="$TMP_ROOT/create-task-no-surface"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-wsnosf)
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: identify with focused workspace/surface so restoration is required
+  printf '{"focused":{"workspace_ref":"workspace:5","surface_ref":"surface:9"}}' > "$dir/responses/2.out"
+  # 3: new-workspace (silent on success)
+  # 4: workspace list --json (post-create id resolution) -> match
+  cmux_workspace_list_response "$dir" 4 "$wsid" "$title"
+  # 5: list-panes --json -> no panes, so the default surface is unresolvable
+  cmux_panes_empty_response "$dir" 5
+  # cleanup: 6 list-windows (empty -> no throwaway sibling needed),
+  # 7 close-workspace, then restore: 8 select-workspace, 9 list-pane-surfaces,
+  # 10 reorder-surface
+  printf '{"surfaces":[{"id":"aaaa","ref":"surface:9","index":2,"title":"x"}]}' > "$dir/responses/9.out"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task workspace fm-wsnosf /tmp/proj' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "workspace create_task must fail when the default surface cannot be resolved"
+  log=$(cat "$dir/log")
+  assert_contains "$log" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f'"$wsid" \
+    "workspace create_task must close the orphan workspace when its surface cannot be resolved"
+  assert_contains "$log" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:9' \
+    "workspace create_task must restore the captain's focus after a focused-at-birth create it cannot complete"
+  cmux_assert_call_order "$dir/log" $'\x1f''close-workspace'$'\x1f' $'\x1f''reorder-surface'$'\x1f' \
+    "the orphan workspace must be closed before the prior focus is restored"
+  pass "fm_backend_cmux_create_task: workspace mode closes the orphan workspace and restores focus when the surface is unresolvable"
+}
+
+test_create_task_workspace_unresolvable_id_restores_without_closing() {
+  local dir fb status log
+  dir="$TMP_ROOT/create-task-no-wsid"; mkdir -p "$dir/responses"
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: identify with focused workspace/surface so restoration is required
+  printf '{"focused":{"workspace_ref":"workspace:5","surface_ref":"surface:9"}}' > "$dir/responses/2.out"
+  # 3: new-workspace (silent on success)
+  # 4: workspace list --json (post-create id resolution) -> still no match
+  printf '{"workspaces":[]}' > "$dir/responses/4.out"
+  # restore: 5 select-workspace, 6 list-pane-surfaces, 7 reorder-surface
+  printf '{"surfaces":[{"id":"aaaa","ref":"surface:9","index":2,"title":"x"}]}' > "$dir/responses/6.out"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task workspace fm-wsnoid /tmp/proj' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "workspace create_task must fail when the new workspace id cannot be resolved"
+  log=$(cat "$dir/log")
+  assert_not_contains "$log" $'\x1f''close-workspace'$'\x1f' \
+    "an unresolvable workspace id must never be guessed at with a close (it could hit a pre-existing workspace)"
+  assert_contains "$log" $'\x1f''reorder-surface'$'\x1f''--surface'$'\x1f''surface:9' \
+    "workspace create_task must still restore the captain's focus when the new workspace id is unresolvable"
+  pass "fm_backend_cmux_create_task: workspace mode restores focus without closing anything when the workspace id is unresolvable"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -2128,6 +2185,8 @@ test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_workspace_restore_failure_cleans_up_workspace
+test_create_task_workspace_unresolvable_surface_closes_and_restores
+test_create_task_workspace_unresolvable_id_restores_without_closing
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
