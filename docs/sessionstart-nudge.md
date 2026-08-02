@@ -26,6 +26,10 @@ Every path exits 0, including malformed state and adapter errors, because Claude
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message enters model context without racing an initial positional prompt, and the changed extension passes strict TypeScript checking on Pi 0.80.10. |
 | Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project event fires on Grok 0.2.103, but hook stdout does not reach model context, so this path is documented fail-open. |
 
+`copilot` has no tracked session-start integration.
+Copilot loads hooks only from the global `${COPILOT_HOME:-$HOME/.copilot}/hooks/` directory and has no per-project hook path, so the tracked-transport pattern every row above relies on cannot be used, and installing a global checkout-agnostic hook is a captain trust decision keyed `copilot-primary-global-hook-fallback`.
+A copilot primary therefore relies on `bin/fm-session-start.sh` being run explicitly, exactly as `docs/turnend-guard.md` records for the matching turn-end gap.
+
 The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end guard plugins run later on `session.idle`, and the turn-end guard continues to let the watcher coordinator act first, so the three plugins do not race for one lifecycle event.
 

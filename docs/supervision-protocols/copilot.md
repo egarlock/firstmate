@@ -12,13 +12,16 @@ When this session owns supervision and away mode is not active:
    Copilot queues everything the captain types while a model turn is active, and an attached shell call holds the turn open for its entire `initial_wait`.
    `bin/fm-watch-arm.sh` blocks for the whole watcher cycle, which is unbounded, so a long `initial_wait` pins the turn open and the captain's chat silently queues until the call ends.
    `initial_wait: __FM_COPILOT_INITIAL_WAIT__` is the confirmation budget only: it is just past `FM_ARM_CONFIRM_TIMEOUT` so the arm's honest status line is visible, and short enough that chat stays responsive.
+   It is capped at 30 seconds, so raising `FM_ARM_CONFIRM_TIMEOUT` past 25 no longer widens it; past the cap the status line may not have printed when the call returns.
+   Some Copilot builds enforce a minimum `initial_wait` and silently raise a smaller value, which is harmless here because the hold stays short and bounded either way.
    Never raise it to cover the watcher cycle.
 5. Never set `detach: true` for the arm.
-   A detached arm cannot be stopped with `stop_bash` and outlives this session, which breaks the arm's own contract that killing the arm tears its watcher down too.
+   A detached arm outlives this session, which breaks the arm's own contract that killing the arm tears its watcher down too.
 6. Never use shell `&` for firstmate supervision.
 7. Never bundle the arm onto another command.
    Copilot has no tracked PreToolUse seatbelt, so nothing rejects a bundled or backgrounded arm before it runs.
 8. Trust only the arm's one-line status.
+   If the call returns before any `watcher:` line appears, read the arm's output with `read_bash` on its `shellId` until one does; never treat a silent return as either success or failure.
 9. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
 10. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.

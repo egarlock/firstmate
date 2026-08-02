@@ -98,11 +98,20 @@ checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 # so the model sees the honest started/attached/FAILED line, and must return
 # immediately after it so the turn can end and captain chat stays responsive.
 # FM_ARM_CONFIRM_TIMEOUT is owned by bin/fm-watch-arm.sh; this only adds margin.
+# The result is then capped. FM_ARM_CONFIRM_TIMEOUT is an operator knob for slow
+# hosts, and propagating a large value uncapped would render a multi-minute
+# attached call into the protocol, the repair line, and the wake line, which is
+# exactly the blocked-chat incident this protocol exists to prevent. Past the cap
+# the arm's status line may not have printed when the call returns, so the
+# protocol tells the model to read it rather than assume a result.
+COPILOT_MAX_INITIAL_WAIT=30
 copilot_confirm=${FM_ARM_CONFIRM_TIMEOUT:-10}
 case "$copilot_confirm" in
   ''|*[!0-9]*) copilot_confirm=10 ;;
 esac
 copilot_initial_wait=$((copilot_confirm + 5))
+[ "$copilot_initial_wait" -le "$COPILOT_MAX_INITIAL_WAIT" ] \
+  || copilot_initial_wait=$COPILOT_MAX_INITIAL_WAIT
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"

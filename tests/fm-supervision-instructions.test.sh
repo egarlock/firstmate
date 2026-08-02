@@ -194,9 +194,22 @@ test_copilot_is_attached_short_wait_background_notify() {
   assert_not_contains "$out" "foreground checkpoint" "copilot snippet must not be Codex-style foreground checkpoint"
   assert_not_contains "$out" "__FM_" "renderer leaked a placeholder in the copilot snippet"
 
-  out=$(FM_ARM_CONFIRM_TIMEOUT=30 "$RENDER" --harness copilot)
-  assert_contains "$out" "initial_wait: 35" "copilot wait budget is not derived from FM_ARM_CONFIRM_TIMEOUT"
+  out=$(FM_ARM_CONFIRM_TIMEOUT=20 "$RENDER" --harness copilot)
+  assert_contains "$out" "initial_wait: 25" "copilot wait budget is not derived from FM_ARM_CONFIRM_TIMEOUT"
   assert_not_contains "$out" "initial_wait: 15" "copilot wait budget kept the default while FM_ARM_CONFIRM_TIMEOUT was overridden"
+
+  # FM_ARM_CONFIRM_TIMEOUT is an operator knob for slow hosts. Propagating it
+  # uncapped would render a multi-minute attached call and reopen the exact
+  # blocked-chat incident this protocol exists to prevent, in text that
+  # simultaneously tells the model the call must return promptly.
+  out=$(FM_ARM_CONFIRM_TIMEOUT=300 "$RENDER" --harness copilot)
+  assert_contains "$out" "initial_wait: 30" "copilot wait budget was not capped for a large FM_ARM_CONFIRM_TIMEOUT"
+  assert_contains "$out" "initial_wait 30 as directed below" "copilot wake line was not capped for a large FM_ARM_CONFIRM_TIMEOUT"
+  assert_not_contains "$out" "305" "copilot snippet propagated a multi-minute attached call"
+
+  out=$(FM_ARM_CONFIRM_TIMEOUT=300 "$RENDER" --harness copilot --repair-line)
+  assert_contains "$out" "initial_wait 30" "copilot repair line was not capped for a large FM_ARM_CONFIRM_TIMEOUT"
+  assert_not_contains "$out" "305" "copilot repair line propagated a multi-minute attached call"
 
   out=$(FM_ARM_CONFIRM_TIMEOUT=not-a-number "$RENDER" --harness copilot)
   assert_contains "$out" "initial_wait: 15" "copilot wait budget did not fall back to the default confirmation budget"

@@ -78,6 +78,15 @@ BEAT="$STATE/.last-watcher-beat"
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
+# Both deadline computations below are integer arithmetic under `set -u`, and the
+# post-fork one runs AFTER the watcher child exists: a non-integer value there
+# aborts the arm with no status line at all and orphans a live watcher, while the
+# protocol tells the model to trust only that status line. Normalize instead, so
+# this script and bin/fm-supervision-instructions.sh agree on what a malformed
+# configured value means.
+case "$CONFIRM_TIMEOUT" in
+  ''|*[!0-9]*) CONFIRM_TIMEOUT=10 ;;
+esac
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"

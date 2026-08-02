@@ -8,7 +8,8 @@
 # rarely-taken branch. FM_CHECKPOINT_TIMEOUT_IMPL pins the implementation to
 # auto (default), timeout, gtimeout, or perl, so each one can be exercised on a
 # host that happens to have the others; an explicitly named implementation that
-# is not installed is an error rather than a silent downgrade.
+# is not installed, and auto on a host with none of the three, are both errors
+# rather than a silent downgrade or an opaque 127 from the missing binary.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +26,8 @@ On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and ex
 
 FM_CHECKPOINT_TIMEOUT_IMPL=auto|timeout|gtimeout|perl selects how the bound is
 enforced. auto prefers timeout, then gtimeout, then the built-in perl fallback
-that macOS hosts normally use.
+that macOS hosts normally use. A named implementation that is not installed,
+and auto on a host with none of the three, both exit 2.
 EOF
 }
 
@@ -63,12 +65,14 @@ case "$TIMEOUT_IMPL" in
       TIMEOUT_IMPL=timeout
     elif command -v gtimeout >/dev/null 2>&1; then
       TIMEOUT_IMPL=gtimeout
-    else
+    elif command -v perl >/dev/null 2>&1; then
       TIMEOUT_IMPL=perl
+    else
+      echo "error: no bounded-wait implementation available (need timeout, gtimeout, or perl)" >&2
+      exit 2
     fi
     ;;
-  perl) : ;;
-  timeout|gtimeout)
+  perl|timeout|gtimeout)
     command -v "$TIMEOUT_IMPL" >/dev/null 2>&1 || {
       echo "error: FM_CHECKPOINT_TIMEOUT_IMPL=$TIMEOUT_IMPL but $TIMEOUT_IMPL is not installed" >&2
       exit 2
