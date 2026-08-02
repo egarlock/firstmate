@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
+#
+# The bound comes from timeout(1), gtimeout(1), or a self-contained perl
+# process-group alarm, in that order. macOS ships none of the GNU coreutils
+# timeouts by default, so the perl fallback is the real path there and is not a
+# rarely-taken branch. FM_CHECKPOINT_TIMEOUT_IMPL pins the implementation to
+# auto (default), timeout, gtimeout, or perl, so each one can be exercised on a
+# host that happens to have the others; an explicitly named implementation that
+# is not installed is an error rather than a silent downgrade.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+TIMEOUT_IMPL=${FM_CHECKPOINT_TIMEOUT_IMPL:-auto}
 
 usage() {
   cat <<'EOF'
@@ -13,6 +22,10 @@ Usage: fm-watch-checkpoint.sh [--seconds <n>]
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
 On an actionable watcher wake, pass through the watcher output and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
+
+FM_CHECKPOINT_TIMEOUT_IMPL=auto|timeout|gtimeout|perl selects how the bound is
+enforced. auto prefers timeout, then gtimeout, then the built-in perl fallback
+that macOS hosts normally use.
 EOF
 }
 
@@ -42,6 +55,26 @@ done
 case "$SECONDS_ARG" in
   ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
+esac
+
+case "$TIMEOUT_IMPL" in
+  auto)
+    if command -v timeout >/dev/null 2>&1; then
+      TIMEOUT_IMPL=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then
+      TIMEOUT_IMPL=gtimeout
+    else
+      TIMEOUT_IMPL=perl
+    fi
+    ;;
+  perl) : ;;
+  timeout|gtimeout)
+    command -v "$TIMEOUT_IMPL" >/dev/null 2>&1 || {
+      echo "error: FM_CHECKPOINT_TIMEOUT_IMPL=$TIMEOUT_IMPL but $TIMEOUT_IMPL is not installed" >&2
+      exit 2
+    }
+    ;;
+  *) echo "error: FM_CHECKPOINT_TIMEOUT_IMPL must be auto, timeout, gtimeout, or perl" >&2; exit 2 ;;
 esac
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
@@ -74,16 +107,12 @@ run_with_perl_timeout() {
 }
 
 set +e
-if command -v timeout >/dev/null 2>&1; then
-  timeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
-  RC=$?
-elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
-  RC=$?
-else
-  run_with_perl_timeout >"$OUT" 2>"$ERR"
-  RC=$?
-fi
+case "$TIMEOUT_IMPL" in
+  timeout) timeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR" ;;
+  gtimeout) gtimeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR" ;;
+  perl) run_with_perl_timeout >"$OUT" 2>"$ERR" ;;
+esac
+RC=$?
 set -e
 
 if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then

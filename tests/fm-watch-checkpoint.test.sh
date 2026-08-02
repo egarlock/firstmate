@@ -87,7 +87,63 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+test_perl_fallback_bounds_quiet_checkpoint() {
+  local home out err status
+  home=$(make_home perl-fallback-quiet)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_CHECKPOINT_TIMEOUT_IMPL=perl "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+  expect_code 124 "$status" "perl-fallback quiet checkpoint exit"
+  assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 1s" "perl-fallback quiet checkpoint line missing"
+  assert_absent "$home/state/.watch.lock/pid" "watch lock pid survived the perl-fallback timeout"
+  pass "the perl fallback macOS actually uses bounds a quiet checkpoint exactly like timeout(1)"
+}
+
+test_perl_fallback_passes_through_a_real_wake() {
+  local home out err status
+  home=$(make_home perl-fallback-signal)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  (
+    sleep 1
+    printf 'done: synthetic wake\n' > "$home/state/demo.status"
+  ) &
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_CHECKPOINT_TIMEOUT_IMPL=perl "$CHECKPOINT" --seconds 8 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "perl-fallback signal checkpoint exit"
+  assert_contains "$(cat "$out")" "signal:" "perl-fallback did not pass a real watcher wake through"
+  pass "the perl fallback passes a real watcher wake through and exits 0"
+}
+
+test_timeout_impl_selection_fails_closed() {
+  local home out err status
+  home=$(make_home impl-selection)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  status=0
+  FM_HOME="$home" FM_CHECKPOINT_TIMEOUT_IMPL=bogus "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+  expect_code 2 "$status" "unknown timeout implementation exit"
+  assert_contains "$(cat "$err")" "must be auto, timeout, gtimeout, or perl" "unknown timeout implementation was not rejected"
+
+  # A named implementation that is not installed must be an error, never a
+  # silent downgrade to a different one. Only assert it for an implementation
+  # this host genuinely lacks, so the check stays honest on any host.
+  if ! command -v gtimeout >/dev/null 2>&1; then
+    status=0
+    FM_HOME="$home" FM_CHECKPOINT_TIMEOUT_IMPL=gtimeout "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+    expect_code 2 "$status" "missing named timeout implementation exit"
+    assert_contains "$(cat "$err")" "gtimeout is not installed" "missing named timeout implementation was not reported"
+  fi
+  pass "checkpoint rejects an unknown or uninstalled timeout implementation instead of downgrading"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_perl_fallback_bounds_quiet_checkpoint
+test_perl_fallback_passes_through_a_real_wake
+test_timeout_impl_selection_fails_closed
