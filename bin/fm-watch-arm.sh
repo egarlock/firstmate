@@ -86,6 +86,11 @@ CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
 # configured value means.
 case "$CONFIRM_TIMEOUT" in
   ''|*[!0-9]*) CONFIRM_TIMEOUT=10 ;;
+  # A leading zero is read as octal, so "08" is an arithmetic error rather than
+  # the 8 the operator meant, and a value long enough to overflow the addition
+  # wraps to a negative deadline that is already in the past.
+  0[0-9]*) CONFIRM_TIMEOUT=10 ;;
+  ??????????*) CONFIRM_TIMEOUT=10 ;;
 esac
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}

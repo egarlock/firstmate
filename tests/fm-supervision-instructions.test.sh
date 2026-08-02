@@ -214,6 +214,26 @@ test_copilot_is_attached_short_wait_background_notify() {
   out=$(FM_ARM_CONFIRM_TIMEOUT=not-a-number "$RENDER" --harness copilot)
   assert_contains "$out" "initial_wait: 15" "copilot wait budget did not fall back to the default confirmation budget"
 
+  # A leading zero is all digits but bash reads it as octal, so an unhardened
+  # guard lets it reach the arithmetic and abort the renderer under `set -eu`.
+  # That takes down the supervision block for EVERY harness, so assert the
+  # blast radius, not just the copilot render.
+  local status
+  status=0
+  out=$(FM_ARM_CONFIRM_TIMEOUT=08 "$RENDER" --harness copilot 2>&1) || status=$?
+  expect_code 0 "$status" "octal-looking FM_ARM_CONFIRM_TIMEOUT aborted the renderer"
+  assert_contains "$out" "initial_wait: 15" "octal-looking FM_ARM_CONFIRM_TIMEOUT was not normalized"
+  assert_not_contains "$out" "value too great for base" "renderer leaked a bash arithmetic error"
+  status=0
+  out=$(FM_ARM_CONFIRM_TIMEOUT=08 "$RENDER" --harness claude 2>&1) || status=$?
+  expect_code 0 "$status" "octal-looking FM_ARM_CONFIRM_TIMEOUT broke an unrelated harness render"
+
+  # Large enough to overflow the addition and wrap negative, which would pass
+  # the cap's -le test and render a negative wait.
+  out=$(FM_ARM_CONFIRM_TIMEOUT=9223372036854775807 "$RENDER" --harness copilot)
+  assert_contains "$out" "initial_wait: 15" "overflowing FM_ARM_CONFIRM_TIMEOUT was not normalized"
+  assert_not_contains "$out" "initial_wait: -" "copilot wait budget rendered a negative value"
+
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness copilot --x-mode 1)
   assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env'; exec bin/fm-watch-arm.sh" \
     "copilot arm command did not use the effective x-mode config path"

@@ -107,7 +107,15 @@ checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 COPILOT_MAX_INITIAL_WAIT=30
 copilot_confirm=${FM_ARM_CONFIRM_TIMEOUT:-10}
 case "$copilot_confirm" in
+  # Anything that is not a plain, small, base-10 integer is unusable, and each
+  # rejected shape escapes the cap below in its own way. A leading zero is read
+  # as octal, so "08" aborts this whole script under `set -eu` and takes the
+  # supervision block for EVERY harness with it, not just copilot. A value long
+  # enough to overflow the addition wraps negative, and a negative value passes
+  # the -le test and renders as the wait verbatim.
   ''|*[!0-9]*) copilot_confirm=10 ;;
+  0[0-9]*) copilot_confirm=10 ;;
+  ??????????*) copilot_confirm=10 ;;
 esac
 copilot_initial_wait=$((copilot_confirm + 5))
 [ "$copilot_initial_wait" -le "$COPILOT_MAX_INITIAL_WAIT" ] \

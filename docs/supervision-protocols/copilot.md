@@ -21,7 +21,9 @@ When this session owns supervision and away mode is not active:
 7. Never bundle the arm onto another command.
    Copilot has no tracked PreToolUse seatbelt, so nothing rejects a bundled or backgrounded arm before it runs.
 8. Trust only the arm's one-line status.
-   If the call returns before any `watcher:` line appears, read the arm's output with `read_bash` on its `shellId` until one does; never treat a silent return as either success or failure.
+   If the call returns before any `watcher:` line appears, make exactly one short `read_bash` on the arm's `shellId` to collect it.
+   Do not poll in a loop and do not use a long delay: `read_bash` holds the turn open the same way the arming call does, so repeated or slow reads recreate the queued-chat symptom this protocol exists to prevent.
+   If that single read still shows no status line, treat supervision as unconfirmed, say so, and re-arm rather than assuming either success or failure.
 9. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
 10. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
