@@ -47,7 +47,7 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, supervising project clones or a project-less firstmate-repo domain, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
-- **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
+- **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; tracked primary integrations also add a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Guarded by construction** - the first mate is read-only over your projects except for the guarded paths authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), with fleet sync's safe branch pruning remaining part of the fleet-sync exception; crewmates make every project change behind the configured merge authority.
 - **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
@@ -58,7 +58,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
+- A verified agent harness: Claude Code, Grok, Pi, Codex, OpenCode, or Copilot.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - tmux, for the reference session backend.
 
@@ -71,7 +71,8 @@ Claude Code and Grok use background-notify wake cycles; Pi uses its tracked prim
 All three have verified turn-end guard paths when launched with their documented setup.
 Pick whichever one matches your subscription and workflow.
 
-Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+Codex, OpenCode, and Copilot are also verified and supported as primary harnesses.
+Codex uses bounded foreground checkpoints, OpenCode uses a TUI plugin, and Copilot uses an attached short-wait arm without tracked primary hook backstops, so all three carry more harness-specific supervision tradeoffs than the three co-primaries.
 
 ### Install and launch
 
@@ -204,7 +205,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
 - [docs/gitlab-merge-watch.md](docs/gitlab-merge-watch.md) - how the merge watch follows a GitLab merge request on any instance, and the evidence behind it.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
-- [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, and unknown harness fallback.
+- [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, Copilot, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [`AGENTS.md`](AGENTS.md) - the distro's always-loaded operating contract and routing index for conditional procedures.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.

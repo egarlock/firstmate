@@ -6,8 +6,20 @@
 # daemon owns triage and the watcher exits on every wake for the daemon to
 # classify. Reliability depends on arming through a mechanism that SURVIVES the
 # call and NOTIFIES on exit, so firstmate must run this script as the harness's
-# own tracked background task (e.g. run_in_background). Run it as its own
-# standalone background task, never bundled onto the tail of another command.
+# own tracked background task (Claude's run_in_background, Grok's
+# `background: true`, or Copilot's shell call with a short initial_wait). Run it
+# as its own standalone background task, never bundled onto the tail of another
+# command.
+#
+# THIS SCRIPT BLOCKS FOR THE WHOLE WATCHER CYCLE, which is unbounded, so the
+# harness-agnostic invariant is: THE ARMING TOOL CALL MUST RETURN PROMPTLY and
+# only the forked watcher may keep running. A harness whose background mechanism
+# is a tool PARAMETER rather than a separate tool still holds the model's turn
+# open for that whole window, and an open turn queues everything the captain
+# types. Copilot's initial_wait is the verified example: a long one blocked chat
+# until the call was stopped. Budget the wait to cover FM_ARM_CONFIRM_TIMEOUT so
+# the status line below is visible, and no longer; never size it to cover the
+# cycle itself. docs/supervision-protocols/<harness>.md owns each call shape.
 # NEVER fire it and forget with a shell `&` inside another call: that backgrounded
 # child is reaped when the call returns, leaving NO watcher running and a false
 # "already running" off the dying process. That exact mistake silently took
@@ -66,6 +78,20 @@ BEAT="$STATE/.last-watcher-beat"
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
+# Both deadline computations below are integer arithmetic under `set -u`, and the
+# post-fork one runs AFTER the watcher child exists: a non-integer value there
+# aborts the arm with no status line at all and orphans a live watcher, while the
+# protocol tells the model to trust only that status line. Normalize instead, so
+# this script and bin/fm-supervision-instructions.sh agree on what a malformed
+# configured value means.
+case "$CONFIRM_TIMEOUT" in
+  ''|*[!0-9]*) CONFIRM_TIMEOUT=10 ;;
+  # A leading zero is read as octal, so "08" is an arithmetic error rather than
+  # the 8 the operator meant, and a value long enough to overflow the addition
+  # wraps to a negative deadline that is already in the past.
+  0[0-9]*) CONFIRM_TIMEOUT=10 ;;
+  ??????????*) CONFIRM_TIMEOUT=10 ;;
+esac
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"

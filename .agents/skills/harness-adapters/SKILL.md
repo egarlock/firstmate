@@ -50,17 +50,19 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
+Verified primary harnesses with tracked repo-level hook paths have an empirically validated "no turn ends blind" guard integration.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
+`copilot` has no tracked primary turn-end hook; `docs/turnend-guard.md` owns that gap and the global-hook decision boundary.
 The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+Verified primary harnesses with tracked PreToolUse-equivalent hooks deny watcher-arm anti-patterns (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before they run.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode` and `pi` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+`copilot` has no tracked PreToolUse hook; `docs/supervision-protocols/copilot.md` owns its compensating protocol and the global-hook decision boundary.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 ## Primary delegation-shape guard
@@ -86,12 +88,14 @@ Full mechanics, scoping, dated commands, payloads, and fail-open evidence live i
 - `opencode`: verified on 1.17.18; `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` remains fail-open headless.
 - `pi`: verified native `session_start`; the existing primary extension handles `startup`, `new`, and `resume` and uses `pi.sendMessage` to inject context without racing a positional launch prompt.
 - `grok`: the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
+- `copilot`: no tracked session-start integration; `docs/sessionstart-nudge.md` owns the global-hook decision boundary and explicit-start fallback.
 
 ## Primary watcher supervision
 
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
 Claude and Grok use tracked background-notify cycles around `bin/fm-watch-arm.sh`.
+Copilot uses an attached short-wait shell call around `bin/fm-watch-arm.sh`; `docs/supervision-protocols/copilot.md` owns the exact call contract.
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi uses the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions Pi auto-discovers once trusted.
@@ -356,10 +360,12 @@ The same gate shape (a `--version` probe against a pinned minimum) is how bootst
 Orphan-token sweep: a copilot or grok task that dies WITHOUT teardown (crash, killed pane, discarded worktree) leaves its `hooks/fm-turn-end.d/<token>` registry entry behind, since teardown is what removes it.
 `bin/fm-hook-sweep.sh` (run best-effort by bootstrap) clears such orphans: a token names its own owning home via its content path, so the sweep is home-agnostic - it removes only tokens whose task record (`state/<id>.meta`) or worktree pointer is gone/superseded, never a live token, an in-flight empty token, or another home's live token, and it is age-guarded (`FM_HOOK_SWEEP_MIN_AGE_MINS`, default 2) against a spawn still wiring a token up.
 
-**Copilot as PRIMARY harness: unsupported-pending.**
-Copilot-as-crewmate (and secondmate) is the supported scope.
-The primary-session turn-end guard layer that first-class primary harnesses ship (`docs/turnend-guard.md`: tracked repo-root hook wiring such as `.claude/settings.json`, `.grok/hooks/`, `.pi/extensions/` into `bin/fm-turnend-guard.sh` and the PreToolUse seatbelts) has no copilot arm: copilot loads hooks ONLY from the global `${COPILOT_HOME:-$HOME/.copilot}/hooks/` directory and has no per-project hook path, so the guard cannot ride tracked repo files - the pattern every other primary integration relies on - and installing a global, checkout-agnostic guard hook at session start is a different design with its own blast radius.
-Until that is designed and verified, do not run firstmate's primary session on copilot; `bin/fm-supervision-instructions.sh` deliberately falls back to its unknown-harness protocol for copilot, and `fm-guard.sh` remains the next-command alarm for blind turn ends.
+**Copilot as PRIMARY harness: supported, with no tracked hook backstops.**
+Copilot-as-crewmate (and secondmate) is the longest-verified scope, and a copilot primary now renders its own supervision protocol from `docs/supervision-protocols/copilot.md`.
+That protocol is the whole safety net, so read it before running or repairing a copilot primary: the arm goes out as its own attached shell call with the rendered short `initial_wait`, never detached, never bundled, and never behind shell `&`.
+Copilot queues everything the captain types while a model turn is active, and an attached call holds the turn open for its entire `initial_wait`, so an arm launched with a long wait blocks the captain's chat for the whole watcher cycle.
+The primary-session turn-end guard layer that other primary harnesses ship (`docs/turnend-guard.md`: tracked repo-root hook wiring such as `.claude/settings.json`, `.grok/hooks/`, `.pi/extensions/` into `bin/fm-turnend-guard.sh` and the PreToolUse seatbelts) has no copilot arm: copilot loads hooks ONLY from the global `${COPILOT_HOME:-$HOME/.copilot}/hooks/` directory and has no per-project hook path, so the guard cannot ride tracked repo files - the pattern every other primary integration relies on - and installing a global, checkout-agnostic guard hook at session start is a different design with its own blast radius.
+Until that is designed and verified, a copilot primary has no turn-end guard, no session-start nudge, and no PreToolUse seatbelt; `fm-guard.sh` remains the only next-command alarm for blind turn ends.
 
 Manual `/no-mistakes` end-to-end verification (cannot run inside a firstmate-on-itself worktree, which has no live copilot pane): spawn a real copilot crewmate on a throwaway task, wait for the brief to start, then steer `bin/fm-send.sh <window> '/no-mistakes'`.
 `/no-mistakes` opens copilot's slash-autocomplete popup, so the first Enter can hit the popup entry instead of sending; `fm-send`'s retried Enter lands it (peek the pane to confirm the invocation sent and copilot began driving a real `no-mistakes axi run`, re-sending once if the popup swallowed it).

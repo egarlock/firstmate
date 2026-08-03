@@ -16,6 +16,9 @@ set -u
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$ROOT/bin/fm-supervision-lib.sh"
 
+# shellcheck source=bin/fm-harness-policy.sh
+. "$ROOT/bin/fm-harness-policy.sh"
+
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -91,6 +94,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
+  cp "$ROOT/bin/fm-harness-policy.sh" "$dir/bin/fm-harness-policy.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
@@ -913,6 +917,31 @@ test_grok_hook_invokes_adapter() {
   pass ".grok primary hook: Stop hook invokes the grok adapter"
 }
 
+# Allowlist-driven truthfulness check. The per-harness tests above each assert a
+# hook that is already known to exist, so none of them notices a NEW verified
+# adapter that arrives with no tracked primary integration at all. This walks
+# FM_VERIFIED_ADAPTERS instead, and requires each adapter to be either wired or
+# explicitly recorded as unwired in docs/turnend-guard.md.
+test_turnend_integration_list_matches_verified_adapters() {
+  local harness doc integrated
+  doc=$(cat "$ROOT/docs/turnend-guard.md")
+  for harness in $FM_VERIFIED_ADAPTERS; do
+    integrated=0
+    if [ -d "$ROOT/.$harness" ] \
+      && grep -rl 'fm-turnend-guard' "$ROOT/.$harness" >/dev/null 2>&1; then
+      integrated=1
+    fi
+    if [ "$integrated" -eq 1 ]; then
+      assert_contains "$doc" "- \`$harness\`: " \
+        "docs/turnend-guard.md does not document $harness's tracked primary turn-end integration"
+    else
+      assert_contains "$doc" "\`$harness\` has no tracked primary turn-end integration." \
+        "$harness has no tracked primary turn-end integration and docs/turnend-guard.md does not record that gap"
+    fi
+  done
+  pass "every verified adapter is either wired to a tracked turn-end integration or recorded as having none"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -953,3 +982,4 @@ test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter
+test_turnend_integration_list_matches_verified_adapters

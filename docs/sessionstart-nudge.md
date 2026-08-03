@@ -26,6 +26,10 @@ Every path exits 0, including malformed state and adapter errors, because Claude
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message enters model context without racing an initial positional prompt, and the changed extension passes strict TypeScript checking on Pi 0.80.10. |
 | Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project event fires on Grok 0.2.103, but hook stdout does not reach model context, so this path is documented fail-open. |
 
+`copilot` has no tracked session-start integration.
+Copilot loads hooks only from the global `${COPILOT_HOME:-$HOME/.copilot}/hooks/` directory and has no per-project hook path, so the tracked-transport pattern every row above relies on cannot be used, and installing a global checkout-agnostic hook is a captain trust decision keyed `copilot-primary-global-hook-fallback`.
+A copilot primary therefore relies on `bin/fm-session-start.sh` being run explicitly, exactly as `docs/turnend-guard.md` records for the matching turn-end gap.
+
 The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end guard plugins run later on `session.idle`, and the turn-end guard continues to let the watcher coordinator act first, so the three plugins do not race for one lifecycle event.
 
@@ -134,7 +138,7 @@ A fresh Grok run was attempted on 2026-07-22 but stopped at `402 Payment Require
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
 It proves exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output for a plain primary and a marked linked secondmate primary.
-It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
+It also verifies that every verified adapter either registers the tracked wrapper or is explicitly recorded above as having no tracked session-start integration.
 `tests/fm-captain-translation-contract.test.sh` proves Ahoy's current marker rule, narrow legacy compatibility exclusions, genuine captain-message near misses, and the shared marker on every supported user-role operational injection.
 `tests/fm-pi-primary-live-e2e.test.sh` sends the exact legacy startup and bare-marker away-mode rows through a persistent model transcript, invokes Ahoy, and contrasts both with unrelated-marker and altered-startup captain near misses.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` also exercise their genuine native startup paths with first-message and later-message Ahoy regressions.

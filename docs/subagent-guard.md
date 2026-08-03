@@ -166,7 +166,7 @@ When that script is absent the message degrades to naming `bin/fm-brief.sh` then
 
 ## Harness wiring
 
-Every supported primary harness was reviewed.
+This matrix covers supported primary harnesses with tracked repo-level PreToolUse transports.
 Applicability turns on one question: does the harness expose built-in delegation tools that a primary session could use instead of `bin/fm-spawn.sh`?
 
 | Harness | Delegation surface | Status |
@@ -176,6 +176,8 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+
+`copilot` is outside this tracked-hook matrix because its primary has no repo-level PreToolUse transport; [`docs/supervision-protocols/copilot.md`](supervision-protocols/copilot.md) owns the global-hook decision boundary.
 
 ### Codex, verified not applicable
 

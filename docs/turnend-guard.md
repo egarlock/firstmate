@@ -38,7 +38,7 @@ If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 beca
 
 ## Harness Integrations
 
-All verified primary harnesses have a tracked integration:
+Five of the six verified primary harnesses have a tracked repo-level integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
@@ -47,6 +47,12 @@ All verified primary harnesses have a tracked integration:
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
+
+`copilot` has no tracked primary turn-end integration.
+Its hook surface is `${COPILOT_HOME:-$HOME/.copilot}/hooks`, outside this repository, so a copilot primary guard would require installing global files rather than a tracked repo-level hook.
+That is a captain trust decision that has not been made, so a copilot primary currently relies on [`docs/supervision-protocols/copilot.md`](supervision-protocols/copilot.md) plus the pull-based `bin/fm-guard.sh` warning instead of a push backstop.
+The firstmate-owned `agentStop` hook that `bin/fm-spawn.sh` writes for a copilot crewmate is the crewmate turn-end token hook and does not guard a copilot primary session.
+`tests/fm-turnend-guard.test.sh` asserts this list stays truthful against the verified-adapter allowlist, so adding an adapter without a tracked integration fails until it is either wired or recorded here.
 
 Claude and Codex support a direct blocking Stop hook.
 For those harnesses, exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
@@ -149,6 +155,6 @@ No Herdr command was issued and no fleet state was touched; the experiment wrote
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, allowlist-driven tracked hook registration for every verified adapter, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

@@ -4,6 +4,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-harness-policy.sh
+. "$SCRIPT_DIR/fm-harness-policy.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$REPO_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -80,13 +82,44 @@ if [ -z "$HARNESS" ]; then
   HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 fi
 
-case "$HARNESS" in
-  claude|codex|opencode|pi|grok) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
-  *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
-esac
-[ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
+# A verified adapter renders its own protocol; everything else, including a
+# verified adapter whose snippet is missing, falls back to unknown.md with a
+# matching heading. The allowlist lives only in bin/fm-harness-policy.sh, so
+# adding an adapter there cannot silently leave it on the generic fallback.
+if fm_harness_is_verified "$HARNESS" && [ -f "$DOC_DIR/$HARNESS.md" ]; then
+  SNIPPET="$DOC_DIR/$HARNESS.md"
+else
+  HARNESS=unknown
+  SNIPPET="$DOC_DIR/unknown.md"
+fi
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
+# Copilot's arming tool call must outlive fm-watch-arm.sh's confirmation budget
+# so the model sees the honest started/attached/FAILED line, and must return
+# immediately after it so the turn can end and captain chat stays responsive.
+# FM_ARM_CONFIRM_TIMEOUT is owned by bin/fm-watch-arm.sh; this only adds margin.
+# The result is then capped. FM_ARM_CONFIRM_TIMEOUT is an operator knob for slow
+# hosts, and propagating a large value uncapped would render a multi-minute
+# attached call into the protocol, the repair line, and the wake line, which is
+# exactly the blocked-chat incident this protocol exists to prevent. Past the cap
+# the arm's status line may not have printed when the call returns, so the
+# protocol tells the model to read it rather than assume a result.
+COPILOT_MAX_INITIAL_WAIT=30
+copilot_confirm=${FM_ARM_CONFIRM_TIMEOUT:-10}
+case "$copilot_confirm" in
+  # Anything that is not a plain, small, base-10 integer is unusable, and each
+  # rejected shape escapes the cap below in its own way. A leading zero is read
+  # as octal, so "08" aborts this whole script under `set -eu` and takes the
+  # supervision block for EVERY harness with it, not just copilot. A value long
+  # enough to overflow the addition wraps negative, and a negative value passes
+  # the -le test and renders as the wait verbatim.
+  ''|*[!0-9]*) copilot_confirm=10 ;;
+  0[0-9]*) copilot_confirm=10 ;;
+  ??????????*) copilot_confirm=10 ;;
+esac
+copilot_initial_wait=$((copilot_confirm + 5))
+[ "$copilot_initial_wait" -le "$COPILOT_MAX_INITIAL_WAIT" ] \
+  || copilot_initial_wait=$COPILOT_MAX_INITIAL_WAIT
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
@@ -108,6 +141,7 @@ render_snippet() {
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
+    line=${line//__FM_COPILOT_INITIAL_WAIT__/$copilot_initial_wait}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
     printf '%s\n' "$line"
@@ -148,6 +182,9 @@ repair_line() {
     grok)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
       ;;
+    copilot)
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own attached Copilot shell call with initial_wait ' "$copilot_initial_wait" ', never detached and never shell &.'
+      ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
       ;;
@@ -170,6 +207,9 @@ ordinary_wake_line() {
       ;;
     grok)
       printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'
+      ;;
+    copilot)
+      printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh attached Copilot shell call with initial_wait ' "$copilot_initial_wait" ' as directed below; the call must return promptly so the turn can end.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

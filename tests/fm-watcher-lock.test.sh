@@ -503,6 +503,36 @@ test_watcher_self_evicts_on_lock_takeover() {
   pass "watcher self-evicts when the lock pid no longer names it"
 }
 
+test_arm_normalizes_a_malformed_confirm_timeout() {
+  local dir state fakebin armout armpid i
+  dir=$(make_case arm-malformed-confirm)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  # FM_ARM_CONFIRM_TIMEOUT feeds integer arithmetic under `set -u`, and the
+  # post-fork deadline is computed AFTER the watcher child exists. Without
+  # normalization a non-integer aborts the arm with "unbound variable" and no
+  # status line at all, orphaning a live watcher while the copilot protocol
+  # tells the model to trust only that status line. A decimal is a realistic
+  # mistake here because FM_ARM_ATTACH_POLL is idiomatically 0.5.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=0.5 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qE 'watcher: (started|attached|FAILED)' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qE 'watcher: (started|attached|FAILED)' "$armout" \
+    || fail "arm emitted no status line for a malformed FM_ARM_CONFIRM_TIMEOUT"
+  ! grep -qi 'unbound variable' "$armout" || fail "arm aborted on a malformed FM_ARM_CONFIRM_TIMEOUT"
+  ! grep -qi 'invalid arithmetic operator' "$armout" || fail "arm aborted on a decimal FM_ARM_CONFIRM_TIMEOUT"
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm normalizes a malformed FM_ARM_CONFIRM_TIMEOUT instead of dying without a status line"
+}
+
 test_arm_self_eviction_is_loud_without_successor() {
   local dir state fakebin armout armpid watcher_pid status i
   dir=$(make_case arm-self-evict)
@@ -973,6 +1003,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
+test_arm_normalizes_a_malformed_confirm_timeout
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
