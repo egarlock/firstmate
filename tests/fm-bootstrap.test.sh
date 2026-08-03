@@ -769,11 +769,11 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "active dispatch profile should be silent by default, got: $out"
 
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
 
   expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
@@ -793,7 +793,7 @@ test_crew_dispatch_validation() {
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
@@ -825,8 +825,28 @@ empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid confi
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present
+non-slug provider is flagged^{"default":{"harness":"claude","provider":"Bad_Name"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile provider must be a lowercase [a-z0-9-]+ slug when present
+provider on non-claude harness is flagged^{"rules":[{"when":"kimi work","use":{"harness":"codex","provider":"kimi"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - provider is only supported with harness claude, not: codex
+missing provider file is flagged^{"default":{"harness":"claude","provider":"kimi"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - provider file missing: config/providers/kimi.env
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
+}
+
+test_crew_dispatch_provider_file_present_is_silent() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/dispatch-provider-ok"
+  mkdir -p "$case_dir/home/config/providers"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '{"rules":[{"when":"kimi work","use":{"harness":"claude","provider":"kimi"}}]}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' 'ANTHROPIC_BASE_URL=https://api.kimi.com/coding' \
+    > "$case_dir/home/config/providers/kimi.env"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "dispatch profile with an existing provider file should be silent, got: $out"
+  pass "bootstrap stays silent when a dispatch profile's provider file exists"
 }
 
 test_bootstrap_reporting
@@ -851,3 +871,4 @@ test_routine_bootstrap_contract_runs_under_system_bash
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_crew_dispatch_provider_file_present_is_silent

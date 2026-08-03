@@ -1,14 +1,28 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--provider <name>] [--backend <name>] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--provider <name>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --provider <name> selects the Anthropic-compatible endpoint env file
+#   config/providers/<name>.env and prepends its validated NAME=VALUE
+#   assignments to the launch command, so a third-party endpoint (e.g. Kimi)
+#   is a first-class dispatch choice instead of a raw launch command. The file
+#   grammar and semantics are owned by docs/configuration.md "Provider
+#   environment files"; the provider-capable harness set is owned by
+#   bin/fm-harness-policy.sh (claude only today), and any other resolved
+#   harness or a raw launch command refuses the flag. $VAR references stay
+#   UNEXPANDED (the worker pane's shell resolves them), but every referenced
+#   variable must be set in this process's environment or the spawn refuses,
+#   naming the variable and never its value. An active provider records
+#   provider= in the task's meta (absent provider= means the plain Anthropic
+#   endpoint), omits the unverified effort launch flag, and is re-applied
+#   automatically on a respawn that finds provider= in existing meta.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -92,7 +106,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend applies to every pair.
+#   source of truth; shared --scout/--harness/--model/--effort/--provider/--backend applies to every pair.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -121,7 +135,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,105p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -161,10 +175,12 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+PROVIDER=
 BACKEND_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+PROVIDER_SET=0
 BACKEND_SET=0
 POS=()
 want_value=
@@ -177,6 +193,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      provider) PROVIDER=$a; PROVIDER_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -192,6 +209,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --provider) want_value=provider ;;
+    --provider=*) PROVIDER=${a#--provider=}; PROVIDER_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     *) POS+=("$a") ;;
@@ -201,6 +220,7 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$PROVIDER_SET" -eq 0 ] || [ -n "$PROVIDER" ] || { echo "error: --provider requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
@@ -278,6 +298,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            [ -z "${PROVIDER:-}" ] || echo "provider=$PROVIDER"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -342,6 +363,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$PROVIDER" ] || shared_args+=(--provider "$PROVIDER")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -368,6 +390,14 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+
+# Provider durability: a respawn without an explicit --provider re-applies the
+# provider recorded in the task's existing meta, mirroring how a --secondmate
+# respawn keeps its recorded backend. Validation below still runs in full, so a
+# provider file that went missing or bad since the first spawn refuses loudly.
+if [ "$PROVIDER_SET" -eq 0 ] && [ -f "$STATE/$ID.meta" ]; then
+  PROVIDER=$(grep '^provider=' "$STATE/$ID.meta" | cut -d= -f2- || true)
+fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else -
 # for a --secondmate spawn - the backend already recorded in the mate's meta
@@ -482,9 +512,11 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    RAW_LAUNCH=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -529,6 +561,141 @@ if [ "$HARNESS" = copilot ] && [ "${FM_SPAWN_SKIP_VERSION_CHECK:-0}" != 1 ]; the
     echo "error: copilot CLI is incompatible (need >= $FM_COPILOT_MIN_MAJOR.$FM_COPILOT_MIN_MINOR.$FM_COPILOT_MIN_PATCH, found ${have:-none}); update with 'copilot update' or install GitHub Copilot CLI, then respawn $ID" >&2
     exit 1
   fi
+fi
+
+# --- provider-env axis (--provider) -----------------------------------------
+# The provider FILE grammar is owned by docs/configuration.md "Provider
+# environment files"; this is its executable enforcement. Everything here fails
+# closed before any backend or worktree side effect, and secret values are
+# never expanded, printed, or recorded - only variable NAMES appear in errors.
+
+# provider_line_assignment <line>: succeed iff <line> is a valid provider
+# assignment under the documented grammar; no output.
+provider_line_assignment() {
+  local line=$1 name value inner
+  case "$line" in
+    *=*) : ;;
+    *) return 1 ;;
+  esac
+  name=${line%%=*}
+  case "$name" in
+    [A-Za-z_]*) : ;;
+    *) return 1 ;;
+  esac
+  case "$name" in
+    *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  value=${line#*=}
+  # shellcheck disable=SC2016,SC1003  # literal metacharacter patterns, not expansions or escapes
+  case "$value" in
+    *'`'*|*'$('*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'\'*) return 1 ;;
+  esac
+  case "$value" in
+    \"?*\")
+      inner=${value#\"}; inner=${inner%\"}
+      case "$inner" in *\"*|*\'*) return 1 ;; esac
+      ;;
+    '""') : ;;
+    \'?*\')
+      inner=${value#\'}; inner=${inner%\'}
+      case "$inner" in *\'*|*\"*) return 1 ;; esac
+      # Single quotes suppress expansion in the worker pane's shell, so a $VAR
+      # here would silently stay literal (e.g. an auth token that never
+      # resolves); refuse it and require double quotes for references.
+      case "$inner" in *'$'*) return 1 ;; esac
+      ;;
+    "''") : ;;
+    *[\"\']*) return 1 ;;
+    *[[:space:]]*) return 1 ;;
+  esac
+  return 0
+}
+
+# provider_check_vars <value>: assert every $VAR/${VAR} reference in <value>
+# names a variable set in THIS process's environment (presence only; the value
+# is never read into any record) and that no other $ use remains. Prints the
+# first missing variable NAME on failure.
+provider_check_vars() {
+  local value=$1 refs leftover ref name
+  case "$value" in
+    *'$'*) : ;;
+    *) return 0 ;;
+  esac
+  refs=$(printf '%s\n' "$value" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*' || true)
+  leftover=$(printf '%s\n' "$value" | sed -E 's/\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*//g')
+  case "$leftover" in
+    *'$'*) printf '%s\n' '$'; return 1 ;;
+  esac
+  for ref in $refs; do
+    name=${ref#\$}
+    name=${name#\{}
+    name=${name%\}}
+    if ! printenv "$name" >/dev/null 2>&1; then
+      printf '%s\n' "$name"
+      return 1
+    fi
+  done
+  return 0
+}
+
+# provider_env_prefix <file>: validate every line of <file> and print the
+# space-joined assignment prefix in file order; any violation is a loud refusal.
+provider_env_prefix() {
+  local file=$1 line stripped value lineno=0 missing prefix=
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    stripped=${line#"${line%%[![:space:]]*}"}
+    case "$stripped" in
+      ''|'#'*) continue ;;
+    esac
+    if [ "$stripped" != "$line" ]; then
+      echo "error: provider file $file line $lineno: assignments must start at the first column" >&2
+      return 1
+    fi
+    if ! provider_line_assignment "$line"; then
+      echo "error: provider file $file line $lineno is not a valid NAME=VALUE assignment (grammar: docs/configuration.md \"Provider environment files\")" >&2
+      return 1
+    fi
+    value=${line#*=}
+    if ! missing=$(provider_check_vars "$value"); then
+      if [ "$missing" = '$' ]; then
+        echo "error: provider file $file line $lineno: stray \$ outside a \$VAR/\${VAR} reference" >&2
+      else
+        echo "error: provider file $file line $lineno references \$$missing, which is not set in firstmate's environment; export it before spawning" >&2
+      fi
+      return 1
+    fi
+    prefix="${prefix:+$prefix }$line"
+  done < "$file"
+  if [ -z "$prefix" ]; then
+    echo "error: provider file $file contains no assignments" >&2
+    return 1
+  fi
+  printf '%s\n' "$prefix"
+}
+
+PROVIDER_ENV_PREFIX=
+if [ -n "$PROVIDER" ]; then
+  case "$PROVIDER" in
+    *[!a-z0-9-]*)
+      echo "error: provider name '$PROVIDER' is not slug-safe (allowed: [a-z0-9-]+)" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    echo "error: --provider requires the verified launch template; a raw launch command must carry its own env prefix" >&2
+    exit 1
+  fi
+  if ! fm_harness_provider_allowed "$HARNESS"; then
+    echo "error: --provider is only supported with harness(es): $FM_PROVIDER_HARNESSES (resolved harness '$HARNESS'); only claude's Anthropic-compatible env mechanism is verified" >&2
+    exit 1
+  fi
+  PROVIDER_FILE="$CONFIG/providers/$PROVIDER.env"
+  if [ ! -f "$PROVIDER_FILE" ]; then
+    echo "error: unknown provider '$PROVIDER': no provider file at config/providers/$PROVIDER.env" >&2
+    exit 1
+  fi
+  PROVIDER_ENV_PREFIX=$(provider_env_prefix "$PROVIDER_FILE") || exit 1
 fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -584,7 +751,7 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  fm_harness_effort_flag "$1" "$2"
+  fm_harness_effort_flag "$1" "$2" "$3"
 }
 
 json_escape() {
@@ -1326,6 +1493,9 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # provider= is written only when a provider is active (absent provider= means
+  # the plain Anthropic endpoint, the same pattern as absent backend= = tmux).
+  [ -z "$PROVIDER" ] || echo "provider=$PROVIDER"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
@@ -1370,7 +1540,7 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 PIBRIEFENV=
 [ "$HARNESS" != pi ] || PIBRIEFENV="FM_FIRSTMATE_PI_LAUNCH_BRIEF=$sq_brief"
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$PROVIDER")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
@@ -1380,6 +1550,9 @@ LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 LAUNCH=${LAUNCH//__PIBRIEFENV__/$PIBRIEFENV}
+# Provider assignments go in front of the whole template; $VAR references stay
+# unexpanded here and resolve in the worker pane's shell.
+[ -z "$PROVIDER_ENV_PREFIX" ] || LAUNCH="$PROVIDER_ENV_PREFIX $LAUNCH"
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

@@ -20,3 +20,4 @@ config/cmux-socket-password
 config/wedge-alarm
 config/herdr-presentation-spaces
 config/harbor-watch.json
+config/providers/

@@ -83,6 +83,7 @@ Because these paths are gitignored, that propagation is a separate, primary-auth
 Propagation failures warn without blocking secondmate launch or session-start continuation, and the destination keeps whatever safely validated state the helper left behind.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
+`config/providers/` provider-env files are deliberately not inherited either, so an inherited `config/crew-dispatch.json` that names a provider needs the matching `config/providers/<name>.env` created by hand in the secondmate home (`bin/fm-config-inherit-lib.sh`; docs/configuration.md "Provider environment files").
 `data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
 Its primary file header must state that the file is main-authoritative, read-only in secondmate homes, must not be edited there, and that new captain-preference discoveries are routed to the main firstmate through marked status or a document pointer.
 Every propagation point converges the secondmate copy to the primary bytes; when the primary file is absent, any existing secondmate copy is quarantined and removed so absence converges too.

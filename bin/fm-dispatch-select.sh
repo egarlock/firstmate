@@ -7,6 +7,10 @@
 # profile object, or a non-empty array of profile objects.
 # Output is one compact JSON profile object on stdout.
 # Selection diagnostics go to stderr and never alter the profile JSON.
+# A profile's optional provider field is validated (slug shape and
+# provider-capable harness pairing per bin/fm-harness-policy.sh) and passed
+# through untouched; file existence and grammar are owned by fm-spawn and
+# bootstrap (docs/configuration.md "Provider environment files").
 #
 # This header is the single owner of quota-aware selection mechanics:
 #   - A profile object resolves to itself for backward compatibility.
@@ -119,6 +123,7 @@ profiles_json=$(printf '%s\n' "$SPEC_JSON" | jq -ec '
 ' 2>/dev/null) || { echo "error: dispatch input must be a rule, profile, or profile array" >&2; exit 2; }
 
 policy_adapters_json=$(printf '['; sep=; for a in $FM_VERIFIED_ADAPTERS; do printf '%s"%s"' "$sep" "$a"; sep=,; done; printf ']')
+policy_provider_harnesses_json=$(printf '['; sep=; for a in $FM_PROVIDER_HARNESSES; do printf '%s"%s"' "$sep" "$a"; sep=,; done; printf ']')
 policy_efforts_json=$(printf '{'; sep=; for a in $FM_VERIFIED_ADAPTERS; do
   inner=; isep=
   for e in $(fm_harness_efforts "$a"); do inner="$inner$isep\"$e\""; isep=,; done
@@ -126,7 +131,8 @@ policy_efforts_json=$(printf '{'; sep=; for a in $FM_VERIFIED_ADAPTERS; do
 done; printf '}')
 
 validation_error=$(printf '%s\n' "$profiles_json" | jq -r \
-  --argjson verified "$policy_adapters_json" --argjson efforts "$policy_efforts_json" '
+  --argjson verified "$policy_adapters_json" --argjson efforts "$policy_efforts_json" \
+  --argjson provider_harnesses "$policy_provider_harnesses_json" '
   def verified($h): $verified | index($h);
   def effort_ok($h; $e): (($efforts[$h] // []) | index($e)) != null;
   if length == 0 then "dispatch profile array must not be empty"
@@ -134,8 +140,10 @@ validation_error=$(printf '%s\n' "$profiles_json" | jq -r \
   elif any(.[]; ((.harness? | type) != "string") or (.harness | length) == 0) then "each dispatch profile needs a non-empty harness"
   elif any(.[]; has("model") and (((.model | type) != "string") or (.model | length) == 0)) then "dispatch profile model must be a non-empty string when present"
   elif any(.[]; has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)) then "dispatch profile effort must be a non-empty string when present"
+  elif any(.[]; has("provider") and (((.provider | type) != "string") or ((.provider | test("^[a-z0-9-]+$")) | not))) then "dispatch profile provider must be a lowercase [a-z0-9-]+ slug when present"
   elif any(.[]; .harness as $h | verified($h) | not) then "dispatch profile contains an unverified harness"
   elif any(.[]; has("effort") and (. as $profile | effort_ok($profile.harness; $profile.effort) | not)) then "dispatch profile contains an unsupported harness/effort pair"
+  elif any(.[]; .harness as $h | has("provider") and (($provider_harnesses | index($h)) | not)) then "dispatch profile provider is only supported with harness " + ($provider_harnesses | join(", "))
   else empty
   end
 ')
@@ -147,7 +155,8 @@ clean_profile_at() {
     def clean($p):
       {harness: $p.harness}
       + (if ($p.model? | type) == "string" then {model: $p.model} else {} end)
-      + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end);
+      + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end)
+      + (if ($p.provider? | type) == "string" then {provider: $p.provider} else {} end);
     clean(.[$index])
   '
 }
