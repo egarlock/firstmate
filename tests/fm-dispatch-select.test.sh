@@ -307,8 +307,19 @@ test_malformed_profile_arrays_are_validation_errors() {
 [{"harness":"claude","model":3}]^model must be a non-empty string
 [{"harness":"spaceship"}]^contains an unverified harness
 [{"harness":"codex","effort":"max"}]^contains an unsupported harness/effort pair
+[{"harness":"claude","provider":"Bad_Name"}]^provider must be a lowercase [a-z0-9-]+ slug
+[{"harness":"codex","provider":"kimi"}]^provider is only supported with harness claude
 ROWS
   pass "malformed arrays stay actionable validation errors and never enter random fallback"
+}
+
+test_provider_field_passes_through() {
+  local out
+  out=$(FM_DISPATCH_RANDOM_SOURCE="$RANDOM_ONE" "$ROOT/bin/fm-dispatch-select.sh" \
+    '{"harness":"claude","model":"kimi-k3","effort":"high","provider":"kimi"}' 2>/dev/null)
+  assert_profile "$out" '{"harness":"claude","model":"kimi-k3","effort":"high","provider":"kimi"}' \
+    "single profile with provider should pass provider through untouched"
+  pass "a resolved profile's provider field passes through to the concrete output"
 }
 
 test_implicit_array_picks_higher_min_provider
@@ -323,5 +334,6 @@ test_partial_quota_data_prefers_scorable_candidate
 test_operational_quota_failures_use_uniform_random_fallback
 test_single_profile_and_one_element_array
 test_malformed_profile_arrays_are_validation_errors
+test_provider_field_passes_through
 
 echo "# all fm-dispatch-select tests passed"

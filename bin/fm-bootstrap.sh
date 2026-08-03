@@ -752,8 +752,14 @@ policy_efforts_json() {
   printf '{%s}\n' "${out#,}"
 }
 
+policy_provider_harnesses_json() {
+  local a out=
+  for a in $FM_PROVIDER_HARNESSES; do out="$out,\"$a\""; done
+  printf '[%s]\n' "${out#,}"
+}
+
 crew_dispatch_validate() {
-  local file err
+  local file err providers p
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -764,7 +770,8 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  err=$(jq -r --argjson verified "$(policy_adapters_json)" --argjson efforts "$(policy_efforts_json)" '
+  err=$(jq -r --argjson verified "$(policy_adapters_json)" --argjson efforts "$(policy_efforts_json)" \
+    --argjson provider_harnesses "$(policy_provider_harnesses_json)" '
     def verified($h): $verified | index($h);
     def effort_ok($h; $e):
       if $e == null then true
@@ -813,8 +820,20 @@ crew_dispatch_validate() {
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
+      | (configured_profiles
+        | map(select(has("provider")
+            and (((.provider | type) != "string") or ((.provider | test("^[a-z0-9-]+$")) | not))))
+        | length) as $bad_provider_shapes
+      | (configured_profiles
+        | map(select(. as $p | has("provider") and (($p.provider | type) == "string")
+            and (($provider_harnesses | index($p.harness)) | not)))
+        | map(.harness | tostring)
+        | unique) as $provider_harness_mismatches
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
+        elif $bad_provider_shapes > 0 then "profile provider must be a lowercase [a-z0-9-]+ slug when present"
+        elif ($provider_harness_mismatches | length) > 0 then
+          "provider is only supported with harness " + ($provider_harnesses | join(", ")) + ", not: " + ($provider_harness_mismatches | join(", "))
         else empty
         end
     end
@@ -823,6 +842,25 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
     return 0
   fi
+  # Referenced provider files must exist: a dispatch profile naming a provider
+  # with no config/providers/<name>.env would otherwise pass validation here and
+  # only refuse at spawn time (fm-spawn --provider fails closed either way).
+  providers=$(jq -r '
+    def profiles($value):
+      if ($value | type) == "array" then $value
+      elif ($value | type) == "object" then [$value]
+      else []
+      end;
+    ([(.rules // [])[]? | profiles(.use?)[]?]
+      + (if has("default") then [profiles(.default)[]?] else [] end))
+    | map(.provider? // empty) | unique | .[]
+  ' "$file" 2>/dev/null || true)
+  for p in $providers; do
+    if [ ! -f "$CONFIG/providers/$p.env" ]; then
+      echo "CREW_DISPATCH: invalid config/crew-dispatch.json - provider file missing: config/providers/$p.env"
+      return 0
+    fi
+  done
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
     jq -r '
     def profile($p):
