@@ -4,8 +4,9 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own standard CLI - gh for GitHub, glab
+# for GitLab, and az (with its azure-devops extension) for Azure DevOps - so
+# an upstream checkout needs no extra tooling to follow any of them.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -104,6 +105,65 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  azuredevops)
+    # The organization comes from the validated identity: the first path
+    # segment on dev.azure.com, or the host's own org label on the legacy
+    # <org>.visualstudio.com spelling. Either way az is addressed by the
+    # canonical https://dev.azure.com/<org> organization URL and the PR
+    # number, never by the stored URL itself.
+    case "$host" in
+      dev.azure.com)
+        org=${path%%/*}
+        rest=${path#*/}
+        ;;
+      *.visualstudio.com)
+        org=${host%.visualstudio.com}
+        case "$org" in
+          *.*|'') exit 0 ;;
+        esac
+        rest=$path
+        ;;
+      *) exit 0 ;;
+    esac
+    [ "${#org}" -ge 1 ] && [ "${#org}" -le 50 ] || exit 0
+    case "$org" in
+      -*|*-|*[!A-Za-z0-9-]*) exit 0 ;;
+    esac
+    # The remaining path must be exactly <project>/_git/<repository>.
+    project=${rest%%/*}
+    rest=${rest#*/}
+    [ "${rest%%/*}" = _git ] || exit 0
+    repo=${rest#*/}
+    case "$repo" in
+      */*) exit 0 ;;
+    esac
+    for segment in "$project" "$repo"; do
+      [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || exit 0
+      case "$segment" in
+        .|..|*[!A-Za-z0-9._%-]*) exit 0 ;;
+      esac
+      # Percent-encoding stays encoded in the identity, so every % must be a
+      # well-formed %XX escape.
+      scan=$segment
+      while :; do
+        case "$scan" in
+          *%*)
+            scan=${scan#*%}
+            case "$scan" in
+              [0-9A-Fa-f][0-9A-Fa-f]*) scan=${scan#??} ;;
+              *) exit 0 ;;
+            esac
+            ;;
+          *) break ;;
+        esac
+      done
+    done
+    [ "$url" = "https://$host/$path/pullrequest/$number" ] || exit 0
+    # Only ADO's terminal merged status wakes; active and abandoned pull
+    # requests stay silent exactly like an open or closed GitHub PR.
+    status=$(az repos pr show --id "$number" --organization "https://dev.azure.com/$org" --query status -o tsv 2>/dev/null) || exit 0
+    [ "$status" = completed ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac
