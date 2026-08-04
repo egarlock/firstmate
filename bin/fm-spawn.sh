@@ -52,7 +52,15 @@
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. A --secondmate spawn resolves its backend as:
+#   explicit --backend, then the backend recorded in the mate's meta (a respawn
+#   keeps the mate on its recorded backend regardless of later config changes),
+#   then config/secondmate-backend, then the shared resolution
+#   (fm_backend_secondmate_name; docs/configuration.md "Runtime backend").
+#   A cmux --secondmate spawn creates the mate's own dedicated workspace
+#   (docs/cmux-backend.md "Secondmate support") and additionally records
+#   cmux_workspace_title=; orca does not support --secondmate spawns
+#   (fm_backend_validate_secondmate_spawn).
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -621,28 +629,39 @@ if [ "$KIND" = secondmate ]; then
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
 
-# Backend selection (data/fm-backend-design-d7): explicit --backend, else
-# FM_BACKEND env, else config/backend, else runtime auto-detection, else
-# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
-# non-spawn-capable backends. The resolved value is
-# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
-# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# Backend selection (data/fm-backend-design-d7): explicit --backend, else -
+# for a --secondmate spawn - the backend already recorded in the mate's meta
+# (a respawn keeps the mate on its recorded backend regardless of later
+# config changes), else config/secondmate-backend, else the shared resolution
+# (FM_BACKEND env, config/backend, runtime auto-detection, default tmux;
+# fm_backend_name/fm_backend_secondmate_name in bin/fm-backend.sh).
+# fm_backend_validate_spawn refuses unknown or non-spawn-capable backends,
+# and fm_backend_validate_secondmate_spawn additionally refuses --secondmate
+# on a backend with no verified secondmate launch design (orca today). The
+# resolved value is recorded in meta only when it is NOT tmux (fm-teardown.sh
+# and fm-watch.sh's window_backend/fm_backend_of_meta already treat an absent
+# backend= as tmux), so the default path's meta stays byte-identical.
 if [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
+elif [ "$KIND" = secondmate ]; then
+  # The task id itself is parsed later; a --secondmate spawn's first
+  # positional is always the mate id (the same read the remote path above
+  # uses), which is what a respawn's recorded meta is keyed by.
+  SM_ID=${POS[0]:-}
+  if [ -n "$SM_ID" ] && [ -f "$STATE/$SM_ID.meta" ]; then
+    BACKEND=$(fm_backend_of_meta "$STATE/$SM_ID.meta")
+  else
+    BACKEND=$(fm_backend_secondmate_name)
+  fi
 else
   BACKEND=$(fm_backend_name)
 fi
-fm_backend_validate_spawn "$BACKEND" || exit 1
+if [ "$KIND" = secondmate ]; then
+  fm_backend_validate_secondmate_spawn "$BACKEND" || exit 1
+else
+  fm_backend_validate_spawn "$BACKEND" || exit 1
+fi
 fm_backend_source "$BACKEND" || exit 1
-if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=orca does not support --secondmate spawns yet" >&2
-  exit 1
-fi
-if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=cmux does not support --secondmate spawns yet" >&2
-  exit 1
-fi
 if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
@@ -1726,16 +1745,45 @@ EOF
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
-    fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
-    read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
+    CMUX_SECONDMATE_TITLE=
+    if [ "$KIND" = secondmate ]; then
+      # A secondmate gets its own dedicated workspace at its home directory in
+      # every container mode (a tab-mode primary must never land a mate as a
+      # tab in the PRIMARY's own workspace). create_secondmate echoes
+      # "<ws> <sf> <initial-title>"; the title is recorded in the mate's meta
+      # as the mate's synced-title recovery anchor (docs/cmux-backend.md
+      # "Secondmate support").
+      CMUX_TASK_IDS=$(fm_backend_cmux_create_secondmate "$PROJ_ABS" "$W") || exit 1
+      read -r CMUX_WORKSPACE_ID_TASK CMUX_SURFACE_ID_TASK CMUX_SECONDMATE_TITLE <<EOF
 $CMUX_TASK_IDS
 EOF
-    if [ -z "$CMUX_WORKSPACE_ID" ] || [ -z "$CMUX_SURFACE_ID" ]; then
-      echo "error: cmux did not return a workspace/surface id for $W" >&2
-      exit 1
+      if [ -z "$CMUX_WORKSPACE_ID_TASK" ] || [ -z "$CMUX_SURFACE_ID_TASK" ] || [ -z "$CMUX_SECONDMATE_TITLE" ]; then
+        echo "error: cmux did not return a workspace/surface id and title for secondmate $W" >&2
+        exit 1
+      fi
+    else
+      # fm_backend_cmux_container_ensure echoes the container token: the
+      # literal "workspace" (workspace mode - default) or the container
+      # workspace's UUID (tab mode - firstmate's own workspace inside cmux, or
+      # the shared per-home one; config/cmux-container, docs/cmux-backend.md
+      # "Task container shape"). create_task consumes it and echoes one
+      # "<ws> <sf>" shape in both modes.
+      CMUX_CONTAINER=$(fm_backend_cmux_container_ensure "$PROJ_ABS") || exit 1
+      CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$CMUX_CONTAINER" "$W" "$PROJ_ABS") || exit 1
+      # _TASK-suffixed names, never bare CMUX_WORKSPACE_ID: that is the ambient
+      # env marker cmux injects into its own terminals, which container_ensure
+      # reads (tab mode joins firstmate's own workspace) and the cmux CLI
+      # itself honors as an ambient target fallback - clobbering it would
+      # corrupt both.
+      read -r CMUX_WORKSPACE_ID_TASK CMUX_SURFACE_ID_TASK <<EOF
+$CMUX_TASK_IDS
+EOF
+      if [ -z "$CMUX_WORKSPACE_ID_TASK" ] || [ -z "$CMUX_SURFACE_ID_TASK" ]; then
+        echo "error: cmux did not return a workspace/surface id for $W" >&2
+        exit 1
+      fi
     fi
-    T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    T="$CMUX_WORKSPACE_ID_TASK:$CMUX_SURFACE_ID_TASK"
     ;;
   orca)
     set +e
@@ -1884,8 +1932,14 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  # The wait is bounded by FM_SPAWN_WORKTREE_TIMEOUT (seconds, default 300 -
+  # a fixed 60s starved slow first-clone treehouse pools). A non-numeric
+  # value falls back to the default rather than breaking the loop, and the
+  # timeout error names the effective bound.
+  WORKTREE_TIMEOUT="${FM_SPAWN_WORKTREE_TIMEOUT:-300}"
+  case "$WORKTREE_TIMEOUT" in ''|*[!0-9]*) WORKTREE_TIMEOUT=300 ;; esac
   candidate=""
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$WORKTREE_TIMEOUT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -1904,7 +1958,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${WORKTREE_TIMEOUT}s; inspect window $T" >&2
     exit 1
   fi
 
@@ -2287,8 +2341,12 @@ META_WINDOW=$T
     echo "terminal=$ORCA_TERMINAL"
   fi
   if [ "$BACKEND" = cmux ]; then
-    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
-    echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID_TASK"
+    echo "cmux_surface_id=$CMUX_SURFACE_ID_TASK"
+    # The mate's initial workspace title, the synced-title recovery anchor of
+    # the id-primary + synced-title design (docs/cmux-backend.md "Secondmate
+    # support"); liveness touches re-sync it as the captain retitles.
+    [ -z "${CMUX_SECONDMATE_TITLE:-}" ] || echo "cmux_workspace_title=$CMUX_SECONDMATE_TITLE"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

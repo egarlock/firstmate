@@ -7,7 +7,9 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
-#                 "BACKEND_INVALID: <name> (known: <names>)",
+#                 "BACKEND_INVALID: <name> (known: <names>)" (also fired for a
+#                 config/secondmate-backend value with no verified secondmate
+#                 launch design),
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -501,12 +503,20 @@ secondmate_liveness_sweep() {
   # existing ambiguous processes and every transiently unreadable target while
   # adding the missing-session path the original bare-shell and Herdr-husk sweep
   # lacked.
+  # Endpoint resolution runs first (fm_backend_secondmate_resolve): for cmux
+  # this is the supervision touch that syncs the mate's recorded workspace
+  # title by id and re-records relaunch-stale ids before the probe reads
+  # anything; every other backend echoes the recorded target unchanged. A
+  # definitively gone endpoint (rc 2) is the same authoritative absence the
+  # probe reports as missing; multiple candidates (rc 3) refuse as their own
+  # ambiguity, and an uninspectable endpoint (rc 1) stays unreadable - neither
+  # is ever acted on.
   # A meta with no window remains owned by secondmate-provisioning recovery.
   # Secondmate homes never contain kind=secondmate meta, so this is naturally a
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend resolved resolve_rc
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -585,7 +595,17 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
-    agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+    resolve_rc=0
+    resolved=$(fm_backend_secondmate_resolve "$backend" "$meta" 2>/dev/null) || resolve_rc=$?
+    case "$resolve_rc" in
+      0)
+        [ -z "$resolved" ] || target=$resolved
+        agent_state=$(fm_backend_agent_state "$backend" "$target" "fm-$id" 2>/dev/null) || agent_state=unreadable
+        ;;
+      2) agent_state=missing ;;
+      3) agent_state='resolver-ambiguous' ;;
+      *) agent_state=unreadable ;;
+    esac
     if ! fm_harness_is_verified "$harness"; then
       case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
     fi
@@ -598,7 +618,10 @@ secondmate_liveness_sweep() {
       dead|missing)
         if [ "$agent_state" = dead ]; then
           cause="confirmed agent absence on existing endpoint"
-          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+          # The meta-driven secondmate kill: for cmux it closes the mate's
+          # whole dedicated workspace through the resolver's identity checks;
+          # every other backend keeps the generic target kill shape.
+          fm_backend_secondmate_kill "$backend" "$meta" 2>/dev/null || true
         else
           cause="recorded endpoint confidently missing"
         fi
@@ -613,6 +636,9 @@ secondmate_liveness_sweep() {
         ;;
       ambiguous)
         echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)"
+        ;;
+      resolver-ambiguous)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint ambiguous - multiple candidates matched; inspect and reconcile manually (backend=$backend)"
         ;;
       unreadable)
         echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)"
@@ -1065,6 +1091,21 @@ fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
   echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
+fi
+# config/secondmate-backend validation: the knob must name "default" or a
+# backend with a verified --secondmate launch design (FM_BACKEND_SECONDMATE_SPAWN,
+# bin/fm-backend.sh), so a bad value is surfaced at session start instead of
+# failing the next secondmate spawn or respawn.
+SECONDMATE_BACKEND_VALUE=
+if [ -f "$CONFIG/secondmate-backend" ]; then
+  while IFS= read -r sm_backend_line || [ -n "$sm_backend_line" ]; do
+    SECONDMATE_BACKEND_VALUE=$(printf '%s' "$sm_backend_line" | tr -d '[:space:]')
+    [ -z "$SECONDMATE_BACKEND_VALUE" ] || break
+  done < "$CONFIG/secondmate-backend"
+fi
+if [ -n "$SECONDMATE_BACKEND_VALUE" ] && [ "$SECONDMATE_BACKEND_VALUE" != default ] \
+  && ! fm_backend_list_contains "$FM_BACKEND_SECONDMATE_SPAWN" "$SECONDMATE_BACKEND_VALUE"; then
+  echo "BACKEND_INVALID: $SECONDMATE_BACKEND_VALUE (config/secondmate-backend; secondmate-supported: $FM_BACKEND_SECONDMATE_SPAWN or default)"
 fi
 for t in $BACKEND_TOOLS; do
   fm_backend_required_tool_available "$BACKEND" "$t" \

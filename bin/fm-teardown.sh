@@ -1866,7 +1866,15 @@ elif [ "$BACKEND" = herdr ]; then
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  if [ "$KIND" = secondmate ]; then
+    # Secondmate endpoints go through the meta-driven kill: for cmux that
+    # closes the mate's WHOLE dedicated workspace after id/synced-title/
+    # fingerprint identification (docs/cmux-backend.md "Secondmate support"),
+    # while every other backend keeps this exact generic kill shape.
+    fm_backend_secondmate_kill "$BACKEND" "$META" 2>/dev/null || true
+  else
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fi
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then

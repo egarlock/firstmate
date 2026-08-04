@@ -19,9 +19,19 @@
 #   - The Herdr classifier preserves the proven husk mapping while separating a
 #     missing pane from an existing agent-less pane.
 #   - fm_backend_agent_alive preserves the older three-state compatibility view.
+#   - The cmux classifier keeps the six-state contract for a mate whose
+#     workspace the captain renamed or whose recorded ids went stale across an
+#     app relaunch, by resolving identity through the id-primary +
+#     synced-title resolver before attributing tty processes
+#     (bin/backends/cmux.sh fm_backend_cmux_agent_state).
 #   - bin/fm-bootstrap.sh's secondmate_liveness_sweep recovers only dead or
 #     missing endpoints, keeps successful recovery and already-live results
 #     silent by default, and reports ambiguous and unreadable targets distinctly.
+#   - The sweep resolves each mate's endpoint first
+#     (fm_backend_secondmate_resolve): a cmux mate's captain retitle is synced
+#     and relaunch-stale ids are re-recorded before the probe reads anything,
+#     a definitively gone endpoint respawns, and a multi-candidate resolution
+#     refuses without touching any workspace.
 #   - The sweep converges: once a secondmate reads alive, a later run never
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
@@ -39,6 +49,12 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
+
+# The stateful fake cmux CLI (plus fake ps/lsof) for the cmux sweep cases
+# below, where one bootstrap run drives resolve -> probe -> kill -> respawn
+# against evolving workspace state.
+# shellcheck source=tests/cmux-fake-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/cmux-fake-lib.sh"
 
 # --- unit level: fm_backend_tmux_agent_state --------------------------------
 
@@ -190,12 +206,17 @@ test_agent_state_dispatcher_and_compatibility() {
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_state herdr sess:p1' "$ROOT")
   [ "$out" = alive ] || fail "detailed dispatcher should route Herdr, got '$out'"
 
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source cmux; fm_backend_cmux_agent_state() { printf "%s %s" "$1" "${2:-}" >&2; printf "alive"; }; fm_backend_agent_state cmux WS-1:SF-1 fm-sm9 2>/dev/null' "$ROOT")
+  [ "$out" = alive ] || fail "detailed dispatcher should route cmux, got '$out'"
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source cmux; fm_backend_cmux_agent_state() { printf "%s" "${2:-}"; }; fm_backend_agent_state cmux WS-1:SF-1 fm-sm9' "$ROOT")
+  [ "$out" = fm-sm9 ] || fail "the dispatcher must pass the expected label through to the cmux classifier, got '$out'"
+
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state zellij sess:7' "$ROOT")
   [ "$out" = unverified ] || fail "Zellij should remain unverified, got '$out'"
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:7' "$ROOT")
   [ "$out" = unknown ] || fail "the compatibility dispatcher should map unverified to unknown, got '$out'"
 
-  pass "fm_backend_agent_state: routes tmux/Herdr and keeps Zellij unverified"
+  pass "fm_backend_agent_state: routes tmux/Herdr/cmux (label-threaded) and keeps Zellij unverified"
 }
 
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
@@ -526,6 +547,162 @@ test_sweep_noop_with_no_secondmate_meta() {
   pass "sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)"
 }
 
+# --- sweep level: cmux secondmates (resolve -> probe -> kill -> respawn) ----
+
+# add_cmux_sm_home <w> <id> <ws> <sf> <title>: a cmux-backed secondmate home
+# plus its meta, mirroring add_sm_home's fixture shape.
+add_cmux_sm_home() {
+  local w=$1 id=$2 ws=$3 sf=$4 title=$5
+  local home="$w/$id"
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'charter\n' > "$home/data/charter.md"
+  {
+    printf 'window=%s:%s\n' "$ws" "$sf"
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'backend=cmux\n'
+    printf 'cmux_workspace_id=%s\n' "$ws"
+    printf 'cmux_surface_id=%s\n' "$sf"
+    printf 'cmux_workspace_title=%s\n' "$title"
+    printf 'home=%s\n' "$home"
+  } > "$w/home/state/$id.meta"
+}
+
+test_sweep_cmux_dead_mate_synced_killed_respawned() {
+  local w fb tmuxfb cmuxfb log out scoped meta
+  w=$(new_world sweep-cmux-dead)
+  add_cmux_sm_home "$w" smc1 WS-D SF-D "captain renamed this"
+  meta="$w/home/state/smc1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  cmuxfb=$(make_cmux_state_fakebin "$w")
+  cmux_state_init "$w/cmux-state"
+  scoped=$(cmux_expected_scoped_title fm-smc1 "$w/home" "$ROOT")
+  # Live workspace under a NEWER captain title; the mate's tab sits at a bare
+  # shell (the agent exited) - the confident-dead shape.
+  cmux_state_add_workspace "$w/cmux-state" WS-D "renamed again" "$w/smc1" SF-D "$scoped"
+  cmux_state_set_tty "$w/cmux-state" SF-D ttys017
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$cmuxfb:$tmuxfb:$fb" "$w/home" zsh "$log" \
+    FM_CMUX_STATE="$w/cmux-state" FM_CMUX_LOG="$w/cmux.log" \
+    FM_FAKE_PS_TTY_COMMS='-zsh')
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate smc1" \
+    "a confidently dead cmux mate should be killed and respawned silently: $out"
+  assert_contains "$(cat "$meta")" "cmux_workspace_title=fm-2ndmate-smc1-" \
+    "the respawned mate's meta must carry the fresh initial title"
+  grep -q "^WS-D	" "$w/cmux-state/workspaces.tsv" && \
+    fail "the dead mate's old workspace must be closed before respawn"
+  grep -q "^WS-NEW-" "$w/cmux-state/workspaces.tsv" || \
+    fail "the respawn must create a fresh dedicated workspace: $(cat "$w/cmux-state/workspaces.tsv")"
+  pass "sweep: a dead cmux mate is title-synced, its workspace closed, and respawned into a fresh workspace"
+}
+
+test_sweep_cmux_alive_mate_syncs_title_only() {
+  local w fb tmuxfb cmuxfb log out scoped meta
+  w=$(new_world sweep-cmux-alive)
+  add_cmux_sm_home "$w" smc2 WS-A SF-A "old recorded title"
+  meta="$w/home/state/smc2.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  cmuxfb=$(make_cmux_state_fakebin "$w")
+  cmux_state_init "$w/cmux-state"
+  scoped=$(cmux_expected_scoped_title fm-smc2 "$w/home" "$ROOT")
+  cmux_state_add_workspace "$w/cmux-state" WS-A "captains new name" "$w/smc2" SF-A "$scoped"
+  cmux_state_set_tty "$w/cmux-state" SF-A ttys018
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$cmuxfb:$tmuxfb:$fb" "$w/home" zsh "$log" \
+    FM_CMUX_STATE="$w/cmux-state" FM_CMUX_LOG="$w/cmux.log" \
+    FM_FAKE_PS_TTY_COMMS='-zsh\nclaude')
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate smc2" \
+    "an alive cmux mate should be handled silently: $out"
+  assert_contains "$(cat "$meta")" "cmux_workspace_title=captains new name" \
+    "the liveness touch must sync a captain retitle into the mate's meta"
+  grep -q "^WS-A	" "$w/cmux-state/workspaces.tsv" || \
+    fail "an alive mate's workspace must never be touched"
+  pass "sweep: an alive cmux mate is left running and its captain retitle is synced (freely retitlable)"
+}
+
+test_sweep_cmux_relaunch_stale_ids_rerecorded_without_respawn() {
+  local w fb tmuxfb cmuxfb log out scoped meta
+  w=$(new_world sweep-cmux-relaunch)
+  # The #23 scenario: an app relaunch re-minted the workspace id, so the
+  # recorded ids are stale, while session restore preserved the captain's
+  # renamed workspace title and the scoped tab title. The sweep must re-find
+  # the live mate by its recorded title, re-record the fresh ids, and leave
+  # it running - never misread it as gone and spawn a duplicate.
+  add_cmux_sm_home "$w" smc5 WS-STALE SF-STALE "Mate - Dashboard"
+  meta="$w/home/state/smc5.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  cmuxfb=$(make_cmux_state_fakebin "$w")
+  cmux_state_init "$w/cmux-state"
+  scoped=$(cmux_expected_scoped_title fm-smc5 "$w/home" "$ROOT")
+  cmux_state_add_workspace "$w/cmux-state" WS-FRESH "Mate - Dashboard" "$w/smc5" SF-FRESH "$scoped"
+  cmux_state_set_tty "$w/cmux-state" SF-FRESH ttys019
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$cmuxfb:$tmuxfb:$fb" "$w/home" zsh "$log" \
+    FM_CMUX_STATE="$w/cmux-state" FM_CMUX_LOG="$w/cmux.log" \
+    FM_FAKE_PS_TTY_COMMS='login\n-zsh\nclaude')
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate smc5" \
+    "a relaunch-stale but live cmux mate should be re-found silently: $out"
+  assert_contains "$(cat "$meta")" "cmux_workspace_id=WS-FRESH" \
+    "the resolver must re-record the fresh workspace id in the mate's meta"
+  assert_contains "$(cat "$meta")" "window=WS-FRESH:SF-FRESH" \
+    "the resolver must re-record the fresh window target"
+  grep -q "^WS-NEW-" "$w/cmux-state/workspaces.tsv" && \
+    fail "a live re-found mate must never be respawned (duplicate-supervisor risk)"
+  grep -q "^WS-FRESH	" "$w/cmux-state/workspaces.tsv" || \
+    fail "the live mate's restored workspace must be left untouched"
+  pass "sweep: relaunch-stale recorded ids are re-recorded by the renamed-workspace resolver, with no respawn"
+}
+
+test_sweep_cmux_ambiguous_endpoint_skipped() {
+  local w fb tmuxfb cmuxfb log out
+  w=$(new_world sweep-cmux-ambig)
+  add_cmux_sm_home "$w" smc3 WS-GONE SF-GONE "shared title"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  cmuxfb=$(make_cmux_state_fakebin "$w")
+  cmux_state_init "$w/cmux-state"
+  cmux_state_add_workspace "$w/cmux-state" WS-X "shared title" "/a" SF-X "zsh"
+  cmux_state_add_workspace "$w/cmux-state" WS-Y "shared title" "/b" SF-Y "zsh"
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$cmuxfb:$tmuxfb:$fb" "$w/home" zsh "$log" \
+    FM_CMUX_STATE="$w/cmux-state" FM_CMUX_LOG="$w/cmux.log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate smc3: skipped: endpoint ambiguous - multiple candidates matched" \
+    "an ambiguous cmux endpoint must be reported and skipped"
+  grep -q "^WS-X	" "$w/cmux-state/workspaces.tsv" || fail "candidate WS-X must be left untouched"
+  grep -q "^WS-Y	" "$w/cmux-state/workspaces.tsv" || fail "candidate WS-Y must be left untouched"
+  grep -q "^WS-NEW-" "$w/cmux-state/workspaces.tsv" && \
+    fail "an ambiguous endpoint must never trigger a respawn (duplicate-supervisor risk)"
+  pass "sweep: an ambiguous cmux endpoint refuses - no kill, no respawn, loud skip"
+}
+
+test_sweep_cmux_gone_endpoint_respawned() {
+  local w fb tmuxfb cmuxfb log out
+  w=$(new_world sweep-cmux-gone)
+  add_cmux_sm_home "$w" smc4 WS-GONE SF-GONE "gone title"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  cmuxfb=$(make_cmux_state_fakebin "$w")
+  cmux_state_init "$w/cmux-state"
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$cmuxfb:$tmuxfb:$fb" "$w/home" zsh "$log" \
+    FM_CMUX_STATE="$w/cmux-state" FM_CMUX_LOG="$w/cmux.log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate smc4" \
+    "a definitively gone cmux endpoint should respawn silently: $out"
+  grep -q "^WS-NEW-" "$w/cmux-state/workspaces.tsv" || \
+    fail "a gone endpoint (e.g. after a relaunch with no restore) must be respawned: $(cat "$w/cmux-state/workspaces.tsv")"
+  pass "sweep: a definitively gone cmux endpoint is the authoritative absence and respawns"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -541,5 +718,10 @@ test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
+test_sweep_cmux_dead_mate_synced_killed_respawned
+test_sweep_cmux_alive_mate_syncs_title_only
+test_sweep_cmux_relaunch_stale_ids_rerecorded_without_respawn
+test_sweep_cmux_ambiguous_endpoint_skipped
+test_sweep_cmux_gone_endpoint_respawned
 
 echo "# all fm-secondmate-liveness tests passed"

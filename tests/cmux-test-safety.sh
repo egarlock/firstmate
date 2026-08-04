@@ -30,7 +30,11 @@ cmux_refuse_if_unsafe() {  # <workspace_id> <want_label>
     *) echo "cmux safety guard: refusing - label '$want_label' does not carry the fm-test- prefix" >&2; return 1 ;;
   esac
   want_title=$(fm_backend_cmux_scoped_title "$want_label")
-  title=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r --arg id "$wsid" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
+  # All-windows lookup: `workspace list` without --window is scoped to the
+  # CURRENT window, and cleanup can run after the captain's focus (or the
+  # test workspace's own window) moved - the guard must still find the
+  # test's own workspace to close it rather than leak it.
+  title=$(fm_backend_cmux_workspaces_all_windows | awk -F'\t' -v id="$wsid" '$1 == id { print $2; exit }')
   if [ "$title" != "$want_title" ]; then
     echo "cmux safety guard: refusing - workspace $wsid title '${title:-<not found>}' does not match expected '$want_title'" >&2
     return 1
@@ -48,4 +52,69 @@ cmux_refuse_if_unsafe() {  # <workspace_id> <want_label>
 cmux_safe_close_workspace() {  # <workspace_id> <want_label>
   cmux_refuse_if_unsafe "$1" "$2" || return 1
   fm_backend_cmux_cli close-workspace --workspace "$1" >/dev/null 2>&1 || true
+}
+
+# cmux_secondmate_refuse_if_unsafe: the secondmate-workspace analogue of
+# cmux_refuse_if_unsafe. A test secondmate workspace is NOT titled with a
+# scoped task title: its initial title is fm-2ndmate-<marker-id>-<hash>, and
+# retitle tests may rename it. So the guard requires <expected-title> to carry
+# an unambiguous test-owned prefix (fm-2ndmate-test- from a test- marker id,
+# or a plain fm-test- retitle) AND to match the workspace's CURRENTLY LISTED
+# title exactly at that id. Anything else refuses.
+cmux_secondmate_refuse_if_unsafe() {  # <workspace_id> <expected-title>
+  local wsid=$1 want_title=$2 title
+  [ -n "$wsid" ] || { echo "cmux safety guard: refusing - empty workspace id" >&2; return 1; }
+  case "$want_title" in
+    fm-2ndmate-test-*|fm-test-*) : ;;
+    *) echo "cmux safety guard: refusing - secondmate title '$want_title' does not carry a test-owned prefix" >&2; return 1 ;;
+  esac
+  title=$(fm_backend_cmux_workspaces_all_windows | awk -F'\t' -v id="$wsid" '$1 == id { print $2; exit }')
+  if [ "$title" != "$want_title" ]; then
+    echo "cmux safety guard: refusing - workspace $wsid title '${title:-<not found>}' does not match expected '$want_title'" >&2
+    return 1
+  fi
+  return 0
+}
+
+# cmux_safe_close_secondmate_workspace: the ONLY sanctioned way for a test to
+# tear down a secondmate workspace it created; guard first, then a targeted
+# best-effort close.
+cmux_safe_close_secondmate_workspace() {  # <workspace_id> <expected-title>
+  cmux_secondmate_refuse_if_unsafe "$1" "$2" || return 1
+  fm_backend_cmux_cli close-workspace --workspace "$1" >/dev/null 2>&1 || true
+}
+
+# cmux_surface_refuse_if_unsafe: the tab-mode analogue of
+# cmux_refuse_if_unsafe. 0 (SAFE) only if <workspace_id> and <surface_id> are
+# non-empty, <want_label> carries the fm-test- prefix, and the surface is
+# CURRENTLY LISTED in that workspace with the scoped title for <want_label>.
+# 1 (REFUSE) on anything else - in particular, a surface that never got its
+# scoped rename can NOT be safely distinguished from the captain's own tabs,
+# so it is deliberately left open.
+cmux_surface_refuse_if_unsafe() {  # <workspace_id> <surface_id> <want_label>
+  local wsid=$1 sfid=$2 want_label=$3 want_title title
+  [ -n "$wsid" ] || { echo "cmux safety guard: refusing - empty workspace id" >&2; return 1; }
+  [ -n "$sfid" ] || { echo "cmux safety guard: refusing - empty surface id" >&2; return 1; }
+  case "$want_label" in
+    fm-test-*) : ;;
+    *) echo "cmux safety guard: refusing - label '$want_label' does not carry the fm-test- prefix" >&2; return 1 ;;
+  esac
+  want_title=$(fm_backend_cmux_scoped_title "$want_label")
+  title=$(fm_backend_cmux_cli list-pane-surfaces --workspace "$wsid" --json --id-format uuids 2>/dev/null \
+    | jq -r --arg id "$sfid" '.surfaces[]? | select(.id == $id) | .title' 2>/dev/null)
+  if [ "$title" != "$want_title" ]; then
+    echo "cmux safety guard: refusing - surface $sfid title '${title:-<not found>}' does not match expected '$want_title'" >&2
+    return 1
+  fi
+  return 0
+}
+
+# cmux_safe_close_surface: the ONLY sanctioned way for a test to tear down a
+# TAB (surface) it created. Same posture as cmux_safe_close_workspace: hard
+# guard first, then a targeted, best-effort close-surface - never a
+# workspace-level close, so the (possibly captain-owned) container workspace
+# is never touched.
+cmux_safe_close_surface() {  # <workspace_id> <surface_id> <want_label>
+  cmux_surface_refuse_if_unsafe "$1" "$2" "$3" || return 1
+  fm_backend_cmux_cli close-surface --workspace "$1" --surface "$2" >/dev/null 2>&1 || true
 }
