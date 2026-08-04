@@ -111,6 +111,7 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 ## Launch profile axes
 
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
+It also accepts `--provider <name>` for a claude launch against an Anthropic-compatible third-party endpoint; the file schema lives in `docs/configuration.md` "Provider environment files" and the verified facts live in the claude section below.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
@@ -197,6 +198,13 @@ As defense in depth for any pane that flag cannot reach, including the captain's
 Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are documented in `docs/herdr-backend.md` "Composer and injection safety", with active captures in `docs/verification/runtime-backends.md`.
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
+
+**Claude via provider env (verified 2026-08-03, Kimi / Moonshot endpoint).**
+A claude launch with an active provider (`fm-spawn --provider <name>`, backed by `config/providers/<name>.env`) targets an Anthropic-compatible third-party endpoint purely through env assignments prepended to the same verified claude launch template.
+The binary is genuinely claude, so every supervision fact in this section - busy signature, turn-end hook, trust dialog handling, interrupt, exit, teardown - applies unchanged (proven live 2026-08-03 via an env-prefixed launch that recorded harness=claude and supervised normally).
+The `--effort` flag's behavior against third-party endpoints is unverified: `fm-spawn` omits the effort launch flag when a provider is active while meta still records the requested `effort=`, and effort/model should ride the provider file's own env (`ANTHROPIC_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`) unless/until verified.
+On relaunch or recovery of a provider-backed task, re-apply the recorded provider; `fm-spawn` does this automatically by re-reading `provider=` from the task's existing meta when no explicit `--provider` is passed, and a hand-typed relaunch must rebuild the env prefix from the recorded provider file instead of launching plain claude.
+This axis is distinct from the native `kimi` adapter below, which drives the separate Kimi Code CLI binary rather than claude.
 
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).

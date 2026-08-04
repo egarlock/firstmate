@@ -788,12 +788,18 @@ test_crew_dispatch_validation() {
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/dispatch-$n"
-    mkdir -p "$case_dir/home/config"
+    mkdir -p "$case_dir/home/config/providers"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
+    # One existing provider file so the rows below can separate "profile names a
+    # provider that exists" from "profile names a provider file that is missing".
+    printf '%s\n' 'ANTHROPIC_BASE_URL=https://api.kimi.com/coding' > "$case_dir/home/config/providers/kimi.env"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    # Pin the backend like the routine-silence fixture: these rows assert on
+    # dispatch diagnostics only, and unpinned runtime auto-detection would add an
+    # unrelated backend line when the developer's terminal is not tmux.
+    out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
@@ -828,6 +834,13 @@ empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid confi
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present
+claude provider profile is accepted^{"rules":[{"when":"bulk long-context work","use":{"harness":"claude","provider":"kimi"}}]}^empty^
+claude provider in an array profile is accepted^{"rules":[{"when":"bulk long-context work","use":[{"harness":"claude","provider":"kimi"},{"harness":"codex"}]}]}^empty^
+non-claude provider profile is flagged^{"rules":[{"when":"bulk work","use":{"harness":"codex","provider":"kimi"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - provider is only supported with harness claude, not: codex
+non-slug provider profile is flagged^{"rules":[{"when":"bulk work","use":{"harness":"claude","provider":"Bad_Name"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile provider must be a lowercase [a-z0-9-]+ slug when present
+non-string provider profile is flagged^{"rules":[{"when":"bulk work","use":{"harness":"claude","provider":7}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile provider must be a lowercase [a-z0-9-]+ slug when present
+missing provider file is flagged^{"rules":[{"when":"bulk work","use":{"harness":"claude","provider":"nosuch"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - provider file missing: config/providers/nosuch.env
+missing default provider file is flagged^{"default":[{"harness":"claude","provider":"nosuch"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - provider file missing: config/providers/nosuch.env
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }

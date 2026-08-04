@@ -51,6 +51,24 @@ fm_harness_is_verified() {
   return 1
 }
 
+# Harnesses whose provider-env axis (config/providers/<name>.env, selected with
+# fm-spawn --provider) is verified. Only claude's Anthropic-compatible env
+# mechanism (ANTHROPIC_BASE_URL etc.) is verified (live, 2026-08-03, Kimi
+# endpoint); other adapters fail closed until their env mechanisms are verified.
+# Keep this the only executable enumeration - fm-spawn and fm-bootstrap both
+# read it. The provider FILE grammar is owned by docs/configuration.md
+# "Provider environment files".
+FM_PROVIDER_HARNESSES='claude'
+
+# fm_harness_provider_allowed <name>: succeed iff <name> supports the
+# provider-env axis.
+fm_harness_provider_allowed() {
+  case " $FM_PROVIDER_HARNESSES " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 # --- copilot spawn-time version gate ---------------------------------------
 # copilot's supervised launch shape (the agentStop turn-end hook, --allow-all
 # autonomy, and the --model/--effort flags) is verified against GitHub Copilot
@@ -139,13 +157,18 @@ fm_harness_model_flag() {
   printf -- '--model %s ' "$(fm_harness_policy_quote "$model")"
 }
 
-# fm_harness_effort_flag <harness> <effort>: print the launch flag text (with a
-# trailing space) that selects <effort> on <harness>, or nothing when the effort
-# is empty/default or outside that adapter's verified accepted set
-# (fm_harness_efforts). Callers record the requested effort= in meta either way,
-# so an omitted flag preserves launch success without losing traceability.
+# fm_harness_effort_flag <harness> <effort> [<provider>]: print the launch flag
+# text (with a trailing space) that selects <effort> on <harness>, or nothing
+# when the effort is empty/default or outside that adapter's verified accepted
+# set (fm_harness_efforts). Callers record the requested effort= in meta either
+# way, so an omitted flag preserves launch success without losing traceability.
+# When <provider> is non-empty the launch targets a third-party
+# Anthropic-compatible endpoint where the effort flag's behavior is unverified,
+# so the flag is omitted and effort rides the provider file's own env
+# (harness-adapters skill, claude section).
 fm_harness_effort_flag() {
-  local harness=$1 effort=$2
+  local harness=$1 effort=$2 provider=${3:-}
+  [ -z "$provider" ] || return 0
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case " $(fm_harness_efforts "$harness") " in
     *" $effort "*) : ;;

@@ -17,6 +17,11 @@
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
       "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+    },
+    {
+      "when": "The task is bulk long-context work that should ride the third-party Anthropic-compatible endpoint instead of the Anthropic subscription.",
+      "use": { "harness": "claude", "provider": "kimi" },
+      "why": "provider names config/providers/<name>.env; it is claude-only today and the file must exist locally."
     }
   ],
   "default": [

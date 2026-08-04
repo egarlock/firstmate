@@ -240,7 +240,7 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, `--effort`, and (for claude) `--provider` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -253,13 +253,13 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "provider": "<optional provider name>" }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "provider": "<optional provider name>" }
   ]
 }
 ```
@@ -267,17 +267,61 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
-Profile `model` and `effort` fields and rule `why` are optional.
+Profile `model`, `effort`, and `provider` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
+A profile's optional `provider` names a provider environment file (see "Provider environment files" below), which firstmate threads to `fm-spawn.sh` as `--provider`; bootstrap validates that the name is a lowercase `[a-z0-9-]+` slug, that the profile's harness is provider-capable (`bin/fm-harness-policy.sh`, claude only today), and that `config/providers/<name>.env` exists, reporting violations as `CREW_DISPATCH` diagnostics.
+That field carries a firstmate provider-env file name; it is not the vendor provider family `quota-array-dispatch` establishes from a harness catalog when reading quota.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
+Its provider rule is a shape example: either create the matching `config/providers/<name>.env` or delete that rule, because bootstrap reports a referenced provider file that does not exist.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+## Provider environment files (config/providers/)
+
+`config/providers/<name>.env` is an optional local, gitignored per-provider environment file that makes an Anthropic-compatible third-party endpoint (for example Kimi / Moonshot) a first-class dispatch choice for claude launches.
+`fm-spawn.sh --provider <name>` selects it, validates it, prepends its assignments to the verified claude launch template, and records `provider=<name>` in the task's `state/<id>.meta`; absent `provider=` means the plain Anthropic endpoint, the same back-compat pattern as absent `backend=` meaning tmux.
+A respawn that finds `provider=` in the task's existing meta re-applies it automatically when no explicit `--provider` is passed.
+The provider-capable harness set is owned by `bin/fm-harness-policy.sh` (`FM_PROVIDER_HARNESSES`, claude only today); `fm-spawn` refuses `--provider` for any other resolved harness and for raw launch commands.
+Because the effort launch flag is unverified against third-party endpoints, an active provider omits it from the launch line while meta still records the requested `effort=`; effort and model normally ride the file's own env (`ANTHROPIC_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`).
+
+This section is the single owner of the file grammar; `fm-spawn.sh` enforces it and fails closed on any violation:
+
+- The provider name must match `[a-z0-9-]+`.
+- Blank lines and lines whose first non-whitespace character is `#` are ignored.
+- Every other line must be exactly one `NAME=VALUE` assignment starting at the first column, with `NAME` matching `[A-Za-z_][A-Za-z0-9_]*`.
+- `VALUE` is one bare token with no whitespace or quote characters, or one fully double-quoted string, or one fully single-quoted string.
+- Command substitution, backticks, semicolons, ampersands, pipes, redirections, backslashes, and embedded quotes are refused everywhere in a value.
+- `$VAR` and `${VAR}` references are allowed in bare and double-quoted values and stay UNEXPANDED: firstmate never expands or records the secret, and the worker pane's shell resolves it at launch.
+- Every referenced variable must be set in firstmate's own environment at spawn time; a missing variable refuses the spawn naming the variable, never a value.
+- A `$` inside a single-quoted value is refused because the pane's shell would keep it literal, silently breaking references such as an auth token; use double quotes for references.
+- Any other `$` use is refused as a stray reference.
+- The file must contain at least one assignment.
+
+```sh
+# config/providers/kimi.env - example; config/ is gitignored, so never commit a real one
+ANTHROPIC_BASE_URL=https://api.kimi.com/coding
+ANTHROPIC_AUTH_TOKEN="$MOONSHOT_API_KEY"
+ANTHROPIC_MODEL=kimi-k3
+ANTHROPIC_DEFAULT_OPUS_MODEL=kimi-k3
+ANTHROPIC_DEFAULT_FABLE_MODEL=kimi-k3
+ANTHROPIC_DEFAULT_SONNET_MODEL=kimi-k2.6
+ANTHROPIC_DEFAULT_HAIKU_MODEL=kimi-k2.6
+CLAUDE_CODE_SUBAGENT_MODEL=kimi-k3
+ENABLE_TOOL_SEARCH=false
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=1048576
+CLAUDE_CODE_EFFORT_LEVEL=max
+```
+
+Provider files are deliberately NOT inherited into secondmate homes; a secondmate home that needs a provider endpoint gets its own file by hand (`bin/fm-config-inherit-lib.sh`).
+For the same reason a remote secondmate route refuses `--provider`: the launch line is constructed on the remote host, so the provider must be pinned in that remote home instead.
+Dispatch profiles reference providers through the optional profile `provider` field (see "Crew dispatch profiles" above).
+Supervision behavior for provider-backed claude tasks is unchanged; the harness-adapters skill's claude section records the verified facts.
 
 ## Toolchain
 

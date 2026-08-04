@@ -22,7 +22,8 @@ Deterministic shell owns only schema, configuration, and version validation plus
 
 Run `quota-axi --json` once per intake and reuse that snapshot for every candidate.
 Do not take a second snapshot to settle a candidate, and read `quota-axi auth --json` when a candidate's credential surface is in question.
-For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness:
+For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
+A profile's optional `provider` field names a firstmate provider environment file (`docs/configuration.md` "Provider environment files") that firstmate threads to `fm-spawn.sh` as `--provider`, claude-only today; it is not the vendor provider family you establish below from the harness catalog, and a candidate carrying it is quota-read against the endpoint that file actually targets rather than the plain Anthropic endpoint:
 
 - task/profile fit and required reasoning class
 - applicable effective headroom (`effectivePercentRemaining`) from the established provider/model scope
