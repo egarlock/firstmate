@@ -148,6 +148,36 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
+# Allowlist-driven truthfulness check. The per-harness transports are asserted
+# by their own suites, so none of them notices a NEW verified adapter arriving
+# with no session-start integration at all. That is exactly how copilot reached
+# a verified state with no supervision protocol.
+test_sessionstart_integration_list_matches_verified_adapters() {
+  local harness doc integrated hook_dir
+  # shellcheck source=bin/fm-harness-policy.sh
+  . "$ROOT/bin/fm-harness-policy.sh"
+  doc=$(cat "$ROOT/docs/sessionstart-nudge.md")
+  for harness in $FM_VERIFIED_ADAPTERS; do
+    integrated=0
+    # pi-signed runs the Pi engine, so its tracked transport is Pi's own
+    # .pi/extensions integration.
+    hook_dir=$harness
+    [ "$harness" = pi-signed ] && hook_dir=pi
+    if [ -d "$ROOT/.$hook_dir" ] \
+      && grep -rl 'fm-sessionstart-nudge' "$ROOT/.$hook_dir" >/dev/null 2>&1; then
+      integrated=1
+    fi
+    if [ "$integrated" -eq 1 ]; then
+      assert_contains "$doc" "\`.$hook_dir/" \
+        "docs/sessionstart-nudge.md does not document $harness's tracked session-start transport"
+    else
+      assert_contains "$doc" "\`$harness\` has no tracked session-start integration." \
+        "$harness has no tracked session-start integration and docs/sessionstart-nudge.md does not record that gap"
+    fi
+  done
+  pass "every verified adapter is either wired to a tracked session-start transport or recorded as having none"
+}
+
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
@@ -156,3 +186,4 @@ test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
+test_sessionstart_integration_list_matches_verified_adapters

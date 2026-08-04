@@ -41,12 +41,22 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 
 ## Harness integrations
 
-- Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
-- Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
-- OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
-- Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
-- Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
+- `claude`: registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+- `codex`: registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
+- `opencode`: listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
+- `pi`: listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
+- `pi-signed`: shares Pi's engine and loads the same tracked `.pi/extensions` guard; the launch marker only changes the executable identity.
+- `grok`: registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
   The tracked Claude Stop entries are inert when `GROK_AGENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
+
+`kimi` has no tracked primary turn-end integration.
+Its only hook surface is the global `~/.kimi-code/config.toml` (see the compatibility limit below), outside this repository, so a kimi primary guard would require installing global configuration rather than a tracked repo-level hook.
+
+`copilot` has no tracked primary turn-end integration.
+Its hook surface is `${COPILOT_HOME:-$HOME/.copilot}/hooks`, outside this repository, so a copilot primary guard would require installing global files rather than a tracked repo-level hook.
+That is a captain trust decision that has not been made, so a copilot primary currently relies on [`docs/supervision-protocols/copilot.md`](supervision-protocols/copilot.md) plus the pull-based `bin/fm-guard.sh` warning instead of a push backstop.
+The firstmate-owned `agentStop` hook that `bin/fm-spawn.sh` writes for a copilot crewmate is the crewmate turn-end token hook and does not guard a copilot primary session.
+`tests/fm-turnend-guard.test.sh` asserts this list stays truthful against the verified-adapter allowlist, so adding an adapter without a tracked integration fails until it is either wired or recorded here.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.

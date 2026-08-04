@@ -16,6 +16,9 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervision-lib.sh"
 
+# shellcheck source=bin/fm-harness-policy.sh
+. "$ROOT/bin/fm-harness-policy.sh"
+
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -112,6 +115,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
+  cp "$ROOT/bin/fm-harness-policy.sh" "$dir/bin/fm-harness-policy.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
@@ -1058,6 +1062,7 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-harness-policy.sh" "$dir/bin/fm-harness-policy.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   ln -s /bin/bash "$dir/fake-claude"
@@ -1598,3 +1603,33 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+
+# Allowlist-driven truthfulness check. The per-harness tests above each assert a
+# hook that is already known to exist, so none of them notices a NEW verified
+# adapter that arrives with no tracked primary integration at all. This walks
+# FM_VERIFIED_ADAPTERS instead, and requires each adapter to be either wired or
+# explicitly recorded as unwired in docs/turnend-guard.md.
+test_turnend_integration_list_matches_verified_adapters() {
+  local harness doc integrated hook_dir
+  doc=$(cat "$ROOT/docs/turnend-guard.md")
+  for harness in $FM_VERIFIED_ADAPTERS; do
+    integrated=0
+    # pi-signed runs the Pi engine, so its tracked integration is Pi's own
+    # .pi/extensions guard; the launch marker only changes executable identity.
+    hook_dir=$harness
+    [ "$harness" = pi-signed ] && hook_dir=pi
+    if [ -d "$ROOT/.$hook_dir" ] \
+      && grep -rl 'fm-turnend-guard' "$ROOT/.$hook_dir" >/dev/null 2>&1; then
+      integrated=1
+    fi
+    if [ "$integrated" -eq 1 ]; then
+      assert_contains "$doc" "- \`$harness\`: " \
+        "docs/turnend-guard.md does not document $harness's tracked primary turn-end integration"
+    else
+      assert_contains "$doc" "\`$harness\` has no tracked primary turn-end integration." \
+        "$harness has no tracked primary turn-end integration and docs/turnend-guard.md does not record that gap"
+    fi
+  done
+  pass "every verified adapter is either wired to a tracked turn-end integration or recorded as having none"
+}
+test_turnend_integration_list_matches_verified_adapters
