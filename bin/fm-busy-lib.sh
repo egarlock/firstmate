@@ -39,9 +39,9 @@
 #   fm-interrupt     a firstmate-controlled interruption of the worker
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, missing, malformed,
-#   gen-mismatch, source-mismatch, kimi-unverified, codex-unverified,
-#   capture-failed, no-target
+#   endpoint-gone, herdr-native, grok-regex, copilot-regex, missing,
+#   malformed, gen-mismatch, source-mismatch, kimi-unverified,
+#   codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -50,15 +50,20 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      Grok-only temporary regex fallback classifies a grok task from its
-#      rendered tail, then unknown missing
+#      per-harness temporary regex fallback classifies a grok or copilot task
+#      from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# The Grok arm is the ONLY rendered-text classification that survives the
-# redesign, because Grok's structured lifecycle was not credited-live-verified
-# in the approved audit; it is scoped to harness=grok and can never classify
-# another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
-# footers for submit acknowledgement and away-mode supervisor injection only;
-# neither is a recorded worker state source.
+# The Grok and copilot arms are the ONLY rendered-text classifications that
+# survive the redesign. Grok's structured lifecycle was not
+# credited-live-verified in the approved audit. copilot's verified structured
+# lifecycle exposes only the turn-END agentStop event (GitHub Copilot CLI
+# 1.0.68, re-verified 1.0.72) with no verified turn-OPEN source, so a
+# semantic record could open a turn only at spawn and never again; its
+# verified rendered working footer is the honest fallback instead. Each arm
+# is scoped to its own harness and can never classify another adapter. The
+# delivery guards in bin/fm-tmux-lib.sh match rendered footers for submit
+# acknowledgement and away-mode supervisor injection only; neither is a
+# recorded worker state source.
 #
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
@@ -161,8 +166,10 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
-# Grok deliberately trusts nothing: it has no semantic writer yet, and its
-# temporary rendered-tail fallback lives in the classifier, not in records.
+# Grok and copilot deliberately trust nothing: neither has a semantic writer
+# (copilot's only verified lifecycle event is the turn-end agentStop), and
+# their temporary rendered-tail fallbacks live in the classifier, not in
+# records.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
@@ -255,6 +262,16 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_copilot_tail_busy: the copilot rendered-tail fallback (see the
+# header for why copilot has no semantic writer). Consumes the tail on stdin;
+# 0 when copilot's verified working footer matches. Both footer generations
+# in the supported version range are carried: "esc interrupt" (1.0.72) and
+# "esc cancel" (1.0.68). FM_BUSY_REGEX still globally overrides.
+fm_busy_copilot_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_COPILOT_BUSY_REGEX_DEFAULT:-esc (to )?interrupt|esc cancel}}"
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -308,7 +325,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     fi
   fi
   case "$harness" in
-    grok*)
+    grok*|copilot*)
       if [ -z "$tail40" ]; then
         if command -v fm_backend_capture >/dev/null 2>&1; then
           tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
@@ -320,11 +337,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
           return 0
         fi
       fi
-      if printf '%s' "$tail40" | fm_busy_grok_tail_busy; then
-        printf 'busy grok-regex'
-      else
-        printf 'idle grok-regex'
-      fi
+      case "$harness" in
+        copilot*)
+          if printf '%s' "$tail40" | fm_busy_copilot_tail_busy; then
+            printf 'busy copilot-regex'
+          else
+            printf 'idle copilot-regex'
+          fi
+          ;;
+        *)
+          if printf '%s' "$tail40" | fm_busy_grok_tail_busy; then
+            printf 'busy grok-regex'
+          else
+            printf 'idle grok-regex'
+          fi
+          ;;
+      esac
       return 0
       ;;
   esac

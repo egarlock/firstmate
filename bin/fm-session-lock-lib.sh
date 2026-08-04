@@ -8,14 +8,24 @@
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
-# Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+# Harness command-name recognition comes from the single policy source
+# (bin/fm-harness-policy.sh), so a newly verified adapter registers once and
+# cannot be missed here.
+# shellcheck source=bin/fm-harness-policy.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-harness-policy.sh"
+FM_HARNESS_RE=$(fm_harness_process_re)
 
-# The same harnesses as exact executable names. Keep in sync with
-# FM_HARNESS_RE. Used only for the stricter path evidence below, where the
-# loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+# The same harnesses as exact executable names, from the same policy source.
+# Used only for the stricter path evidence below, where the loose regex would
+# also match ordinary firstmate paths such as bin/fm-claude-stop-autoarm.sh.
+# Component matching is exact, so list order is irrelevant.
+FM_HARNESS_NAMES=()
+while IFS= read -r _fm_harness_name; do
+  [ -n "$_fm_harness_name" ] && FM_HARNESS_NAMES+=("$_fm_harness_name")
+done <<EOF
+$(fm_harness_path_names)
+EOF
+unset _fm_harness_name
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.

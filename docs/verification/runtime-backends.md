@@ -54,8 +54,10 @@ Observed identities, and the resulting verdict:
 | pi-signed | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
 | grok | 0.2.118 | `grok-0.2.118-ma` | `grok` | alive |
 | kimi | 0.31.1 | `kimi` | `kimi` | alive |
+| copilot | 1.0.73 | `copilot` | `~/.local/bin/copilot` | alive |
 
 Claude Code is the harness whose title no longer attributes it at all; every other adapter is currently attributed by both sources.
+Copilot was probed with the same commands on 2026-08-04 (GitHub Copilot CLI 1.0.73, a native arm64 Mach-O binary): the pane title is the plain `copilot` and the foreground `comm` carries the full install path, whose basename the classifier strips before matching.
 Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
 That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
 

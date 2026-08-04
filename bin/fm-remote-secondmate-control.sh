@@ -46,6 +46,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-harness-policy.sh
+. "$SCRIPT_DIR/fm-harness-policy.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -138,7 +140,7 @@ cmd_launch() {
 
   validate_id "$id"
   validate_home "$id"
-  case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate harness: $harness" ;; esac
+  fm_harness_is_verified "$harness" || die "unverified remote secondmate harness: $harness"
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that

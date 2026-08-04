@@ -79,10 +79,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
-#          printing every read-only detect line
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          (PR-check migration, turn-end hook-registry sweep, secondmate_sync,
+#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
+#          fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -116,6 +116,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
+# Harness policy: the verified-adapter allowlist and per-adapter effort matrix
+# consumed by the crew-dispatch validation and the secondmate liveness sweep.
+# shellcheck source=bin/fm-harness-policy.sh disable=SC1091
+. "$SCRIPT_DIR/fm-harness-policy.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -582,12 +586,9 @@ secondmate_liveness_sweep() {
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
     agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
-    case "$harness" in
-      claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
-      *)
-        case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
-        ;;
-    esac
+    if ! fm_harness_is_verified "$harness"; then
+      case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
+    fi
     case "$agent_state" in
       alive)
         if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
@@ -875,6 +876,25 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# The verified-adapter allowlist and per-adapter effort matrix, rendered as JSON
+# from the single policy source (bin/fm-harness-policy.sh), so the dispatch
+# validation below cannot drift from the launch-flag policy fm-spawn applies.
+policy_adapters_json() {
+  local a out=
+  for a in $FM_VERIFIED_ADAPTERS; do out="$out,\"$a\""; done
+  printf '[%s]\n' "${out#,}"
+}
+policy_efforts_json() {
+  local a e inner out
+  out=
+  for a in $FM_VERIFIED_ADAPTERS; do
+    inner=
+    for e in $(fm_harness_efforts "$a"); do inner="$inner,\"$e\""; done
+    out="$out,\"$a\":[${inner#,}]"
+  done
+  printf '{%s}\n' "${out#,}"
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -887,17 +907,13 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
+  err=$(jq -r --argjson verified "$(policy_adapters_json)" --argjson efforts "$(policy_efforts_json)" '
+    def verified($h): $verified | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
-      elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
-      elif $h == "grok" then (["low","medium","high"] | index($e))
-      elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" then false
-      else true
+      elif (verified($h) | not) then true
+      else (($efforts[$h] // []) | index($e)) != null
       end;
     def profiles($value):
       if ($value | type) == "array" then $value
@@ -1059,6 +1075,12 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  # Best-effort, quiet: remove orphaned grok/copilot turn-end hook registry
+  # tokens left by tasks that died without teardown, so the global hook
+  # registries never accumulate cruft. Home-agnostic and age-guarded, so a live
+  # token (this home's or another's) is never touched; prints a HOOK_SWEEP line
+  # only when it removes.
+  [ -x "$SCRIPT_DIR/fm-hook-sweep.sh" ] && "$SCRIPT_DIR/fm-hook-sweep.sh" 2>/dev/null || true
   secondmate_liveness_sweep
   secondmate_sync
   secondmate_handoff_resume
