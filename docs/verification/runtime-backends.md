@@ -547,6 +547,37 @@ tests/fm-backend-cmux-smoke.test.sh
 
 The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
 
+### Tab container mode and focus at birth (0.64.20 build 100)
+
+A later live pass on cmux 0.64.20 (build 100), macOS aarch64, verified the configurable task-container shape and the focus-at-birth rule; the installed build was byte-identical to the one the visual regression was recorded on, so that visual verification carries.
+
+- cmux 0.64.18 introduced a renderer-level regression in which a surface created `--focus false` can remain unrealized and later paint black; CLI probes cannot disprove it because the IO layer works either way (an unfocused-created tab's terminal starts on wake, executes sends, and reads back).
+- A bare shell in an unfocused fresh workspace's default surface does render, but a surface never resolves its size until first displayed, and a full-screen TUI agent (observed live with the Copilot CLI on a real secondmate launch) cannot recover from that late resize, so all three creation paths - task workspace, task tab, and secondmate workspace - create focused and then restore the prior context.
+- Focusing a surface alone does not reactivate its workspace or window; a destination-less `move-surface --focus true` appends the tab to its pane; `reorder-surface --surface <s> --index <its-own-current-index> --focus true` re-selects without moving. The verified order-preserving restore is focus-window, select-workspace, focus-pane, then that reorder call.
+- `new-surface` acknowledges only short refs (`OK surface:<n> pane:<m> workspace:<k>`) and inserts the new tab adjacent to the focused tab, so the new surface's stable UUID is resolved by diffing the surface list around the create, never by position.
+- A fresh unfocused surface starts its terminal lazily - no tty in `cmux tree` and failing `read-screen` until first input or view - and a send to a never-started surface is queued into the pty and executes once the terminal starts (verified: the queued text is echoed above the login banner, then runs), so the wake wait exists for prompt visibility and readable follow-up reads, not send correctness.
+- `cmux tree` reports `tty=` for a started terminal on build 100; the 0.64.17 (build 97) all-surfaces `tty: null` bug is gone there, so the passive tty+`ps`+`lsof` cwd tier is live-viable, with the block-header regex shape `| [<tag>] <cwd> @ <host> (<user>)` (trailing space) and rename-tab title stickiness across a `cd` both re-verified.
+- `workspace list --json` still has no `agent_status` key on 0.64.20, so the forward-compatible busy probe reports unknown everywhere today.
+- The real-app smoke suite passed 19/19 including the tab-mode leg with zero leaked `fm-test-` artifacts; the tab-mode leg intentionally produces the same brief focus flicker a real tab-mode spawn produces.
+
+### Secondmate support (0.64.20 build 100)
+
+Live verification on 2026-07-27, socket in automation mode, only `fm-test-`-marked scratch artifacts, captain's app never quit or reconfigured:
+
+- The real-app smoke's secondmate section proved `create_secondmate` (dedicated workspace at the mate home, scoped tab title), resolve-by-live-id, a real captain retitle via `cmux workspace rename` synced into the meta on the next resolve, stale-id recovery by the synced title with ids re-recorded, a woken bare-shell tab reading confidently dead, fingerprint recovery after both titles were deliberately lost (real `ps`/`lsof` passive tiers), and the meta-driven kill closing the whole workspace idempotently.
+- A full live lifecycle with a real `claude` mate: `fm-spawn.sh <id> <home> --secondmate` with `config/secondmate-backend` = `cmux` recorded `backend=cmux`, both ids, `cmux_workspace_title=fm-2ndmate-<id>-<8hex>`, and `home=`; the liveness probe read alive against the running claude, stayed alive across two `C-c` interrupts, and flipped to dead after `/exit` (bare shell behind cmux's resident `/usr/bin/login` wrapper, which is why `login` classifies as part of an idle shell stack).
+- A real `bin/fm-bootstrap.sh` run then exercised the sweep silently: the dead mate's workspace was closed and a fresh one spawned, the meta re-recorded the new UUIDs, and the respawned claude probed alive.
+- Closing a macOS window by hand mid-run killed its workspaces' ptys, exactly like an app relaunch scoped to one window; the same gone-endpoint ladder recovers it, and `tests/cmux-test-safety.sh` confirms titles across every window because plain `workspace list` is scoped to the current window only.
+
+Live verification on 2026-07-28, read-only against two live renamed mates using scratch meta copies:
+
+- Unpatched, a captain-renamed mate workspace (agent-overwritten tab title too) failed the scoped-title gate for every label-gated operation while the resolver returned the correct endpoint - the funnel behind `fm-send`'s "cmux send failed", `fm-peek`'s empty output, and the sweep's inconclusive probe.
+- Patched, `target_ready` echoed exactly the recorded `<workspace_uuid>:<surface_uuid>` for both mates, the liveness probe read alive (real claude on the surface tty), and a bounded capture returned real pane content; the full real-app smoke passed on the patched adapter.
+
+Source inspection during the same passes reconfirmed workspace ids are re-minted on relaunch while restored surfaces reuse `restoredSurfaceId` within a run, and tab custom titles survive session restore - which is why mate recovery is id-primary with synced-title rungs and a passive home-cwd fingerprint of last resort, each rung requiring exactly one candidate.
+
+An earlier end-to-end pass on this adapter also drove the full lifecycle (spawn, trust-dialog accept, steer, `/compact` popup second-Enter submit, local merge, teardown) against a real `claude` crewmate in a scratch home, confirming the composer border-row classifier and submit retry against a real TUI composer; three concurrent task workspaces were spawned, supervised, and cleaned to zero residue.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

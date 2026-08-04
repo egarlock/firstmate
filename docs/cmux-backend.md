@@ -44,7 +44,8 @@ A spawn stops with an actionable setup message when the app, minimum version, `j
 The adapter may launch the app with `open -a cmux` only when the socket is down; it does not relaunch the app for access-denied or authentication errors.
 
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without bringing the cmux window forward.
-Task workspace and surface creation use `focus=false`.
+Task and secondmate endpoints are created focused and the previously focused window/workspace/pane/tab context is then restored, because a surface created unfocused on cmux 0.64.18+ can stay renderer-unrealized and later paint black once it hosts a full-screen TUI agent.
+Expect one brief cmux-internal focus flicker per spawn; the restore cannot move macOS app-level focus to another application.
 
 Verify setup by spawning a small task and confirming metadata contains `backend=cmux`, `cmux_workspace_id=`, and `cmux_surface_id=`.
 
@@ -65,10 +66,15 @@ The spawn refusal explains how to finish cmux setup or opt back into tmux.
 
 ## Task shape and metadata
 
-Each task owns one cmux workspace with one surface.
-The caller-facing label remains `fm-<id>`, while the visible workspace title is `fm-<home-label>-<id>`.
+The task-container shape is configurable: `FM_CMUX_CONTAINER`, then the first word of local gitignored `config/cmux-container`, then the default `workspace`.
+
+- `workspace` (default): each task owns one cmux workspace with one surface, giving it its own sidebar row.
+- `tab`: each task is one surface (tab) inside a container workspace - the workspace Firstmate itself runs in when inside cmux, else a find-or-create shared per-home workspace titled `fm-<home-label>`.
+
+The caller-facing label remains `fm-<id>`, while the visible scoped title `fm-<home-label>-<id>` lands on the workspace in workspace mode or on the task's tab (a sticky `rename-tab`) in tab mode.
 The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
 cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
+Which mode a live task is in is derived from where its scoped title sits, never a stored flag, so recovery and cleanup keep working across a container-mode config change.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
 
 ```text
@@ -78,8 +84,9 @@ cmux_workspace_id=<workspace-uuid>
 cmux_surface_id=<surface-uuid>
 ```
 
+The same `<workspace>:<surface>` target shape serves both modes: in tab mode the workspace is the container and the surface is the task's tab.
 The UUID pair is the active endpoint authority within one app run.
-Workspace UUIDs are not stable across an app relaunch, so recovery searches by the scoped title and then resolves the current surface id.
+Workspace UUIDs are not stable across an app relaunch, so recovery searches by the scoped title and then resolves the current surface id, app-globally in tab mode when the recorded container workspace id went stale.
 
 ## Current operation and safety
 
@@ -87,18 +94,23 @@ A genuinely fresh surface returns an internal error from `read-screen` until som
 Target readiness therefore uses the structural `list-panes` response instead of a content read.
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
 
+A fresh unfocused tab starts its terminal lazily; sends are queued into the pty and execute once it starts, and the tab-mode create wakes it (`fm_backend_cmux_wait_ready`) so its setup command lands at a visible prompt.
+
 `current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+Worktree discovery tries passive tiers first so the common case never types into the captain-visible terminal: the surface tty's foreground process cwd (`cmux tree` + `ps` + `lsof`), then the on-screen block-header cwd, then the workspace's `current_directory` only when the workspace is provably task-owned.
+Only as a last resort does it send begin and end markers around `pwd`, capture the marked block, and join wrapped path lines.
 
 Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
 The composer verifier locates the last bordered composer row and delegates the content decision to `bin/fm-composer-lib.sh`.
 A bare shell prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
 cmux exposes no native generic agent busy signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
+A forward-compatible probe reads a future `agent_status` field from the workspace list, reports `unknown` on every verified version today, and is consulted only for a provably task-owned workspace so a tab-mode container's state is never attributed to a task.
 Grok alone retains its isolated rendered-tail fallback.
 
 A task workspace's last surface cannot be closed directly.
 Cleanup owns the whole workspace and uses `close-workspace`.
+A tab-mode task closes only its own surface; when that tab is the container's last surface, Firstmate reclaims its own now-task-free shared container whole, while a captain-owned container gets a throwaway default surface first so the close lands.
 cmux also refuses to remove the only workspace in a macOS window while returning a misleading success response.
 When the task is last in its window, Firstmate creates one unfocused unnamed sibling workspace in that same window, closes the task workspace, and leaves the window with cmux's fresh default workspace.
 The sibling never carries an `fm-` title and is ignored by recovery.
@@ -110,22 +122,39 @@ Firstmate does not attempt to close the macOS window because cmux's socket canno
 Real tests share the captain's running app rather than creating an isolated cmux session.
 `tests/cmux-test-safety.sh` permits cleanup only for an exact currently listed `fm-test-` workspace and never enumerates and closes unrelated workspaces or relaunches the app.
 
+## Secondmate support
+
+`--secondmate` spawns are supported through a dedicated-workspace-per-mate design.
+A cmux secondmate gets one workspace of its own, created at the mate's home directory with the mate's tab inside it, in every task-container mode, so a tab-mode primary never lands a mate as a tab in the primary's own workspace.
+The workspace's initial title is the mate home's own `fm-<home-label>`, so the mate's workspace doubles as that home's tab-mode shared container; the mate's tab is renamed to the primary's scoped task title.
+
+Identity is id-primary with synced-title recovery.
+The captain may retitle the mate's workspace freely; the recorded UUIDs are the operational handle while the app is alive, and the meta's `cmux_workspace_title=` records the last-synced title.
+Every label-gated operation and the session-start liveness sweep resolve the mate through `fm_backend_cmux_secondmate_resolve`: recorded ids first, then the synced recorded title across every window, then the scoped tab title, then a home-cwd fingerprint read only through passive tiers.
+Each rung requires exactly one candidate; multiple candidates refuse loudly and no candidate at all is the definitively-gone verdict.
+The resolver re-records refreshed ids and a captain retitle into the meta as a supervision side effect.
+
+Agent liveness uses the shared six-state `fm_backend_agent_state` contract (`bin/fm-backend.sh`): the resolved surface's tty processes are classified with the shared harness policy, a shells-plus-`login`-only tty is confidently dead, a down socket is an authoritatively missing endpoint, and auth failures, unattributable processes, or multi-candidate resolutions never license recovery.
+Mate cleanup closes the whole dedicated workspace only through the resolver's identity checks (`fm_backend_cmux_secondmate_kill`).
+Backend selection for new mates honors `config/secondmate-backend`, and a respawn reuses the backend recorded in the mate's meta ([`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend)).
+
 ## Active limits
 
 - cmux is experimental, macOS-only, GUI-first, and requires the app running.
 - Socket access requires a one-time manual Settings change.
-- Secondmate spawns are unsupported until a per-home lifecycle design is verified.
-- There is no native busy or push-event signal.
+- There is no native busy or push-event signal; the `agent_status` probe is forward-compatible only.
 - A target can disappear after structural readiness and before the operation.
 - The only-workspace cleanup path leaves a fresh default workspace and cannot close the window.
-- Label lookup and recovery are currently scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot.
+- Ordinary-task label lookup is scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot; secondmate resolution scans every window.
 - Workspace ids do not survive app relaunch and are never recovery authority.
+- Spawns cause one brief focus flicker from the focus-at-birth rule.
 
 ## Regression entry points
 
 ```sh
 tests/fm-backend-cmux.test.sh
 tests/fm-backend-cmux-smoke.test.sh
+tests/fm-secondmate-liveness.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#cmux) records the active source and live evidence, including socket modes and last-in-window cleanup.
