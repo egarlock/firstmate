@@ -30,7 +30,7 @@ set -u
 # This suite states the markers it means to test in every case. Drop the ambient
 # ones so a verdict never depends on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
-  FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS
+  COPILOT_CLI FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
@@ -217,6 +217,52 @@ test_retained_cursor_marker_does_not_rename_a_nested_claude() {
   [ "$got" = claude ] \
     || fail "a claude tree carrying a retained cursor launcher marker resolved '$got', expected claude"
   pass "a retained cursor marker does not rename a nested claude worker"
+}
+
+# GitHub Copilot CLI publishes COPILOT_CLI=1 to its tool and hook processes but
+# does not clear an inherited CLAUDECODE, so a Copilot primary started from a
+# claude pane carries both markers, while a claude session started from a
+# Copilot pane inherits COPILOT_CLI. Each layer is driven alone first so neither
+# half can pass vacuously.
+test_copilot_marker_and_anchored_ancestry() {
+  local dir fakebin bin claude_bin decoy got home
+  dir="$TMP_ROOT/copilot"
+  fakebin=$(blind_ancestry_bin "$dir/blind")
+  bin=$(named_bin "$dir/copilot-tree" copilot)
+
+  got=$(under_process "$bin")
+  [ "$got" = copilot ] || fail "copilot ancestry alone resolved '$got', expected copilot (the ancestry signal is not live)"
+  got=$(with_blind_ancestry "$fakebin" COPILOT_CLI=1)
+  [ "$got" = copilot ] || fail "COPILOT_CLI alone resolved '$got', expected copilot (the marker signal is not live)"
+  got=$(with_blind_ancestry "$fakebin" COPILOT_CLI=1 CLAUDECODE=1)
+  [ "$got" = copilot ] \
+    || fail "COPILOT_CLI beside an inherited CLAUDECODE with no ancestry resolved '$got', expected copilot"
+  got=$(under_process "$bin" COPILOT_CLI=1 CLAUDECODE=1)
+  [ "$got" = copilot ] || fail "a genuine copilot session holding an inherited CLAUDECODE resolved '$got', expected copilot"
+
+  claude_bin=$(named_bin "$dir/claude-tree" claude)
+  got=$(under_process "$claude_bin" COPILOT_CLI=1 CLAUDECODE=1)
+  [ "$got" = claude ] || fail "a claude tree carrying a retained COPILOT_CLI resolved '$got', expected claude"
+
+  # Anchored: an unrelated executable whose name merely contains copilot is
+  # never evidence, whatever else the walk finds above it.
+  decoy=$(named_bin "$dir/decoy-tree" copilot-language-server)
+  got=$("$decoy" -c "r=\$(\"$HARNESS\" ancestry \$\$); printf '%s' \"\$r\"")
+  [ "$got" != "comm copilot" ] || fail "copilot-language-server was misread as the copilot harness"
+  got=$("$bin" -c "r=\$(\"$HARNESS\" ancestry \$\$); printf '%s' \"\$r\"")
+  [ "$got" = "comm copilot" ] || fail "the copilot process must decide at comm strength, got '$got'"
+
+  # An absent or default crew harness follows a Copilot primary.
+  home="$dir/home"
+  mkdir -p "$home/config"
+  got=$(pin_probe "$bin" "$home" crew COPILOT_CLI=1)
+  [ "$got" = 'copilot|0' ] || fail "an absent crew harness under a copilot primary resolved '$got', expected copilot"
+  printf 'default\n' > "$home/config/crew-harness"
+  got=$(pin_probe "$bin" "$home" crew COPILOT_CLI=1)
+  [ "$got" = 'copilot|0' ] || fail "a default crew harness under a copilot primary resolved '$got', expected copilot"
+  got=$(pin_probe "$bin" "$home" secondmate COPILOT_CLI=1)
+  [ "$got" = 'copilot|0' ] || fail "an absent secondmate harness under a copilot primary resolved '$got', expected copilot"
+  pass "copilot is detected by its own marker and anchored ancestry, and its crew follows it"
 }
 
 # --- 3. Pi keeps the marker's more specific identity ------------------------
@@ -830,6 +876,7 @@ test_markerless_ancestry_outranks_foreign_marker
 test_genuine_marker_and_ancestry_agree
 test_cursor_ordering_still_decides_when_ancestry_is_silent
 test_retained_cursor_marker_does_not_rename_a_nested_claude
+test_copilot_marker_and_anchored_ancestry
 test_pi_signed_survives_agreeing_ancestry
 test_interpreter_args_match_does_not_outrank_a_marker
 test_native_child_of_an_interpreter_shim_decides_at_comm_strength

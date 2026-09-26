@@ -709,7 +709,7 @@ A local standalone-clone home cannot receive a primary-local commit through that
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, omp, and copilot are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
 
 ### Harness restrictions and credentials
 
@@ -730,8 +730,8 @@ devin is verified for crewmate and scout launches only; a secondmate is refused 
 
 Its private worker config disables Claude Code imports (including the captain's hooks) and Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
 
-copilot (GitHub Copilot CLI) is verified for crewmate and scout launches only; a secondmate is refused because Copilot has no verified primary supervision protocol.
-Its lifecycle hooks ride a private per-task plugin, so no user, project, or global Copilot config is edited; the spawn refuses a CLI older than the verified minimum, and [the Copilot launch command](#copilot-launch-command-configcopilot-cmd) selects the executable; [Copilot verification](verification/copilot.md) owns the live evidence.
+A copilot (GitHub Copilot CLI) secondmate or primary runs the tracked `.github/hooks/` registrations in its own home, which Copilot loads only in a trusted folder: a secondmate launch trusts its home through `COPILOT_ALLOW_ALL=true`, and a captain starting a primary trusts the home when Copilot asks; [`docs/supervision-protocols/copilot.md`](supervision-protocols/copilot.md) owns its supervision protocol.
+Worker and secondmate lifecycle hooks ride a private per-task plugin, so no user, project, or global Copilot config is edited; the spawn refuses a CLI older than the verified minimum, and [the Copilot launch command](#copilot-launch-command-configcopilot-cmd) selects the executable; [Copilot verification](verification/copilot.md) owns the live evidence.
 
 ### Verification and primary supervision
 
@@ -749,7 +749,7 @@ Enabled primary-session turn-end guard integrations are tracked as repo-level ho
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 
-Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
+Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok and Copilot use background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
 
 ### Choose the worker harness
 
@@ -888,7 +888,8 @@ The address selects the existing shared server; it does not authorize starting o
 
 ## Copilot launch command (config/copilot-cmd)
 
-The optional local, gitignored `config/copilot-cmd` holds the command that starts GitHub Copilot CLI for every Copilot worker and scout launch.
+The optional local, gitignored `config/copilot-cmd` holds the command that starts GitHub Copilot CLI for every Copilot worker, scout, and secondmate launch.
+It does not start a primary session, which the captain launches directly with whatever command they use for Copilot.
 When the file is absent, workers launch plain `copilot` from `PATH`; a value such as `agency copilot` replaces that executable prefix, and Firstmate appends its own flags and the brief after it.
 
 Blank lines and `#` comments are ignored, and exactly one command line must remain.

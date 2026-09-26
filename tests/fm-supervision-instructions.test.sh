@@ -252,6 +252,29 @@ test_grok_is_background_notify() {
   pass "grok supervision is Claude-shaped background notify with passive Stop-hook backstop"
 }
 
+# A Copilot arm must never hold the turn open, so the protocol is the attached
+# async shell, and the single status read waits just past the arm's own
+# confirmation budget, capped so a large budget cannot pin the captain's chat.
+test_copilot_is_attached_async_background_notify() {
+  local out ordinary budget expected
+  out=$(env -u FM_ARM_CONFIRM_TIMEOUT "$RENDER" --harness copilot)
+  assert_contains "$out" "primary harness: copilot" "copilot heading missing"
+  assert_contains "$out" "Mode: Copilot attached async background supervision." "copilot snippet missing"
+  assert_contains "$out" 'mode: "async"' "copilot arm must be the async shell mode"
+  assert_contains "$out" "delay: 12" "the default confirmation budget must render a 12 second status read"
+  assert_not_contains "$out" "__FM_" "a placeholder leaked into the copilot block"
+  assert_not_contains "$out" "Supervision host" "copilot has no supervision-host integration"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "Copilot bash call in mode async" "copilot ordinary-wake line lost its async re-arm"
+  for budget in 5:7 30:32 58:60 59:60 600:60 abc:12 0:2 010:12 12345678901:12; do
+    expected=${budget#*:}
+    out=$(FM_ARM_CONFIRM_TIMEOUT=${budget%%:*} "$RENDER" --harness copilot --repair-line)
+    assert_contains "$out" "read_bash with delay $expected " "FM_ARM_CONFIRM_TIMEOUT=${budget%%:*} must render delay $expected"
+  done
+  assert_contains "$out" "never detached, never synchronous, and never shell &" "copilot repair line lost its safety bounds"
+  pass "copilot supervision is an attached async arm with a bounded status read"
+}
+
 test_grok_command_sources_effective_config() {
   local home config out
   home="$TMP_ROOT/grok-home"
@@ -290,5 +313,6 @@ test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
+test_copilot_is_attached_async_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path

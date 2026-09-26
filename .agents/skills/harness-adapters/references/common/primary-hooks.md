@@ -10,6 +10,7 @@ The tool reference establishes either that identity's empirical path or its unsu
 Never substitute another harness's wait shape.
 `../../../bin/fm-busy-lib.sh` remains the semantic busy owner; a tool reference names only its source and evidence.
 
+Cursor, Grok, Pi's pi-code extension, and Copilot also run the tracked `.claude/settings.json` entries, so a primary that loads them must stand down every Claude-shaped entry its own registration covers; `../../../docs/turnend-guard.md` owns each stand-down signal.
 Validate any turn-end change against the real harness in a scratch project or throwaway home.
 Update its executable or hook owner, concise tool fact, and `../../../docs/verification/supervision.md` under "Turn-end guard".
 

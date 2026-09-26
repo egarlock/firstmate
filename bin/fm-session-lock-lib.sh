@@ -23,13 +23,19 @@
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# omp 18.1.11), and a substring match would claim ompd or comp. copilot is
+# anchored the same way: GitHub Copilot CLI's process name is its install path
+# ending in /copilot (verified, Copilot CLI 1.0.88), and a substring match
+# would claim copilot-language-server.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^copilot$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
+# bin/fm-claude-stop-autoarm.sh. copilot is deliberately absent: its basename
+# already identifies it, and its package cache is a directory named `copilot`
+# (for example ~/Library/Caches/copilot/pkg/...), so a whole-component match
+# would claim any helper process started from that cache as the session.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename

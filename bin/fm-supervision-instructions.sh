@@ -7,6 +7,9 @@
 # (docs/supervision-protocols/supervision-host.md, whose lines tagged
 # "{<harness>,...} " render only for the listed harnesses), and Grok's arm
 # command becomes the host; without that file the output is unchanged.
+# A copilot primary's block renders the read_bash delay that collects the
+# arm's status line (docs/supervision-protocols/copilot.md) from the arm's own
+# confirmation budget, FM_ARM_CONFIRM_TIMEOUT.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,7 +101,7 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
-  claude|codex|opencode|pi|grok|cursor|omp) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  claude|codex|opencode|pi|grok|cursor|omp|copilot) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
@@ -115,6 +118,19 @@ case "$HARNESS" in
 esac
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
+# Copilot's single read_bash must land just after bin/fm-watch-arm.sh has had
+# its whole confirmation budget to print the status line: that budget plus two
+# seconds, from the same FM_ARM_CONFIRM_TIMEOUT the arm reads. The value is
+# capped at 60 seconds so an oversized budget can never hold the captain's chat
+# open for long, and a malformed, octal-looking, or overlong value falls back to
+# the arm's own default of 10 rather than rendering nonsense into the protocol.
+COPILOT_MAX_READ_DELAY=60
+copilot_confirm=${FM_ARM_CONFIRM_TIMEOUT:-10}
+case "$copilot_confirm" in
+  ''|*[!0-9]*|0[0-9]*|??????????*) copilot_confirm=10 ;;
+esac
+copilot_read_delay=$((copilot_confirm + 2))
+[ "$copilot_read_delay" -le "$COPILOT_MAX_READ_DELAY" ] || copilot_read_delay=$COPILOT_MAX_READ_DELAY
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 omp_ext="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
@@ -151,6 +167,7 @@ render_snippet() {  # [snippet]
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
     line=${line//__FM_GROK_ARM__/$grok_arm}
+    line=${line//__FM_COPILOT_READ_DELAY__/$copilot_read_delay}
     printf '%s\n' "$line"
   done < "$snippet"
 }
@@ -199,6 +216,9 @@ repair_line() {
     cursor)
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
+    copilot)
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision by running exactly bin/fm-watch-arm.sh, from the session working directory with no cd or other command bundled in, as its own Copilot bash call in mode async, never detached, never synchronous, and never shell &, then one read_bash with delay ' "$copilot_read_delay" ' for its status line.'
+      ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
       ;;
@@ -227,6 +247,9 @@ ordinary_wake_line() {
       ;;
     cursor)
       printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      ;;
+    copilot)
+      printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Copilot bash call in mode async as directed below; it must return at once so the turn can end.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

@@ -210,6 +210,8 @@ case "$1" in
       . "$SCRIPT_DIR/fm-hook-host-lib.sh"
       # Cursor loads the tracked Claude settings too; its own entries mirror it.
       fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+      # Copilot runs them as well, and its dialog is not Claude's to mirror.
+      fm_hook_delivered_by_copilot && exit 0
     fi
     # One line per field: event, tag, id; the text follows as the remainder.
     PARSED=$(printf '%s' "$PAYLOAD" | jq -r '

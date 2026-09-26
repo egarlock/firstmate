@@ -38,6 +38,14 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=3666
 Before that boundary existed, a Codex session started from an environment that had retained `CLAUDECODE=1` reported `claude`, and session start emitted Claude's Stop-owned supervision protocol to a Codex primary.
 The same live shape, reproduced with a real process named `codex` and no installed harness, now reports `codex` with the marker present and `claude` with the marker present and ancestry blinded, which is what proves the case is not vacuous.
 
+### A real Copilot session holding a retained Claude marker
+
+Verified on 2026-09-26 with GitHub Copilot CLI 1.0.88 on macOS arm64, from Copilot sessions started inside a Claude Code session so both markers were present.
+A hook and a tool command each carried `COPILOT_CLI=1`, `COPILOT_PROJECT_DIR`, and the inherited `CLAUDECODE=1`, so Copilot does not clear a foreign marker and `bin/fm-harness.sh` tests `COPILOT_CLI` first.
+A tool command's parent chain was `bash -c` and then the Copilot executable itself, whose `ps -o comm=` was its versioned install path ending in `/copilot`, both for plain `copilot` and through an opaque launcher that runs the executable as its child.
+Every hook command, including the tracked Claude-shaped entries Copilot also runs, was a direct child of that same executable.
+`tests/fm-copilot-primary-live-e2e.test.sh` refreshes the resulting guarantees in a real primary session: the session lock names the Copilot process, and the rendered block names `copilot` as the primary, as [Copilot verification](copilot.md#primary-session) records.
+
 ### A real Codex session holding a retained Claude marker
 
 The portable regression builds its process tree from renamed executables, so the same guarantee is proven again against the real installed Codex.

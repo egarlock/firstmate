@@ -35,7 +35,7 @@ For recovery and control, use the exact `harness=` in `state/<id>.meta`; never i
 Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
-Muse, Gemini, AGY, Devin, and Copilot are verified only for crewmate and scout work, never a secondmate or primary.
+Muse, Gemini, AGY, and Devin are verified only for crewmate and scout work, never a secondmate or primary.
 
 ## Detection
 
@@ -43,6 +43,7 @@ Muse, Gemini, AGY, Devin, and Copilot are verified only for crewmate and scout w
 A marker names its harness, but a structural ancestor of a different harness outranks it, because a marker is ordinary environment state a child or a multiplexer can retain while ancestry is what proves who owns the process tree.
 Only `FM_PI_HARNESS=pi-signed` at the launch boundary together with `PI_CODING_AGENT=true` selects Pi-signed; shared unmarked launcher ancestry remains Pi.
 omp publishes no marker of its own; `FM_OMP_HARNESS=omp` is Firstmate's launch marker and the anchored process name `omp` is its ancestry evidence, as `references/harness/omp.md` records.
+Copilot publishes `COPILOT_CLI=1` without clearing an inherited `CLAUDECODE`, so its marker is tested first and the anchored process name `copilot` is its ancestry evidence, as `references/harness/copilot.md` records.
 `../../../bin/fm-spawn.sh` owns worker marker establishment, while the README launch command owns the signed-primary boundary.
 `../../../bin/fm-harness.sh crew` resolves `config/crew-harness`, where absent or `default` means firstmate's own harness.
 `../../../bin/fm-harness.sh secondmate` resolves `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own harness.

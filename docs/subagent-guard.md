@@ -372,6 +372,7 @@ The coverage it leaves is partial rather than correct - the tracked entry passes
 Wiring Grok properly still requires the matcher-token verification described above, and that is what closes this exception.
 The same exception now also covers Cursor, which loads the tracked Claude settings as well: `.cursor/hooks.json` registers no subagent-spawn matcher, so this entry stays unguarded there for the same reason, and its `--claude` rendering leaves Cursor the exit-2 and stderr path rather than Cursor's own decision object.
 Cursor's subagent tool name has not been verified, and registering an unverified matcher would be a guess rather than coverage, so closing it needs the same verification step.
+GitHub Copilot CLI also runs this entry from the tracked Claude settings with a Claude-shaped payload and honors its exit 2, but which Claude tool name, if any, Copilot maps its own subagent tool to is unverified, so this is the same incidental reach rather than Copilot being wired.
 
 This change does not close the deeper harness-agnostic defect.
 Every firstmate guard's in-flight-work branch keys off `state/<id>.meta`, and only `bin/fm-spawn.sh` writes that record.

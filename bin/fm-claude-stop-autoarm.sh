@@ -153,6 +153,12 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # its turn boundary, so stand down on a Cursor-delivered payload.
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
+# GitHub Copilot CLI loads the tracked Claude settings too and awaits every
+# Stop entry it runs, ignoring asyncRewake, so this arm would hold Copilot's
+# turn end open for the declared multi-hour timeout. Copilot's own agentStop
+# registration owns its turn boundary (bin/fm-turnend-guard-copilot.sh).
+fm_hook_delivered_by_copilot && exit 0
+
 # pi-code (Pi's Claude-hook compatibility extension) also loads the tracked
 # Claude settings and has no asyncRewake, so it awaits every Stop hook and this
 # arm would run SYNCHRONOUSLY inside Pi's turn end, holding that turn open for

@@ -52,11 +52,11 @@ pass "anchored Copilot liveness"
 ! fm_control_harness_family copilot-helper >/dev/null || fail 'a copilot-prefixed raw command claimed the adapter'
 fm_control_harness_supports_kind copilot ship || fail 'ship refused'
 fm_control_harness_supports_kind copilot scout || fail 'scout refused'
-! fm_control_harness_supports_kind copilot secondmate || fail 'secondmate accepted'
+fm_control_harness_supports_kind copilot secondmate || fail 'secondmate refused'
 for backend in tmux herdr zellij cmux orca; do
   fm_control_backend_supports_key "$backend" C-c || fail "$backend cannot deliver the Copilot interrupt"
 done
-pass "worker-only resolution and lifecycle capabilities"
+pass "adapter resolution, task kinds, and lifecycle capabilities"
 
 for signal in ' ◉ Working · 97 B esc interrupt' ' ◎ Working esc interrupt'; do
   printf '%s\n' "$signal" | fm_busy_lines_match copilot || fail "busy row not acknowledged: $signal"
@@ -65,6 +65,12 @@ done
 printf ' ○ Working · 76 B\n' | fm_busy_lines_match copilot || fail 'Working row alone lost'
 printf 'esc interrupt\n' | fm_busy_lines_match copilot || fail 'interrupt hint alone lost'
 ! printf ' ← open sidebar · / commands · ? help · tab next tab\n' | fm_busy_lines_match copilot || fail 'idle row read busy'
+# A yielded agent waiting on its own background shell answers a prompt at once,
+# so that row is not busy, while a Working row beside it still is.
+! printf ' ○ Waiting for background shells · 1.4 KiB esc interrupt\n' | fm_busy_lines_match copilot \
+  || fail 'the background-shell row of a yielded agent read busy'
+printf ' ○ Waiting for background shells · 1 KiB esc interrupt\n ◎ Working · 9 B esc interrupt\n' \
+  | fm_busy_lines_match copilot || fail 'a Working row beside the background-shell row lost'
 ! printf '   echo Working · x\n' | fm_busy_lines_match copilot || fail 'worker output faked the Working row'
 ! printf 'esc to cancel\n' | fm_busy_lines_match copilot || fail 'borrowed another harness signal'
 [ "$(fm_composer_classify_content 0 '❯')" = empty ] || fail 'Copilot composer glyph not recognized'
@@ -183,8 +189,19 @@ if out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" copilot-old "$proj" --scout 
 then fail 'an unversioned launch command launched'; fi
 assert_contains "$out" 'reported no GitHub Copilot CLI version' 'wrong unreadable-version refusal'
 printf '1.0.88\n' > "$fakebin/copilot.version"
-fm_test_spawn_brief "$home" copilot-sm
-if out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" copilot-sm "$proj" --secondmate --harness copilot 2>&1)
-then fail 'Copilot secondmate launch accepted'; fi
-assert_contains "$out" 'crewmate/scout adapter only' 'wrong secondmate refusal'
-pass "old or unversioned CLIs and secondmate launches are refused before launch"
+pass "old or unversioned CLIs are refused before launch"
+
+# A secondmate runs its own Copilot primary in its home: the same trusted
+# launch, which also loads that home's tracked .github/hooks registrations.
+sm="$case_dir/sm-home"
+mkdir -p "$sm/bin" "$sm/data"
+printf '# Firstmate\n' > "$sm/AGENTS.md"
+printf 'copilot-sm\n' > "$sm/.fm-secondmate-home"
+printf 'charter\n' > "$sm/data/charter.md"
+git -C "$sm" init -q
+if ! out=$(FM_FAKE_LAUNCH_LOG="$case_dir/launch-sm" fm_test_run_spawn "$home" "$sm" "$fakebin" copilot-sm "$sm" --secondmate --harness copilot 2>&1)
+then fail "Copilot secondmate launch failed: $out"; fi
+assert_contains "$(cat "$case_dir/launch-sm")" "COPILOT_ALLOW_ALL=true '$fakebin/copilot' --plugin-dir '$home/state/copilot-sm.copilot-plugin' --allow-all --no-ask-user" 'secondmate launch lost trust, plugin, or autonomy'
+assert_grep 'harness=copilot' "$home/state/copilot-sm.meta" 'secondmate harness not recorded'
+assert_grep 'kind=secondmate' "$home/state/copilot-sm.meta" 'secondmate kind not recorded'
+pass "a Copilot secondmate launches with the same trusted shape in its home"

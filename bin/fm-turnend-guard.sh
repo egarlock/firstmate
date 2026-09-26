@@ -18,7 +18,12 @@
 # this guard back with --cursor from bin/fm-turnend-guard-cursor.sh and renders
 # exit 2 as one bounded follow-up, because exit 2 is a silent no-op on Cursor's
 # stop step; without that flag a Cursor-shaped payload is the Claude-settings
-# duplicate Cursor also loads, and this guard stands down.
+# duplicate Cursor also loads, and this guard stands down. GitHub Copilot CLI
+# calls it with --copilot from bin/fm-turnend-guard-copilot.sh, which renders
+# exit 2 as Copilot's agentStop block decision; that mode keeps the default
+# stop_hook_active loop guard, and without it a Stop that Copilot itself
+# delivered is the Claude-settings duplicate Copilot also runs, so this guard
+# stands down.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -100,6 +105,7 @@ GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
+COPILOT_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -111,7 +117,8 @@ for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    --copilot) COPILOT_MODE=1 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--copilot]" >&2; exit 2 ;;
   esac
 done
 
@@ -138,6 +145,12 @@ command -v jq >/dev/null 2>&1 || exit 0
 # payload is the Claude-compatibility duplicate and must not create a second
 # continuation path (docs/turnend-guard.md "Harness integrations").
 if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  exit 0
+fi
+# The same holds for GitHub Copilot CLI, which runs the tracked Claude Stop
+# entry but ignores its exit 2, and whose own agentStop registration calls back
+# with --copilot.
+if [ "$COPILOT_MODE" -eq 0 ] && fm_hook_delivered_by_copilot; then
   exit 0
 fi
 

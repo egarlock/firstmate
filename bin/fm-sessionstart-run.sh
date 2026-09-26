@@ -114,8 +114,10 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # so a Cursor-delivered payload here is the duplicate: bin/fm-sessionstart-
   # cursor.sh already owns that session open and calls this wrapper with an
   # explicit --source and no payload. Running twice would take the helm twice
-  # and repeat every startup sweep.
-  if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  # and repeat every startup sweep. GitHub Copilot CLI runs the Claude-shaped
+  # entry too, and bin/fm-sessionstart-copilot.sh owns its session open the
+  # same way.
+  if fm_hook_payload_is_foreign_host "$PAYLOAD" || fm_hook_delivered_by_copilot; then
     exit 0
   fi
   SOURCE=$(printf '%s' "$PAYLOAD" | awk '
