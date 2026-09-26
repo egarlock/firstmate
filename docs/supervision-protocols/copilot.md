@@ -3,30 +3,29 @@ Mode: Copilot attached async background supervision.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
-2. Source `__FM_X_MODE_ENV__` first when Relay is active.
-3. First cycle: arm with Copilot's `bash` tool, as its own call, in the background:
+2. First cycle: arm with Copilot's `bash` tool, as its own call, in the background:
 
    `bash` with `mode: "async"`, `detach` omitted, and its own `shellId`, on:
    `[ -f __FM_X_MODE_ENV_SH__ ] && . __FM_X_MODE_ENV_SH__; exec bin/fm-watch-arm.sh`
 
-4. The arming call must return at once so the turn can end.
+3. The arming call must return at once so the turn can end.
    Copilot queues everything the captain types while a turn is active, and `bin/fm-watch-arm.sh` blocks for the whole watcher cycle, so never arm it with the default synchronous mode or an `initial_wait`: either holds the turn open and silently queues the captain's chat.
-5. Never set `detach: true` for the arm.
+4. Never set `detach: true` for the arm.
    An attached async shell keeps running across later turns and ends with the session, which is the arm's own contract that ending the arm tears its watcher down too; a detached arm outlives the session.
-6. Never use shell `&` for firstmate supervision.
-7. Never bundle the arm onto another command.
+5. Never use shell `&` for firstmate supervision.
+6. Never bundle the arm onto another command.
    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`), which Copilot runs from this project's tracked Claude settings.
-8. Trust only the arm's one-line status.
+7. Trust only the arm's one-line status.
    Collect it with exactly one `read_bash` on the arm's `shellId` with `delay: __FM_COPILOT_READ_DELAY__`, just past the arm's confirmation budget.
    Do not poll in a loop or use a longer delay: `read_bash` holds the turn open the same way a synchronous call does.
    If that single read still shows no `watcher:` line, treat supervision as unconfirmed, say so, and re-arm rather than assuming either success or failure.
-9. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
+8. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
-10. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
-11. After a successful start or attach status, end the turn.
+9. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
+10. After a successful start or attach status, end the turn.
     The background arm remains the live wait until it returns an actionable wake or failure.
-12. Waiting is silent.
-13. Run the drain and every other supervision command synchronously with an `initial_wait` long enough for it to finish, such as 120.
+11. Waiting is silent.
+12. Run the drain and every other supervision command synchronously with an `initial_wait` long enough for it to finish, such as 120.
     A synchronous call that outlives its `initial_wait` keeps running in the background, and a turn that ends before it finishes and before the arm is re-armed ends blind.
 
 Copilot submits a follow-up turn of its own when the background arm exits.
