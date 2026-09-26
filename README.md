@@ -77,6 +77,8 @@ Codex and OpenCode are also verified and supported as primary harnesses; Codex u
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
 
+Workers and scouts can also run on Gemini CLI, Muse, Rovo Dev, Antigravity CLI (`agy`), Devin CLI, and GitHub Copilot CLI; [harness support](docs/configuration.md#harness-support) owns the worker-only boundary and each tool's setup.
+
 ### Install and launch
 
 ```sh

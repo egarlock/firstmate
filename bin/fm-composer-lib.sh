@@ -419,6 +419,14 @@ FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 # acknowledgement. Delivery guard only; recorded worker state comes from the
 # agy-regex fold in bin/fm-busy-lib.sh.
 FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
+# GitHub Copilot CLI renders one status row below its composer while a turn
+# runs: a spinner glyph, `Working`, an optional ` · <bytes>` counter, and the
+# `esc interrupt` hint; the idle row shows its sidebar/commands/help hints
+# instead (verified live, Copilot CLI 1.0.88). The hint and the Working row
+# shape are independent signals, so losing either still acknowledges a submit.
+# Delivery guard only; recorded worker state comes from the copilot-hook
+# plugin hooks in bin/fm-busy-lib.sh.
+FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT='(^|[[:space:]])esc interrupt([[:space:]]|$)|^[[:space:]]*[^[:space:][:alnum:]]{1,4}[[:space:]]+Working([[:space:]]+·|[[:space:]]+esc[[:space:]])'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -438,6 +446,7 @@ fm_busy_lines_match() {  # [harness]
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      copilot) regex=$FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
