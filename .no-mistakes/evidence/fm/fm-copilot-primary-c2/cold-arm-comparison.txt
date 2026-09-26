@@ -1,0 +1,7 @@
+# cold first fm-watch-arm.sh on a fresh lab home (default 10s confirm budget, darwin), base 31027a6 vs target 9eb431a
+target after 6s: watcher: started pid=59689 (beacon fresh)
+base after 17s: watcher: FAILED - no live watcher with a fresh beacon
+target after 18s: watcher: FAILED - no live watcher with a fresh beacon
+base after 18s: watcher: FAILED - no live watcher with a fresh beacon
+target after 20s: watcher: FAILED - no live watcher with a fresh beacon
+base after 18s: watcher: FAILED - no live watcher with a fresh beacon

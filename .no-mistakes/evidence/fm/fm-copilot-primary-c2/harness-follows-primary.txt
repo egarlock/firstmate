@@ -1,0 +1,6 @@
+under copilot process, fm-harness.sh (own) -> copilot
+under copilot process, fm-harness.sh crew -> copilot
+under copilot process, fm-harness.sh secondmate -> copilot
+under claude process, fm-harness.sh (own) -> claude
+under claude process, fm-harness.sh crew -> claude
+under claude process, fm-harness.sh secondmate -> claude

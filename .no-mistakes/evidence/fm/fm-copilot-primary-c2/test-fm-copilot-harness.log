@@ -1,0 +1,10 @@
+ok - anchored Copilot liveness
+ok - adapter resolution, task kinds, and lifecycle capabilities
+ok - delivery signals, composer draft safety, and trust-dialog backstop
+ok - configured launch command is opaque, validated, and version-gated
+ok - private plugin hooks: lifecycle, turn-end, stale-generation rejection, and retirement
+ok - scout launch carries trust, private plugin, autonomy, model, effort, and typed brief
+ok - configured launch command replaces the executable prefix
+ok - old or unversioned CLIs are refused before launch
+ok - a Copilot secondmate launches with the same trusted shape in its home
+rc=0

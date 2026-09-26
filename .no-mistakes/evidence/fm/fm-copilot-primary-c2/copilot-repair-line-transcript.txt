@@ -1,0 +1,24 @@
+### Copilot agentStop adapter, lab home with an in-flight task and no watcher
+$ printf '{"stop_hook_active":false}' | FM_HOME=$LAB bin/fm-turnend-guard-copilot.sh
+-- X mode OFF:
+
+-- X mode ON (config/x-mode.env present):
+
+-- X mode ON, stop_hook_active=true (loop bound): output follows
+[exit=0 , empty output means turn allowed to end]
+
+-- Other harnesses' repair lines with X mode (unchanged generic prefix):
+claude: source '/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T//fm-lab.G3phj4/config/x-mode.env' first, then watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+codex: source '/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T//fm-lab.G3phj4/config/x-mode.env' first, then repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds 180.
+grok: source '/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T//fm-lab.G3phj4/config/x-mode.env' first, then repair missing watcher supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.
+cursor: source '/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T//fm-lab.G3phj4/config/x-mode.env' first, then watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.
+
+-- Copilot read_bash delay follows arm confirm default per platform:
+OSTYPE=darwin25 -> delay 12
+OSTYPE=linux-gnu -> delay 12
+OSTYPE=msys -> delay 32
+OSTYPE=cygwin -> delay 32
+OSTYPE=mingw32 -> delay 32
+FM_ARM_CONFIRM_TIMEOUT=20 -> delay 22
+FM_ARM_CONFIRM_TIMEOUT=999 (cap) -> delay 60
+FM_ARM_CONFIRM_TIMEOUT=abc, OSTYPE=msys (fallback) -> delay 32

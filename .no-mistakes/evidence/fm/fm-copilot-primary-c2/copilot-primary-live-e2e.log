@@ -1,0 +1,28 @@
+harness: GitHub Copilot CLI 1.0.88
+ok - copilot primary: the tracked sessionStart hook returns the digest as additionalContext
+ok - copilot primary: the session lock resolves to the Copilot process
+ok - copilot primary: the digest reaches model context and names copilot as the primary
+ok - copilot primary: a blind turn end blocks and the reason arrives as a typed turn-end-guard prompt
+pane at failure:
+ SH Read fm-wake-lib.sh L945:1105 (161 lines read)                                                                                                                                                                         ┃
+                                                                                                                                                                                                                           ┃
+ ❯ Thought for 1s                                                                                                                                                                                                          ┃
+                                                                                                                                                                                                                           ┃
+ / Search "fm_lock_recheck_stale_owner\(|fm_lock_mid_acquire_is_fresh\(|fm_lock_link_owner\(" (bin/fm-wake-lib.sh) 3 lines found                                                                                       10s ┃
+                                                                                                                                                                                                                           ┃
+ $ Shell Inspect watcher lock recovery artifacts 20 lines…                                                                                                                                                             10s ┃
+   ls -la state/.watch.lock*                                                                                                                                                                                               ┃
+ $ Shell Check recorded watcher process 1 line…                                                                                                                                                                        10s ┃
+   ps -p 2334 -o pid=,stat=,command=                                                                                                                                                                                       ┃
+                                                                                                                                                                                                                           ┃
+ SH Read fm-wake-lib.sh L470:665 (196 lines read)                                                                                                                                                                          ┃
+                                                                                                                                                                                                                           ┃
+ ❯ Thinking…                                                                                                                                                                                                               ┃
+                                                                                                                                                                                                                           ┃
+ egarlock:/private/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/fm-copilot-primary.3CvKDP/home [⎇ master] +0 -0                                         Plan: 154,500/500,000 (30% used) · Session: 3.11 AIC used · YOLO
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ○ Working · 6.7 KiB esc interrupt                                                                                                                                                                Auto → GPT-6 Luna · (46%)
+not ok - a live watcher after the turn ended did not happen within 60s [harness: GitHub Copilot CLI 1.0.88]
+exit=1

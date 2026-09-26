@@ -1,0 +1,12 @@
+ok - fm-turnend-guard: the Claude entry stands down under Copilot, and --copilot still blocks
+ok - fm-claude-stop-autoarm: inert under Copilot, arming under Claude
+ok - fm-sessionstart-run: inert under Copilot, unchanged under Claude
+ok - fm-arm-pretool-check: the tracked seatbelt still denies an unsafe arm under Copilot
+ok - fm-hook-host-lib: only an exact copilot parent counts
+ok - copilot adapter: a blind turn end becomes one typed block decision
+ok - copilot adapter: one continuation per turn, silent without need, fail-open on bad input
+ok - copilot session start: the digest arrives as additionalContext with the right source
+ok - copilot registrations: each hook runs its adapter through the session's own path
+ok - copilot turn end: a watcher armed through a symlinked home is recognized
+ok - session lock: a Copilot session holds its own home lock, anchored by exact name
+rc=0
