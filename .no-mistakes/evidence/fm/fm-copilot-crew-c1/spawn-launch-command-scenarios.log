@@ -1,0 +1,39 @@
+== A: no config/copilot-cmd -> plain copilot from PATH (host shim -> agency), real version probe
+spawned cp-default harness=copilot kind=scout window=firstmate:fm-cp-default worktree=/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/wt
+[spawn exit=0]
+launch: COPILOT_ALLOW_ALL=true '/Users/ericgarlock/.local/bin/copilot' --plugin-dir '/private/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/home/state/cp-default.copilot-plugin' --allow-all --no-ask-user
+meta: harness=copilot
+
+== B: config/copilot-cmd = 'agency copilot' (work computer)
+spawned cp-agency harness=copilot kind=scout window=firstmate:fm-cp-agency worktree=/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/wt
+[spawn exit=0]
+launch: COPILOT_ALLOW_ALL=true '/Users/ericgarlock/.config/agency/CurrentVersion/agency' 'copilot' --plugin-dir '/private/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/home/state/cp-agency.copilot-plugin' --allow-all --no-ask-user
+meta: harness=copilot
+--model 'auto' --reasoning-effort 'high'
+
+== B2: config/copilot-cmd = absolute path to the plain Copilot CLI (personal-laptop form)
+spawned cp-abs harness=copilot kind=scout window=firstmate:fm-cp-abs worktree=/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/wt
+[spawn exit=0]
+launch: COPILOT_ALLOW_ALL=true '/opt/homebrew/bin/copilot' --plugin-dir '/private/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/home/state/cp-abs.copilot-plugin' --allow-all --no-ask-user
+meta: harness=copilot
+
+== C: config/copilot-cmd with shell metacharacters is refused before launch
+error: config/copilot-cmd word 'copilot;' carries a character outside letters, digits, and . _ / @ % + = : , - (the line is split on whitespace, never run through a shell)
+[spawn exit=1]
+launch: <none>
+meta: no task record
+no pwned file
+
+== C2: config/copilot-cmd naming a non-existent launcher is refused
+error: Copilot launch command 'no-such-agency' is not an executable on PATH; install GitHub Copilot CLI or set config/copilot-cmd
+[spawn exit=1]
+launch: <none>
+meta: no task record
+
+== D: resolved executable path containing & (review-2)
+spawned cp-amp harness=copilot kind=scout window=firstmate:fm-cp-amp worktree=/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/wt
+[spawn exit=0]
+launch: COPILOT_ALLOW_ALL=true '/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/R&D/bin/copilot' --plugin-dir '/private/var/folders/2r/lv20clyn0xbb0mq181bxbmpw0000gn/T/cpadv.ReuJQC/case/home/state/cp-amp.copilot-plugin' --allow-all --no-ask-user
+meta: harness=copilot
+
+== F: crew-harness=copilot resolves a harness-less spawn to Copilot

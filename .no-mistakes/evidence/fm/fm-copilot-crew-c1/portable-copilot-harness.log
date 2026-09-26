@@ -1,0 +1,13 @@
+FM_TEST_BEGIN 2026-09-26T14:30:39Z tests/fm-copilot-harness.test.sh family=pure-contract-unit expected_gate_skip=none
+ok - anchored Copilot liveness
+ok - worker-only resolution and lifecycle capabilities
+ok - delivery signals, composer draft safety, and trust-dialog backstop
+ok - configured launch command is opaque, validated, and version-gated
+ok - private plugin hooks: lifecycle, turn-end, stale-generation rejection, and retirement
+ok - scout launch carries trust, private plugin, autonomy, model, effort, and typed brief
+ok - configured launch command replaces the executable prefix
+ok - old or unversioned CLIs and secondmate launches are refused before launch
+FM_TEST_END 2026-09-26T14:34:52Z tests/fm-copilot-harness.test.sh exit=0 duration_ms=253788 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=254761
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=253788 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-copilot-harness.test.sh duration_ms=253788
