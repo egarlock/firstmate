@@ -163,6 +163,7 @@ assert_contains "$launch" "--reasoning-effort 'xhigh'" 'effort lost'
 assert_contains "$launch" "-i \"\$(" 'brief not submitted as the first interactive turn'
 assert_contains "$launch" 'encode launch-brief' 'typed launch envelope lost'
 assert_contains "$launch" '-u CLAUDECODE' 'foreign primary marker not cleared'
+case "$launch" in *'-u COPILOT_CLI'*) fail 'a Copilot launch cleared its own identity marker' ;; esac
 assert_grep 'harness=copilot' "$home/state/copilot-worker.meta" 'harness not recorded'
 assert_present "$home/state/copilot-worker.copilot-plugin/hooks.json" 'spawn did not wire hooks'
 [ "$(fm_busy_classify tmux fake:w copilot copilot-worker "$home/state")" = 'busy fm-spawn' ] || fail 'launch not armed'

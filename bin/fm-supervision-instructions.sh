@@ -120,14 +120,18 @@ esac
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 # Copilot's single read_bash must land just after bin/fm-watch-arm.sh has had
 # its whole confirmation budget to print the status line: that budget plus two
-# seconds, from the same FM_ARM_CONFIRM_TIMEOUT the arm reads. The value is
-# capped at 60 seconds so an oversized budget can never hold the captain's chat
-# open for long, and a malformed, octal-looking, or overlong value falls back to
-# the arm's own default of 10 rather than rendering nonsense into the protocol.
+# seconds, from the same FM_ARM_CONFIRM_TIMEOUT the arm reads and the same
+# default (bin/fm-arm-confirm-lib.sh). The value is capped at 60 seconds so an
+# oversized budget can never hold the captain's chat open for long, and a
+# malformed, octal-looking, or overlong value falls back to that default rather
+# than rendering nonsense into the protocol.
+# shellcheck source=bin/fm-arm-confirm-lib.sh
+. "$SCRIPT_DIR/fm-arm-confirm-lib.sh"
 COPILOT_MAX_READ_DELAY=60
-copilot_confirm=${FM_ARM_CONFIRM_TIMEOUT:-10}
+copilot_confirm_default=$(fm_arm_confirm_default)
+copilot_confirm=${FM_ARM_CONFIRM_TIMEOUT:-$copilot_confirm_default}
 case "$copilot_confirm" in
-  ''|*[!0-9]*|0[0-9]*|??????????*) copilot_confirm=10 ;;
+  ''|*[!0-9]*|0[0-9]*|??????????*) copilot_confirm=$copilot_confirm_default ;;
 esac
 copilot_read_delay=$((copilot_confirm + 2))
 [ "$copilot_read_delay" -le "$COPILOT_MAX_READ_DELAY" ] || copilot_read_delay=$COPILOT_MAX_READ_DELAY
@@ -186,10 +190,11 @@ repair_line() {
     return 0
   fi
 
-  prefix=
+  queue_prefix=
   if [ "$QUEUE_PENDING" -eq 1 ]; then
-    prefix='After draining queued wakes, '
+    queue_prefix='After draining queued wakes, '
   fi
+  prefix=$queue_prefix
   if [ "$X_MODE" -eq 1 ]; then
     prefix="${prefix}source ${x_mode_env_sh} first, then "
   fi
@@ -217,7 +222,14 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
     copilot)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision by running exactly bin/fm-watch-arm.sh, from the session working directory with no cd or other command bundled in, as its own Copilot bash call in mode async, never detached, never synchronous, and never shell &, then one read_bash with delay ' "$copilot_read_delay" ' for its status line.'
+      # A Copilot async call runs one command, so with Relay active the arm
+      # sources the cadence in that same call, exactly as the protocol's own
+      # arm command does, instead of a separate step before it.
+      copilot_arm_cmd='bin/fm-watch-arm.sh'
+      if [ "$X_MODE" -eq 1 ]; then
+        copilot_arm_cmd="[ -f ${x_mode_env_sh} ] && . ${x_mode_env_sh}; exec bin/fm-watch-arm.sh"
+      fi
+      printf '%s%s%s%s%s%s\n' "$queue_prefix" 'repair missing watcher supervision by running exactly ' "$copilot_arm_cmd" ', from the session working directory with no cd or other command bundled in, as its own Copilot bash call in mode async, never detached, never synchronous, and never shell &, then one read_bash with delay ' "$copilot_read_delay" ' for its status line.'
       ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'

@@ -272,6 +272,16 @@ test_copilot_is_attached_async_background_notify() {
     assert_contains "$out" "read_bash with delay $expected " "FM_ARM_CONFIRM_TIMEOUT=${budget%%:*} must render delay $expected"
   done
   assert_contains "$out" "never detached, never synchronous, and never shell &" "copilot repair line lost its safety bounds"
+  # The platform default comes from the arm's own owner, not a copy of it.
+  out=$(env -u FM_ARM_CONFIRM_TIMEOUT OSTYPE=msys "$RENDER" --harness copilot --repair-line)
+  assert_contains "$out" "read_bash with delay 32 " "a Git Bash host must render the arm's 30 second default budget"
+  # With Relay active the repair is one async command that sources the cadence
+  # itself, because a Copilot async call cannot run a separate step first.
+  out=$(env -u FM_ARM_CONFIRM_TIMEOUT "$RENDER" --harness copilot --repair-line --x-mode 1 --queue-pending 1)
+  assert_contains "$out" "After draining queued wakes, " "copilot repair line lost the queued-wake prefix"
+  assert_contains "$out" "x-mode.env' ] && . '" "copilot repair line must source the Relay cadence inside the arm command"
+  assert_contains "$out" "; exec bin/fm-watch-arm.sh, from the session" "copilot repair line must exec the arm in that same command"
+  assert_not_contains "$out" "first, then" "copilot repair line must not ask for a separate sourcing step"
   pass "copilot supervision is an attached async arm with a bounded status read"
 }
 

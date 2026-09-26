@@ -4935,8 +4935,17 @@ case "$LAUNCH" in
   LAUNCH=${LAUNCH//__BRIEFDOORBELL__/"$(shell_quote "$brief_doorbell")"}
   ;;
 esac
+# Foreign identity markers that fm-harness.sh reads are cleared at the launch
+# boundary: Cursor's and Gemini's for these harnesses, and a Copilot primary's
+# COPILOT_CLI and COPILOT_PROJECT_DIR for all of them but copilot, since a pane
+# server first started from a Copilot tool process hands them to every later
+# pane. cursor and omp clear foreign markers in their own templates, and their
+# own markers are tested before COPILOT_CLI.
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | copilot)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u COPILOT_CLI -u COPILOT_PROJECT_DIR $LAUNCH"
+  ;;
+copilot)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
