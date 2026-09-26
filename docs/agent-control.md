@@ -43,6 +43,8 @@ Devin emits no lifecycle hook for cancellation either, so after an armed interru
 Devin's double Escape also opens its `/revert` picker on an idle agent, where Enter reverts file changes, so its second press is sent only after the first renders a running turn's armed hint and never sooner than the adapter's press gap.
 An interrupt whose first press shows no running turn stops there and reports `cancel=not-running`, leaving busy state untouched; a picker a mistimed press opened is closed with one Escape and reported as `revert-picker=dismissed`, and `exit` refuses to type into an open picker.
 [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh) owns the arm signal, press gap, and picker signal.
+Copilot likewise emits no lifecycle hook when one Ctrl+C cancels a running turn, so its interrupt receives the same conservative `unknown` invalidation with `cancel=unconfirmed`.
+Its interrupt is always exactly one press, because the same Ctrl+C on an idle Copilot only arms `ctrl+c again to exit` and a second press within that window exits the agent.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
 An interrupt is not complete until the composer is empty.
@@ -56,7 +58,7 @@ The clear is refused before anything is sent when the recorded backend cannot de
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
-It is not deterministic across the verified adapters: codex, grok, gemini, and devin resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified pane-resume contract.
+It is not deterministic across the verified adapters: codex, grok, gemini, and devin resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, agy, and copilot have no verified pane-resume contract.
 `relaunch` covers the same need when the backend can prove the old agent stopped and the composer is empty, because the brief on disk - not a harness-private session - is the durable instruction; Devin on Herdr currently fails that composer check and refuses.
 
 ## Transactional relaunch

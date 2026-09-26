@@ -163,7 +163,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|copilot)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -179,6 +179,13 @@
 #   config/claude-permission-mode is not mapped: Devin auto approves read-only
 #   tools, unlike Claude auto. Effort is part of Devin model ids, so the
 #   independent --effort axis is recorded but omitted from argv.
+#   GitHub Copilot CLI is worker-only. Its executable prefix is the configured
+#   launch command (config/copilot-cmd, default `copilot`), resolved and
+#   version-gated by bin/fm-copilot-lib.sh before any endpoint exists.
+#   COPILOT_ALLOW_ALL=true trusts the fresh worktree and --allow-all approves
+#   every tool; --plugin-dir mounts a private per-task plugin carrying the
+#   lifecycle hooks (bin/fm-copilot-plugin.sh), so no global or project config
+#   is edited. config/claude-permission-mode is not mapped.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -349,6 +356,8 @@
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
+#     __COPILOTCMD__ quoted configured Copilot launch command, first word resolved
+#     __COPILOTPLUGIN__ private per-task Copilot plugin directory with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
@@ -366,7 +375,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, devin, and copilot are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1806,7 +1815,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | copilot)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2111,6 +2120,14 @@ launch_template() {
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
   devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # GitHub Copilot CLI: -i submits the typed launch envelope as the first turn
+  # of an interactive session. COPILOT_ALLOW_ALL=true is the only verified way
+  # to trust a fresh worktree without the folder-trust dialog, which --allow-all
+  # alone does not suppress; --allow-all approves every tool and path, and
+  # --no-ask-user keeps an unattended worker from parking on a question. The
+  # private --plugin-dir carries the busy-state and turn-end hooks. The
+  # executable prefix is the configured launch command, spliced in whole.
+  copilot) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI COPILOT_ALLOW_ALL=true __COPILOTCMD__ --plugin-dir __COPILOTPLUGIN__ --allow-all --no-ask-user __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2221,7 +2238,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, devin, and copilot are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2235,7 +2252,9 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+# copilot has none yet either: only its worker lifecycle hooks are verified,
+# and docs/supervision-protocols/ carries no copilot wake protocol.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = copilot ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2255,6 +2274,23 @@ devin)
     echo "error: devin executable not found on PATH" >&2
     exit 1
   }
+  ;;
+copilot)
+  # The configured launch command and the version gate have one owner
+  # (bin/fm-copilot-lib.sh); both refuse before any endpoint exists.
+  # shellcheck source=bin/fm-copilot-lib.sh
+  . "$SCRIPT_DIR/fm-copilot-lib.sh"
+  COPILOT_CMD=$(fm_copilot_launch_prefix "$CONFIG") || exit 1
+  COPILOT_WORDS=()
+  while IFS= read -r copilot_word; do COPILOT_WORDS+=("$copilot_word"); done < <(fm_copilot_launch_words "$CONFIG")
+  if ! COPILOT_VERSION=$(fm_copilot_version "${COPILOT_WORDS[@]}"); then
+    echo "error: the Copilot launch command ($COPILOT_CMD) reported no GitHub Copilot CLI version for --version; install or update GitHub Copilot CLI, or fix config/copilot-cmd" >&2
+    exit 1
+  fi
+  if ! fm_copilot_version_supported "$COPILOT_VERSION"; then
+    echo "error: GitHub Copilot CLI $COPILOT_VERSION is older than the verified minimum $FM_COPILOT_MIN_VERSION; run 'copilot update' and respawn" >&2
+    exit 1
+  fi
   ;;
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -2478,7 +2514,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | copilot)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2512,6 +2548,14 @@ effort_flag_for_harness() {
     # than passing a known-bad value.
     case "$effort" in
     low | medium | high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  copilot)
+    # Copilot CLI --reasoning-effort accepts none|minimal|low|medium|high|xhigh|max
+    # (1.0.68 through 1.0.88; 1.0.88 no longer lists the older --effort alias),
+    # so the shared vocabulary maps straight across.
+    case "$effort" in
+    low | medium | high | xhigh | max) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
   agy)
@@ -4254,7 +4298,7 @@ if [ "$KIND" != secondmate ]; then
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin)
+  gemini | devin | copilot)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4300,6 +4344,11 @@ EOF
   devin)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       "$SCRIPT_DIR/fm-devin-config.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
+    fi
+    ;;
+  copilot)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      "$SCRIPT_DIR/fm-copilot-plugin.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
     fi
     ;;
   gemini)
@@ -4865,6 +4914,10 @@ devin)
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+copilot)
+  LAUNCH=${LAUNCH//__COPILOTCMD__/"$COPILOT_CMD"}
+  LAUNCH=${LAUNCH//__COPILOTPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.copilot-plugin")"}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # A record-backed launch brief is published into the state dir of the pane
@@ -4883,7 +4936,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | copilot)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

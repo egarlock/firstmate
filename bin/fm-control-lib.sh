@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin copilot
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -90,6 +90,7 @@ fm_control_harness_family() {  # <recorded-harness>
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
+    copilot) printf 'copilot' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -103,7 +104,7 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, and devin
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, devin, and copilot
 # are crewmate/scout adapters only: none has a primary supervision protocol,
 # and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
@@ -113,13 +114,14 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|devin|copilot) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
 
 # The key that cancels a running turn. Escape for every adapter except grok,
-# whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
+# whose Esc only moves focus to the scrollback, and copilot (below); both cancel
+# on Ctrl+C.
 # gemini names its own key in the running turn's status row
 # (`(esc to cancel, <n>s)`), and a single Escape was verified to cancel it.
 # rovo cancels on a single Escape too, printing "Agent cancelled" (verified,
@@ -127,11 +129,14 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # with an idle composer and no repollution (verified live, agy 1.2.0 through
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
-# through Herdr).
+# through Herdr). Copilot CLI cancels a running turn on one Ctrl+C and leaves
+# an empty composer; an Escape delivered through tmux does not cancel it
+# (verified live, Copilot CLI 1.0.88). The same Ctrl+C on an IDLE Copilot arms
+# `ctrl+c again to exit`, so its press count must stay at one.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    grok|copilot) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
@@ -141,7 +146,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|copilot) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -160,7 +165,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|copilot) ;;
     *) return 1 ;;
   esac
 }
@@ -171,7 +176,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|copilot) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -184,7 +189,7 @@ fm_control_interrupt_press_gap() {  # <harness>
 fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|copilot) ;;
     *) return 1 ;;
   esac
 }
@@ -205,7 +210,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|copilot) ;;
     *) return 1 ;;
   esac
 }
@@ -220,7 +225,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|copilot) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -228,7 +233,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|muse|rovo|copilot) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini|agy|devin) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -366,6 +371,13 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
+    # copilot's hooks live in a private plugin directory the launch mounts with
+    # --plugin-dir; retiring its two files retires the incarnation's wiring,
+    # and fm-copilot-plugin.sh replaces the directory whole on the next launch.
+    copilot)
+      printf '%s\n' "$state/$id.copilot-plugin/hooks.json"
+      printf '%s\n' "$state/$id.copilot-plugin/plugin.json"
+      ;;
   esac
 }
 

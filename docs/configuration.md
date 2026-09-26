@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [Copilot launch command](#copilot-launch-command-configcopilot-cmd) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -730,6 +730,9 @@ devin is verified for crewmate and scout launches only; a secondmate is refused 
 
 Its private worker config disables Claude Code imports (including the captain's hooks) and Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
 
+copilot (GitHub Copilot CLI) is verified for crewmate and scout launches only; a secondmate is refused because Copilot has no verified primary supervision protocol.
+Its lifecycle hooks ride a private per-task plugin, so no user, project, or global Copilot config is edited; the spawn refuses a CLI older than the verified minimum, and [the Copilot launch command](#copilot-launch-command-configcopilot-cmd) selects the executable; [Copilot verification](verification/copilot.md) owns the live evidence.
+
 ### Verification and primary supervision
 
 New harnesses get verified through a supervised trial task before joining the set.
@@ -882,6 +885,19 @@ When the file is absent, worker launches do not add a board address and retain t
 
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
+
+## Copilot launch command (config/copilot-cmd)
+
+The optional local, gitignored `config/copilot-cmd` holds the command that starts GitHub Copilot CLI for every Copilot worker and scout launch.
+When the file is absent, workers launch plain `copilot` from `PATH`; a value such as `agency copilot` replaces that executable prefix, and Firstmate appends its own flags and the brief after it.
+
+Blank lines and `#` comments are ignored, and exactly one command line must remain.
+The line is split on whitespace and never run through a shell, so each word may carry only letters, digits, and `. _ / @ % + = : , -`.
+The first word must resolve to an executable on `PATH` or be an absolute path, and the command must report a supported GitHub Copilot CLI version for `--version`.
+A malformed file, an unresolvable executable, or an unsupported version refuses the launch before the worker starts.
+
+The command is a per-machine choice and is inherited into secondmate homes through the primary-authoritative configuration contract, so a secondmate's own Copilot workers start the same way.
+[`bin/fm-copilot-lib.sh`](../bin/fm-copilot-lib.sh) owns parsing, resolution, and the version gate.
 
 ## Home brief include (config/brief-include.md)
 
@@ -1047,7 +1063,7 @@ Typed resolution additively recognizes `gemini` because AGENTS.md section 4 veri
 | Harness | Provider declaration on the opted-in resolver path |
 | --- | --- |
 | `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, `muse` | The resolver has an authoritative single-provider mapping. |
-| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, and `devin`; omission is an actionable configuration error before any request. |
+| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `devin`, and `copilot`; omission is an actionable configuration error before any request. |
 
 This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 

@@ -504,21 +504,22 @@ interrupt_cancel_claim() {
 # adapter's first press rendered no running turn, so nothing was cancelled; a
 # dismissed revert picker is reported beside the claim.
 deliver_interrupt() {
-  local cancel devin_gen=
-  # Devin does not emit Stop for cancellation. Capture this incarnation before
-  # keys, then invalidate its state conservatively rather than claiming idle.
-  if [ "$HARNESS" = devin ]; then
-    devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
-  fi
+  local cancel invalidate_gen=
+  # Devin and Copilot emit no lifecycle hook for cancellation. Capture this
+  # incarnation before keys, then invalidate its state conservatively rather
+  # than claiming idle.
+  case "$HARNESS" in
+    devin | copilot) invalidate_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true) ;;
+  esac
   prepare_interrupt_ack
   send_interrupt_keys
   if [ "$INTERRUPT_ARMED" = no ]; then
     cancel=not-running
   else
     cancel=$(interrupt_cancel_claim)
-    if [ "$HARNESS" = devin ] && [ -n "$devin_gen" ]; then
+    if [ -n "$invalidate_gen" ]; then
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
-        --gen "$devin_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
+        --gen "$invalidate_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
     fi
   fi
   [ "$INTERRUPT_HAZARD" = none ] || cancel="$cancel revert-picker=$INTERRUPT_HAZARD"

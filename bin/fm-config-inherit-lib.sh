@@ -17,6 +17,9 @@
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
 # Primary config/lavish-axi-host carries the one per-machine Lavish server address
 # to every worker so a worker never starts a second server on another interface.
+# Primary config/copilot-cmd carries the per-machine GitHub Copilot CLI launch
+# command (bin/fm-copilot-lib.sh), so a secondmate's own Copilot workers start
+# through the same configured command.
 # The primary passes its frozen home-session decision into a newly launched
 # Secondmate; see docs/trace-context.md.
 # Primary config/claude-permission-mode is a captain-wide safety preference
@@ -68,7 +71,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host copilot-cmd}"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
