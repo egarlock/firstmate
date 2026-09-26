@@ -111,7 +111,7 @@ gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" worker)
 "$ROOT/bin/fm-copilot-plugin.sh" "$state" worker "$gen" || fail 'plugin writer failed'
 plugin="$state/worker.copilot-plugin"
 jq -e '.hooks == "hooks.json" and (.name | length) > 0' "$plugin/plugin.json" >/dev/null || fail 'plugin manifest malformed'
-run_hook() { (cd "$plugin" && bash -c "$(jq -r --arg event "$1" '.hooks[$event][0].bash' "$plugin/hooks.json")"); }
+run_hook() { (cd "$plugin" && bash -c "$(jq -r --arg event "$1" '.hooks[$event][0].bash' "${2:-$plugin/hooks.json}")"); }
 run_hook userPromptSubmitted
 [ "$(fm_busy_classify tmux fake:w copilot worker "$state")" = 'busy copilot-hook' ] || fail 'prompt did not open busy'
 run_hook agentStop
@@ -128,10 +128,15 @@ run_hook agentStop
 assert_absent "$state/worker.turn-ended" 'stale agentStop woke the replacement'
 paths=$(fm_control_harness_wiring_paths copilot /unused "$state" worker)
 [ "$paths" = "$plugin/hooks.json"$'\n'"$plugin/plugin.json" ] || fail "plugin retirement paths wrong: $paths"
+cp "$plugin/hooks.json" "$TMP_ROOT/retired-hooks.json"
 gen2=$("$ROOT/bin/fm-busy-event.sh" arm "$state" worker)
 "$ROOT/bin/fm-copilot-plugin.sh" "$state" worker "$gen2" || fail 'plugin rewrite failed'
-assert_grep "$gen2" "$plugin/hooks.json" 'rewrite did not bind the new generation'
-! grep -q "$gen" "$plugin/hooks.json" || fail 'rewrite kept the retired generation'
+run_hook agentStop "$TMP_ROOT/retired-hooks.json"
+[ "$(fm_busy_classify tmux fake:w copilot worker "$state")" = 'busy fm-spawn' ] || fail 'retired plugin hook cleared the rewritten generation'
+assert_absent "$state/worker.turn-ended" 'retired plugin hook woke the rewritten generation'
+run_hook agentStop
+[ "$(fm_busy_classify tmux fake:w copilot worker "$state")" = 'idle copilot-hook' ] || fail 'rewritten plugin did not settle the new generation'
+assert_present "$state/worker.turn-ended" 'rewritten plugin agentStop notification absent'
 pass "private plugin hooks: lifecycle, turn-end, stale-generation rejection, and retirement"
 
 case_dir="$TMP_ROOT/spawn"

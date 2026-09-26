@@ -4915,7 +4915,7 @@ devin)
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 copilot)
-  LAUNCH=${LAUNCH//__COPILOTCMD__/$COPILOT_CMD}
+  LAUNCH=${LAUNCH//__COPILOTCMD__/"$COPILOT_CMD"}
   LAUNCH=${LAUNCH//__COPILOTPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.copilot-plugin")"}
   ;;
 esac
