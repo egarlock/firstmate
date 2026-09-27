@@ -58,7 +58,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, or Cursor Agent CLI.
+- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, Cursor Agent CLI, or GitHub Copilot CLI.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
@@ -76,8 +76,10 @@ Oh My Pi (`omp`), a Pi fork, is verified as a primary with the same extension-ow
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
+GitHub Copilot CLI is verified as a primary too: it arms the watcher as an attached background shell that wakes it on exit, and tracked `.github/hooks/` registrations run the session-start digest and the turn-end guard.
+Trust the folder when Copilot asks, or its project hooks never load, and run the primary session interactively rather than with `copilot -p`.
 
-Workers and scouts can also run on Gemini CLI, Muse, Rovo Dev, Antigravity CLI (`agy`), Devin CLI, and GitHub Copilot CLI; [harness support](docs/configuration.md#harness-support) owns the worker-only boundary and each tool's setup.
+Workers and scouts can also run on Gemini CLI, Muse, Rovo Dev, Antigravity CLI (`agy`), and Devin CLI; [harness support](docs/configuration.md#harness-support) owns the worker-only boundary and each tool's setup.
 
 ### Install and launch
 
@@ -118,6 +120,14 @@ FM_OMP_HARNESS=omp omp
 ```
 
 Start `omp` with this checkout as its working directory: it auto-discovers the tracked `.omp/extensions/*.ts` files with no trust dialog, and naming them with `-e` as well would load each twice.
+
+**GitHub Copilot CLI**
+
+```sh
+copilot
+```
+
+Start `copilot` with this checkout as its working directory; a launcher that wraps the Copilot CLI works the same way.
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
@@ -234,7 +244,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/gerrit-change-watch.md](docs/gerrit-change-watch.md) - maintainer verification for watching Gerrit changes read-only, and why the merge path refuses one.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's current "no turn ends blind" backstop, scope, loop safety, and compatibility limits.
 - [docs/verification/supervision.md](docs/verification/supervision.md) - active maintainer verification for session-start, guard, continuity, and wedge integrations.
-- [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi and `pi-signed`, omp, Grok, Cursor, and unknown harness fallback.
+- [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi and `pi-signed`, omp, Grok, Cursor, Copilot, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [docs/documentation-audiences.md](docs/documentation-audiences.md) - documentation audiences and the machine-checked placement boundary.
 - [`AGENTS.md`](AGENTS.md) - the supervisor contract, role boundary, and routing index for conditional procedures.

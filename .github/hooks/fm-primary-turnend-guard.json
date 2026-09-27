@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "root=${COPILOT_PROJECT_DIR:-}; [ -n \"$root\" ] || exit 0; [ \"$PWD\" -ef \"$root\" ] && root=$PWD; exec \"$root\"/bin/fm-turnend-guard-copilot.sh",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}

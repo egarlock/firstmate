@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|copilot|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -128,6 +128,15 @@ harness_marker() {
     echo omp
     return
   fi
+  # GitHub Copilot CLI sets COPILOT_CLI=1 in the environment of every tool and
+  # hook process it starts (verified, Copilot CLI 1.0.88, beside
+  # COPILOT_PROJECT_DIR and COPILOT_CLI_BINARY_VERSION). It does NOT clear an
+  # inherited CLAUDECODE, so a Copilot session started from a claude pane
+  # carries both markers; this is tested BEFORE the CLAUDECODE line for the
+  # same reason gemini is. A claude process started from a Copilot pane
+  # inherits COPILOT_CLI in turn, and there its nearer comm-strength claude
+  # ancestor outranks the marker in detect_own.
+  [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -239,6 +248,13 @@ harness_process_verdict() {  # <pid>
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
     devin) echo "comm devin"; return ;;
+    # GitHub Copilot CLI is a native executable whose process name is its
+    # install path ending in /copilot, whether it was started as plain
+    # `copilot` or by an opaque launcher that runs it as a child (verified,
+    # Copilot CLI 1.0.88: tool and hook processes are its direct children).
+    # Anchored, never *copilot*, so copilot-language-server and similar
+    # unrelated commands are not misread as this harness.
+    copilot) echo "comm copilot"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -397,7 +413,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|copilot)
       printf '%s\n' "$pin"
       ;;
     *)

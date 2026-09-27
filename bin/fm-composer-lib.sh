@@ -425,7 +425,13 @@ FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
 # instead (verified live, Copilot CLI 1.0.88). The hint and the Working row
 # shape are independent signals, so losing either still acknowledges a submit.
 # Delivery guard only; recorded worker state comes from the copilot-hook
-# plugin hooks in bin/fm-busy-lib.sh.
+# plugin hooks in bin/fm-busy-lib.sh. The same hint also closes the row a
+# yielded agent shows while a background shell it started keeps running,
+# `Waiting for background shells · <bytes> esc interrupt`; that agent accepts
+# and answers a submitted prompt at once (verified live, Copilot CLI 1.0.88),
+# and a Copilot primary shows it for as long as its background watcher arm
+# runs, so fm_busy_lines_match drops that row before matching.
+FM_DELIVERY_COPILOT_BACKGROUND_ROW_REGEX='Waiting[[:space:]]+for[[:space:]]+background[[:space:]]+shells'
 FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT='(^|[[:space:]])esc interrupt([[:space:]]|$)|^[[:space:]]*[^[:space:][:alnum:]]{1,4}[[:space:]]+Working([[:space:]]+·|[[:space:]]+esc[[:space:]])'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
@@ -446,7 +452,10 @@ fm_busy_lines_match() {  # [harness]
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
-      copilot) regex=$FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT ;;
+      copilot)
+        regex=$FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT
+        lines=$(printf '%s\n' "$lines" | grep -viE "$FM_DELIVERY_COPILOT_BACKGROUND_ROW_REGEX" || true)
+        ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.

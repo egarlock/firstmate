@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "root=${COPILOT_PROJECT_DIR:-}; [ -n \"$root\" ] || exit 0; [ \"$PWD\" -ef \"$root\" ] && root=$PWD; exec \"$root\"/bin/fm-sessionstart-copilot.sh",
+        "timeoutSec": 180
+      }
+    ]
+  }
+}

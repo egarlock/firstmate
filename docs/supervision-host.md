@@ -22,7 +22,7 @@ An arm owner is the component in each primary harness that starts watcher cycles
 
 The host is opt-in per home through `config/supervision-host`; [configuration.md](configuration.md#supervision-host-configsupervision-host) owns the file.
 Without the file every home behaves exactly as it does without the host.
-Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, or Codex primary and only takes wakes in the away posture.
+Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, or Codex primary and only takes wakes in the away posture; a Copilot primary has no host integration and keeps the away daemon.
 
 ### Behavior by posture and harness
 

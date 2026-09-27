@@ -26,7 +26,7 @@ The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor, Copilot |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
@@ -42,6 +42,7 @@ Codex's interactive TUI has no tracked session-open, compaction, or re-emit chan
 | OpenCode | Nudge | [OpenCode](#opencode) |
 | Grok | Nudge | [Grok](#grok) |
 | Cursor | Run | [Cursor](#cursor) |
+| Copilot | Run | [Copilot](#copilot) |
 | omp | Run | [omp](#omp) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
 
@@ -335,6 +336,14 @@ Cursor's `sessionStart` fires at every session open with no source distinction, 
 So a resume re-runs the full digest.
 That is redundant and idempotent rather than a lost helm.
 
+### Copilot
+
+GitHub Copilot CLI is a run-tier harness for session open.
+`.github/hooks/fm-primary-sessionstart.json` registers `sessionStart` with a 180s timeout, invoking `bin/fm-sessionstart-copilot.sh` through the same project-directory anchor as its turn-end hook, and Copilot loads it only in a trusted folder.
+The adapter maps the payload's `source`, `new` or `resume`, to the run wrapper's `startup` or `resume`, and returns the digest as `additionalContext`, which Copilot injects into model context.
+An interactive Copilot session fires `sessionStart` when its first prompt is submitted, so the digest lands before the model answers that first prompt.
+Copilot also runs the tracked Claude `SessionStart` entry, which stands down there because its parent process is Copilot, so the helm is taken once.
+
 ### omp
 
 omp is a run-tier harness.
@@ -431,6 +440,11 @@ It uses a TERM-resistant digest that exceeds its budget and proves that the dige
 - It keeps `preCompact` unregistered, so the deferred surface cannot be reintroduced unnoticed.
 
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` proves the injected digest actually reaches model context in a real cursor-agent session.
+
+### Copilot tests
+
+`tests/fm-copilot-primary.test.sh` proves the Copilot adapter over real processes: it carries the digest as `additionalContext` with the mapped source, stays silent on an empty digest, and the tracked Claude entry stands down under a Copilot parent.
+`FM_COPILOT_PRIMARY_LIVE_E2E=1 tests/fm-copilot-primary-live-e2e.test.sh` proves the injected digest reaches model context in a real Copilot session.
 
 ### Live run-tier guards
 

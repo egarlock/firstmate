@@ -170,8 +170,11 @@ Prose may improve without changing adapter behavior.
 
 Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event. Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.
 
+GitHub Copilot CLI has no Firstmate `preToolUse` registration of its own: it runs the tracked Claude `PreToolUse` Bash entry with a Claude-shaped payload (`tool_name` `Bash`, `.tool_input.command`) and denies the tool call on its exit 2, verified live on Copilot CLI 1.0.88, so the same `--claude` rendering protects a Copilot primary and the entry keeps running there while the Claude Stop and session-start entries stand down.
+
 Grok project hooks require folder trust.
 Cursor project hooks require the workspace to be launched with `--trust`.
+Copilot loads project hooks only in a folder it trusts.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
 The tracked Grok adapter therefore references `${GROK_WORKSPACE_ROOT:-}` directly instead of assigning and later reading a shell-local `$root` variable.
 

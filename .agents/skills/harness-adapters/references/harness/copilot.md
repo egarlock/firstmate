@@ -1,8 +1,7 @@
 # GitHub Copilot CLI
 
-GitHub Copilot CLI's interactive TUI, verified end to end on 2026-09-25 with Copilot CLI 1.0.88 on macOS through the tmux backend.
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported, and `../../../../../bin/fm-spawn.sh` refuses a secondmate launch because `../../../../../docs/supervision-protocols/` carries no copilot wake protocol.
-[Verification evidence](../../../../../docs/verification/copilot.md) and its live guard refresh the vendor facts below.
+GitHub Copilot CLI's interactive TUI, verified end to end on 2026-09-25 and 2026-09-26 with Copilot CLI 1.0.88 on macOS through the tmux backend, as a crewmate, scout, primary, and secondmate.
+[Verification evidence](../../../../../docs/verification/copilot.md) and its live guards refresh the vendor facts below.
 
 ## Operating facts
 
@@ -22,7 +21,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Skill | `/<skill>`, for example `/no-mistakes`; `fm-send` types the slash form through its popup settle, and Copilot discovers project `.agents/skills` and personal `~/.agents/skills` at launch. |
 | Model | `--model <id>`, including `auto`; discover through the interactive `/model` picker, since the CLI has no model-listing subcommand. |
 | Effort | `--reasoning-effort low\|medium\|high\|xhigh\|max`, the full shared vocabulary; 1.0.88 no longer lists the older `--effort` alias. |
-| Marker | None verified; own-harness detection is outside this adapter. |
+| Marker | `COPILOT_CLI=1` in every tool and hook process, beside `COPILOT_PROJECT_DIR`; Copilot does not clear an inherited `CLAUDECODE`, so `../../../../../bin/fm-harness.sh` tests it first. |
 | Process name | The native executable named `copilot` (1.0.88: `ps -o comm=` is its versioned install path ending in `/copilot`); liveness anchors that exact name. |
 
 ## Trust and autonomy
@@ -47,5 +46,10 @@ Verify a new launch command with the live guard before relying on it.
 
 ## Primary integration
 
-No primary Stop guard, watcher protocol, session lock ancestry, or session-start contract was verified for Copilot.
-Do not launch a primary or secondmate with this adapter.
+Primary supervision is the attached async background arm in `../../../../../docs/supervision-protocols/copilot.md`: the arm returns at once, one `read_bash` collects its status line, and the arm's exit makes Copilot submit its own `<system_notification>` follow-up turn.
+While the arm runs, the idle row reads `Waiting for background shells · <bytes> esc interrupt` and the captain's prompts are answered at once, which is why `../../../../../bin/fm-composer-lib.sh` does not read that row as busy.
+Copilot loads the home's tracked `.github/hooks/` registrations only in a trusted folder: trust it when the primary starts, and a secondmate launch trusts its home through `COPILOT_ALLOW_ALL=true`.
+Those registrations anchor through `COPILOT_PROJECT_DIR`, preferring the session's own spelling of that directory, and run `agentStop` through `../../../../../bin/fm-turnend-guard-copilot.sh` and `sessionStart` through `../../../../../bin/fm-sessionstart-copilot.sh`; `../../../../../docs/turnend-guard.md` and `../../../../../docs/sessionstart-nudge.md` own their contracts.
+Copilot also runs the tracked `.claude/settings.json` entries with Claude-shaped payloads: the Stop, SessionStart, and dialog-mirror entries stand down there, while the PreToolUse seatbelts keep denying because Copilot honors their exit 2.
+The session lock resolves to the `copilot` process, which is the direct parent of every tool and hook command.
+Do not run a primary as one-shot `copilot -p`.

@@ -87,6 +87,10 @@ Every other direct `FM_GUARD_GRACE` reader (`bin/fm-guard.sh`, the strict-watche
   That predicate reads the delivered payload's own `cursor_version`, never the environment: Cursor exports `CURSOR_INVOKED_AS`, `CURSOR_PROJECT_DIR`, and `CURSOR_VERSION` into every child process, so an environment guard would also disable the hooks of a Claude session started by hand from a Cursor pane, which is the hazard the `GROK_SESSION_ID` exclusion below records.
   The guarded set is the `SessionStart` entry, the two `PreToolUse` Bash entries, and both `Stop` entries.
   Cursor 2026.08.11-e8db854 does not fire the Claude-shaped `Stop` entry at all, but it is guarded anyway because Cursor has no `asyncRewake`: if a later build did fire it, `bin/fm-claude-stop-autoarm.sh` would run synchronously inside Cursor's stop step and hold that turn open for its declared multi-hour timeout, exactly the wedge grok 1.0.0 produced.
+- GitHub Copilot CLI registers an `agentStop` hook in `.github/hooks/fm-primary-turnend-guard.json`, which Copilot loads from the git root of a trusted folder, and runs `bin/fm-turnend-guard-copilot.sh`.
+  The registration anchors through `COPILOT_PROJECT_DIR`, the physical project directory, but prefers the hook's inherited `$PWD` when that names the same directory, because the watcher lock records paths as strings and the session's tool shells use that logical spelling; a home reached through a symlink would otherwise read its healthy watcher as down.
+  Copilot also runs every tracked `.claude/settings.json` entry with a Claude-shaped payload, awaiting each and ignoring `asyncRewake` and a `Stop` exit 2.
+  So the `Stop`, `SessionStart`, and dialog-mirror entries stand down when `fm_hook_delivered_by_copilot` in `bin/fm-hook-host-lib.sh` finds the Copilot executable as the entrypoint's parent, the structural fact every tracked entry's `exec` preserves; the `PreToolUse` seatbelts keep running because Copilot honors their exit 2 as a deny.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
   The tracked Claude Stop entries are inert when `GROK_AGENT` or `GROK_HOOK_EVENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
   Both markers are required because Grok does not inject the same variables into every process kind: grok 0.2.73 set `GROK_AGENT` for child and tool processes, while grok 1.0.0 hook processes carry `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` but no `GROK_AGENT`.
@@ -100,6 +104,8 @@ Every other direct `FM_GUARD_GRACE` reader (`bin/fm-guard.sh`, the strict-watche
   The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
+Copilot blocks only through a `{"decision":"block","reason":...}` object on the hook's stdout and ignores a bare exit 2, so its adapter calls the shared guard with `--copilot` and renders an exit 2 as that object, with the banner carried as a typed `turn-end-guard` input.
+Copilot's payload carries `stop_hook_active`, true on the stop that follows a forced continuation, so `--copilot` keeps the default one-continuation loop guard; Copilot itself also ends a turn after 8 consecutive blocks.
 Both payloads carry `stop_hook_active`.
 In the default Codex mode, a true value lets the second stop finish after one forced continuation.
 
@@ -187,6 +193,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
+- A Copilot primary must run in a folder Copilot trusts, or its `.github/hooks/` registrations never load; a one-shot `copilot -p` primary ends before its background arm can deliver a wake.
 - A Cursor primary must be launched with `--trust`, or its project hooks never load and the whole integration is inert.
 - Cursor's `preCompact` step is deliberately unregistered: its response can return only `user_message` and it is absent from Cursor's `additional_context` step set, so a post-compaction re-emit needs its own design and is deferred to a follow-up ([`sessionstart-nudge.md`](sessionstart-nudge.md) owns that uncovered surface).
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
@@ -206,6 +213,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
+`tests/fm-copilot-primary.test.sh` covers the Copilot integration over real processes with no Copilot installed: each Claude-shaped entrypoint standing down only under an exact `copilot` parent, the seatbelt still denying there, the adapter's typed block object, its loop bound and fail-open inputs, the registrations' path anchoring, and the session lock.
+`FM_COPILOT_PRIMARY_LIVE_E2E=1 tests/fm-copilot-primary-live-e2e.test.sh` is the opt-in guard against the installed Copilot CLI.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.

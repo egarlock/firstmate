@@ -179,13 +179,15 @@
 #   config/claude-permission-mode is not mapped: Devin auto approves read-only
 #   tools, unlike Claude auto. Effort is part of Devin model ids, so the
 #   independent --effort axis is recorded but omitted from argv.
-#   GitHub Copilot CLI is worker-only. Its executable prefix is the configured
+#   For GitHub Copilot CLI, the executable prefix is the configured
 #   launch command (config/copilot-cmd, default `copilot`), resolved and
 #   version-gated by bin/fm-copilot-lib.sh before any endpoint exists.
 #   COPILOT_ALLOW_ALL=true trusts the fresh worktree and --allow-all approves
 #   every tool; --plugin-dir mounts a private per-task plugin carrying the
 #   lifecycle hooks (bin/fm-copilot-plugin.sh), so no global or project config
-#   is edited. config/claude-permission-mode is not mapped.
+#   is edited. config/claude-permission-mode is not mapped. A secondmate uses
+#   the same launch in its own home, where that trust also loads the home's
+#   tracked .github/hooks primary registrations.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -375,7 +377,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, devin, and copilot are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -2238,7 +2240,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, devin, and copilot are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2252,9 +2254,7 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-# copilot has none yet either: only its worker lifecycle hooks are verified,
-# and docs/supervision-protocols/ carries no copilot wake protocol.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = copilot ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -4935,8 +4935,17 @@ case "$LAUNCH" in
   LAUNCH=${LAUNCH//__BRIEFDOORBELL__/"$(shell_quote "$brief_doorbell")"}
   ;;
 esac
+# Foreign identity markers that fm-harness.sh reads are cleared at the launch
+# boundary: Cursor's and Gemini's for these harnesses, and a Copilot primary's
+# COPILOT_CLI and COPILOT_PROJECT_DIR for all of them but copilot, since a pane
+# server first started from a Copilot tool process hands them to every later
+# pane. cursor and omp clear foreign markers in their own templates, and their
+# own markers are tested before COPILOT_CLI.
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | copilot)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u COPILOT_CLI -u COPILOT_PROJECT_DIR $LAUNCH"
+  ;;
+copilot)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
