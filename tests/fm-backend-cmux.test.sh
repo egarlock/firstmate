@@ -12,18 +12,25 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/cmux-fake-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/cmux-fake-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the cmux adapter)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-cmux-tests)
+
+# A run from inside cmux (or a shell that inherited its markers) must not leak
+# the operator's own workspace or container choice into these fakes.
+unset CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID FM_CMUX_CONTAINER
 
 # make_cmux_fakebin: a `cmux` stub that logs every invocation (one line,
 # unit-separated args, to $FM_CMUX_LOG) and returns the canned response for
 # that call read from $FM_CMUX_RESPONSES/<n>.out, consumed IN ORDER (call 1
 # reads 1.out, call 2 reads 2.out, ...), mirroring
 # tests/fm-backend-zellij.test.sh's make_zellij_fakebin. A missing response
-# file means "succeed with empty stdout" (new-workspace/send/send-key/
-# close-* are silent on success on the real CLI). `version` and `ping` are
+# file means "succeed with empty stdout" (send/send-key/close-* print
+# little on success on the real CLI; create_task tests supply
+# new-workspace's printed `OK workspace:<n>` ref explicitly). `version` and `ping` are
 # handled specially (not call-counted, not consuming the ordered response
 # queue) since fm_backend_cmux_version_check/fm_backend_cmux_ping_state are
 # called at points a test may not want to hand-count, exactly mirroring
@@ -95,6 +102,12 @@ cmux_windows_response() {  # <dir> <n> <window_id1> <count1> [<window_id2> <coun
   done
   json="$json]"
   printf '%s' "$json" > "$dir/responses/$n.out"
+}
+
+# cmux_ref_panes_response: list-panes for a workspace named by ref, which
+# carries the workspace uuid alongside the pane's surfaces.
+cmux_ref_panes_response() {  # <dir> <n> <workspace_id> <surface_id>
+  printf '{"workspace_id":"%s","panes":[{"selected_surface_id":"%s","surface_ids":["%s"]}]}' "$3" "$4" "$4" > "$1/responses/$2.out"
 }
 
 cmux_panes_empty_response() {  # <dir> <n>
@@ -479,11 +492,10 @@ test_create_task_creates_and_parses_ids() {
   title=$(cmux_expected_scoped_title fm-newtask)
   # 1: workspace list --json (pre-create duplicate check) -> no match
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
-  # 2: new-workspace (silent on success)
-  # 3: workspace list --json (post-create id resolution) -> match
-  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
-  # 4: list-panes --json --id-format uuids -> default surface id
-  cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
+  # 2: new-workspace prints the created ref
+  printf 'OK workspace:31\n' > "$dir/responses/2.out"
+  # 3: list-panes --workspace workspace:31 -> workspace uuid + default surface
+  cmux_ref_panes_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "cccccccc-2222-2222-2222-222222222222"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" )
@@ -493,7 +505,97 @@ test_create_task_creates_and_parses_ids() {
     "create_task did not call new-workspace with the right name/cwd"
   assert_contains "$(cat "$dir/log")" $'\x1f''--focus'$'\x1f''false' \
     "create_task did not pass --focus false"
-  pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
+  assert_contains "$(cat "$dir/log")" $'\x1f''list-panes'$'\x1f''--workspace'$'\x1f''workspace:31' \
+    "create_task did not resolve the new workspace from its printed ref"
+  [ "$(grep -c $'\x1f''workspace'$'\x1f''list' "$dir/log")" = 1 ] \
+    || fail "create_task looked the new workspace up by title after creating it: $(cat "$dir/log")"
+  pass "fm_backend_cmux_create_task: resolves the new workspace and its surface from the printed ref, never a title lookup"
+}
+
+# The printed ref can lag right after creation; the ref lookup is retried
+# within its bound.
+test_create_task_retries_printed_ref_lookup_after_creation() {
+  local dir fb out
+  dir="$TMP_ROOT/create-task-retry"; mkdir -p "$dir/responses"
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf 'OK workspace:33\n' > "$dir/responses/2.out"
+  # 3: first ref lookup -> not found yet
+  printf '1' > "$dir/responses/3.exit"
+  # 4: retried ref lookup -> found
+  cmux_ref_panes_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111" "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-retrytask /tmp/proj' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task should retry a failed post-create ref lookup, got '$out'"
+  pass "fm_backend_cmux_create_task: retries the printed ref lookup right after creation"
+}
+
+# Printed ref never resolves: the spawn fails after a best-effort close of the
+# printed ref, never touching anything by title. <close-exit> is the close's
+# exit code; the leftover title is named only when that close does not report
+# success.
+cmux_run_create_task_ref_never_resolves() {  # <dir> <close-exit> -> sets out/status/title
+  local dir=$1 fb n
+  mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-lost)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf 'OK workspace:41\n' > "$dir/responses/2.out"
+  n=3
+  while [ "$n" -le 17 ]; do
+    printf '1' > "$dir/responses/$n.exit"
+    n=$((n + 1))
+  done
+  # 18: close-workspace --workspace workspace:41
+  printf '%s' "$2" > "$dir/responses/18.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-lost /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the printed ref never resolves"
+  assert_contains "$out" "could not resolve a cmux workspace id" "create_task did not report the resolution failure"
+  cmux_assert_call_order "$dir/log" $'\x1f''new-workspace' \
+    $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:41' \
+    "create_task did not close the unresolved workspace by its printed ref"
+  [ "$(wc -l < "$dir/log" | tr -d ' ')" = 18 ] \
+    || fail "create_task made unexpected calls after the ref close: $(cat "$dir/log")"
+}
+
+test_create_task_closes_unresolved_workspace_by_printed_ref() {
+  local out status title
+  cmux_run_create_task_ref_never_resolves "$TMP_ROOT/create-task-unresolved" 0
+  assert_not_contains "$out" "by hand" \
+    "create_task asked for a manual close although the ref close reported success"
+  pass "fm_backend_cmux_create_task: an unresolved printed ref is closed by that ref, with no manual-cleanup note"
+}
+
+test_create_task_names_leftover_title_when_ref_close_fails() {
+  local out status title
+  cmux_run_create_task_ref_never_resolves "$TMP_ROOT/create-task-unresolved-close-fails" 1
+  assert_contains "$out" "close the leftover cmux workspace '$title' by hand" \
+    "create_task did not name the leftover workspace title after the ref close failed"
+  pass "fm_backend_cmux_create_task: when the printed-ref close fails, the error names the leftover workspace title"
+}
+
+# No ref printed: the spawn fails at once without any lookup or close, and
+# names the leftover title.
+test_create_task_names_leftover_title_without_ref() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-task-no-ref-lost"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-gone)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: new-workspace prints no ref; 3: a title match that must not be used
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-gone /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when new-workspace prints no ref"
+  assert_contains "$out" "close the leftover cmux workspace '$title' by hand" \
+    "create_task did not name the leftover workspace title"
+  [ "$(wc -l < "$dir/log" | tr -d ' ')" = 2 ] \
+    || fail "create_task looked up or closed a workspace after creation without a printed ref: $(cat "$dir/log")"
+  pass "fm_backend_cmux_create_task: without a printed ref, fails at once, closes nothing, and names the leftover title"
 }
 
 # --- target_ready / capture ---------------------------------------------------
@@ -679,36 +781,6 @@ test_send_text_line_reports_unsafe_input_when_cleanup_fails() {
 }
 
 # --- current_path: pwd-marker-probe (zellij-shape) ---------------------------
-
-test_current_path_probes_with_marker() {
-  local dir fb out
-  # Verified real-cmux pitfall (docs/cmux-backend.md finding #2): the surface's
-  # cwd is frozen at creation time (the top-level shell's cwd), never following
-  # a foreground subshell (e.g. treehouse get) - so current_path actively
-  # prints a marked cwd line and reads only that marker from the capture.
-  dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"
-  # 1: list-panes (current_path's own target_ready)
-  # 2: list-panes (target_ready, called by send_text_line->send_literal)
-  # 3: send (literal probe text)
-  # 4: list-panes (target_ready, called by send_text_line->send_key)
-  # 5: send-key enter
-  # 6: list-panes (target_ready, called by capture)
-  # 7: read-screen --scrollback --lines 200 --json (actual fetch)
-  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
-  cmux_panes_response "$dir" 2 "bbbbbbbb-1111-1111-1111-111111111111"
-  cmux_panes_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111"
-  cmux_panes_response "$dir" 6 "bbbbbbbb-1111-1111-1111-111111111111"
-  cmux_read_screen_response "$dir" 7 $'/tmp/proj\n❯ printf marker\n__FM_CMUX_CWD_BEGIN__\n/home/fixture/.treehouse/fake-worktree\n__FM_CMUX_CWD_END__\n/home/fixture/.treehouse/fake-worktree ❯'
-  fb=$(make_cmux_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_current_path "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
-  [ "$out" = "/home/fixture/.treehouse/fake-worktree" ] || fail "current_path should read only the marked cwd line, got '$out'"
-  assert_contains "$(cat "$dir/log")" "__FM_CMUX_CWD_BEGIN__" "current_path did not send the cwd begin marker"
-  assert_contains "$(cat "$dir/log")" "pwd;" "current_path did not send the pwd probe"
-  assert_contains "$(cat "$dir/log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000'$'\x1f''--surface'$'\x1f''bbbbbbbb-1111-1111-1111-111111111111'$'\x1f''enter' \
-    "current_path did not submit the cwd probe with Enter"
-  pass "fm_backend_cmux_current_path: actively probes with marked begin/end lines (zellij-shape frozen cwd)"
-}
 
 # --- composer_state: structural border-row classification (adapted from herdr) ----
 
@@ -976,7 +1048,7 @@ test_window_of_workspace_empty_when_not_found() {
 
 # The common case: the task workspace shares its window with at least one other
 # workspace, so cmux closes it directly with no sibling dance.
-test_kill_closes_workspace_directly_when_not_last() {
+test_close_workspace_closes_directly_when_not_last() {
   local dir fb
   dir="$TMP_ROOT/kill-workspace"; mkdir -p "$dir/responses"
   # 1: list-windows -> the owning window has 2 workspaces (target is NOT last)
@@ -985,20 +1057,20 @@ test_kill_closes_workspace_directly_when_not_last() {
   cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "the-task" "ffffffff-0000-0000-0000-000000000000" "other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_workspace "aaaaaaaa-0000-0000-0000-000000000000"' "$ROOT"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
-    "kill did not close the task workspace"
+    "close_workspace did not close the task workspace"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''new-workspace' \
-    "kill should not add a sibling workspace when the target is not the last one in its window"
+    "close_workspace should not add a sibling workspace when the target is not the last one in its window"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-surface' \
-    "kill should close the whole workspace directly"
-  pass "fm_backend_cmux_kill: closes the task workspace directly when it is not the last in its window"
+    "close_workspace should close the whole workspace directly"
+  pass "fm_backend_cmux_close_workspace: closes the task workspace directly when it is not the last in its window"
 }
 
 # The selected-workspace teardown bug: cmux refuses to close the only workspace
 # in a window (returns OK but no-ops), so kill first creates a throwaway sibling
 # and only then closes the target - which now succeeds.
-test_kill_adds_sibling_when_last_in_window() {
+test_close_workspace_adds_sibling_when_last_in_window() {
   local dir fb
   dir="$TMP_ROOT/kill-last-in-window"; mkdir -p "$dir/responses"
   cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 2
@@ -1006,21 +1078,21 @@ test_kill_adds_sibling_when_last_in_window() {
   cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "the-task"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_workspace "aaaaaaaa-0000-0000-0000-000000000000"' "$ROOT"
   assert_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--window'$'\x1f''eeeeeeee-0000-0000-0000-000000000000'$'\x1f''--focus'$'\x1f''false' \
-    "kill did not add a throwaway sibling in the target's own window before closing the last workspace"
+    "close_workspace did not add a throwaway sibling in the target's own window before closing the last workspace"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--name' \
     "the throwaway sibling must stay an unnamed default workspace, never an fm- task title"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
-    "kill did not close the target workspace after adding the sibling"
+    "close_workspace did not close the target workspace after adding the sibling"
   cmux_assert_call_order "$dir/log" $'\x1f''new-workspace'$'\x1f''--window' $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
-    "kill must add the sibling BEFORE closing the last workspace, or the close still no-ops"
+    "close_workspace must add the sibling BEFORE closing the last workspace, or the close still no-ops"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-surface' \
-    "kill should not call close-surface"
-  pass "fm_backend_cmux_kill: adds a throwaway sibling then closes the target when it is the last workspace in its window"
+    "close_workspace should not call close-surface"
+  pass "fm_backend_cmux_close_workspace: adds a throwaway sibling then closes the target when it is the last workspace in its window"
 }
 
-test_kill_is_best_effort_when_close_workspace_fails() {
+test_close_workspace_is_best_effort_when_close_fails() {
   local dir fb
   dir="$TMP_ROOT/kill-workspace-fail"; mkdir -p "$dir/responses"
   # 1: list-windows (not last), 2: workspace list --window, 3: close-workspace fails
@@ -1029,13 +1101,13 @@ test_kill_is_best_effort_when_close_workspace_fails() {
   printf '1\n' > "$dir/responses/3.exit"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
-  expect_code 0 $? "kill must stay best-effort (never fail) even when close-workspace fails"
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_workspace "aaaaaaaa-0000-0000-0000-000000000000"' "$ROOT"
+  expect_code 0 $? "close_workspace must stay best-effort (never fail) even when close-workspace fails"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
-    "kill should still attempt close-workspace"
+    "close_workspace should still attempt close-workspace"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-surface' \
-    "kill should not call close-surface"
-  pass "fm_backend_cmux_kill: never fails even when close-workspace fails"
+    "close_workspace should not call close-surface"
+  pass "fm_backend_cmux_close_workspace: never fails even when close-workspace fails"
 }
 
 test_kill_recovers_stale_target_by_label() {
@@ -1047,9 +1119,12 @@ test_kill_recovers_stale_target_by_label() {
   cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
   cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
   cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
-  # window_of_workspace on the REFRESHED id: 4 list-windows (not last), 5 workspace list --window.
-  cmux_windows_response "$dir" 4 "eeeeeeee-0000-0000-0000-000000000000" 2
-  cmux_workspace_list_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
+  # 4 workspace list: kill reads the refreshed workspace's title to pick the
+  # shape (task-owned -> close the whole workspace).
+  cmux_workspace_list_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222" "$title"
+  # window_of_workspace on the REFRESHED id: 5 list-windows (not last), 6 workspace list --window.
+  cmux_windows_response "$dir" 5 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 6 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
@@ -1100,6 +1175,367 @@ test_secondmate_spawn_refuses_cmux_backend() {
   pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
 }
 
+# --- stateful fake: both container modes (tests/cmux-fake-lib.sh) -----------
+
+# cmux_state_case <name>: a fresh state dir plus fakebin; sets SDIR, SFB, SLOG.
+cmux_state_case() {
+  local dir="$TMP_ROOT/state-$1"
+  mkdir -p "$dir"
+  SDIR="$dir/state"
+  SLOG="$dir/log"
+  cmux_state_init "$SDIR"
+  SFB=$(make_cmux_state_fakebin "$dir")
+  : > "$SLOG"
+}
+
+# cmux_state_run <snippet>: run <snippet> in a fresh bash with the adapter
+# sourced against the current stateful case. Environment set by the caller
+# (FM_CMUX_CONTAINER, CMUX_WORKSPACE_ID, fake knobs) passes through.
+cmux_state_run() {
+  PATH="$SFB:$PATH" FM_CMUX_STATE="$SDIR" FM_CMUX_LOG="$SLOG" \
+    FM_CMUX_READY_ATTEMPTS="${FM_CMUX_READY_ATTEMPTS:-3}" FM_CMUX_READY_INTERVAL=0 FM_CMUX_READY_SETTLE=0 \
+    bash -c '. "$0/bin/backends/cmux.sh"; eval "$1"' "$ROOT" "$1"
+}
+
+# The 0.64.25 race: `workspace list` omits a just-created workspace, so a
+# title lookup right after creation fails; resolution from the printed ref
+# through list-panes does not.
+test_state_workspace_create_survives_lagging_workspace_list() {
+  local out title
+  cmux_state_case ws-lag
+  title=$(cmux_expected_scoped_title fm-lag)
+  out=$(FM_CMUX_FAKE_LIST_LAG=3 cmux_state_run 'fm_backend_cmux_create_task fm-lag /tmp/proj') \
+    || fail "create_task failed against a lagging workspace list"
+  [ "$out" = "WS-101 SF-101" ] || fail "create_task should return the printed-ref workspace and its surface, got '$out'"
+  assert_contains "$(cat "$SDIR/workspaces.tsv")" "$title" "the task workspace was not created with its scoped title"
+  pass "cmux workspace mode: create resolves a new workspace that workspace list still omits (0.64.25 lag)"
+}
+
+test_state_container_mode_precedence() {
+  local cfg out err
+  cmux_state_case mode
+  cfg="$TMP_ROOT/state-mode/config"; mkdir -p "$cfg"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" cmux_state_run 'fm_backend_cmux_container_mode')
+  [ "$out" = workspace ] || fail "absent config should default to workspace, got '$out'"
+  printf '\n  tab  \n' > "$cfg/cmux-container"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" cmux_state_run 'fm_backend_cmux_container_mode')
+  [ "$out" = tab ] || fail "config/cmux-container 'tab' should select tab mode, got '$out'"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" FM_CMUX_CONTAINER=workspace cmux_state_run 'fm_backend_cmux_container_mode')
+  [ "$out" = workspace ] || fail "FM_CMUX_CONTAINER should override the config file, got '$out'"
+  err=$(FM_CONFIG_OVERRIDE="$cfg" FM_CMUX_CONTAINER=pane cmux_state_run 'fm_backend_cmux_container_mode' 2>&1 >/dev/null)
+  out=$(FM_CONFIG_OVERRIDE="$cfg" FM_CMUX_CONTAINER=pane cmux_state_run 'fm_backend_cmux_container_mode' 2>/dev/null)
+  [ "$out" = workspace ] || fail "an unknown mode should fall back to workspace, got '$out'"
+  assert_contains "$err" "unknown cmux container mode 'pane'" "an unknown mode should warn"
+  pass "cmux container mode: FM_CMUX_CONTAINER, then config/cmux-container, then workspace; unknown values warn and fall back"
+}
+
+test_state_container_ensure_workspace_mode_token() {
+  local out
+  cmux_state_case ensure-ws
+  out=$(FM_CMUX_CONTAINER=workspace cmux_state_run 'fm_backend_cmux_container_ensure /tmp/proj') \
+    || fail "container_ensure failed in workspace mode"
+  [ "$out" = workspace ] || fail "workspace mode should echo the 'workspace' token, got '$out'"
+  [ ! -s "$SDIR/workspaces.tsv" ] || fail "workspace mode container_ensure must create nothing"
+  pass "cmux container_ensure: workspace mode echoes the workspace token and creates nothing"
+}
+
+test_state_container_ensure_tab_uses_live_own_workspace() {
+  local out
+  cmux_state_case ensure-own
+  cmux_state_add_workspace "$SDIR" WS-OWN workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-OWN SF-OWN surface:7 MATE ttys000
+  out=$(FM_CMUX_CONTAINER=tab CMUX_WORKSPACE_ID=WS-OWN cmux_state_run 'fm_backend_cmux_container_ensure /tmp/proj') \
+    || fail "container_ensure failed in tab mode"
+  [ "$out" = WS-OWN ] || fail "tab mode should use firstmate's own live workspace, got '$out'"
+  pass "cmux container_ensure: tab mode uses firstmate's own live workspace"
+}
+
+test_state_container_ensure_tab_refinds_stale_own_workspace_by_surface() {
+  local out
+  cmux_state_case ensure-stale
+  cmux_state_add_workspace "$SDIR" WS-NEWID workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-NEWID SF-OWN surface:7 MATE ttys000
+  out=$(FM_CMUX_CONTAINER=tab CMUX_WORKSPACE_ID=WS-GONE CMUX_SURFACE_ID=SF-OWN cmux_state_run 'fm_backend_cmux_container_ensure /tmp/proj') \
+    || fail "container_ensure failed with a stale workspace marker"
+  [ "$out" = WS-NEWID ] || fail "a stale CMUX_WORKSPACE_ID should be re-found from CMUX_SURFACE_ID, got '$out'"
+  pass "cmux container_ensure: a stale own-workspace marker is re-found from the surface id"
+}
+
+test_state_container_ensure_tab_shared_container_find_or_create() {
+  local out out2 err title
+  cmux_state_case ensure-shared
+  title="fm-$(cmux_expected_home_label)"
+  # shellcheck disable=SC2016  # expanded by the inner shell
+  err=$(FM_CMUX_CONTAINER=tab CMUX_WORKSPACE_ID=WS-GONE FM_CMUX_FAKE_LIST_LAG=3 \
+    cmux_state_run 'fm_backend_cmux_container_ensure /tmp/proj >"$FM_CMUX_STATE/out"' 2>&1) \
+    || fail "container_ensure failed to create the shared container: $err"
+  out=$(cat "$SDIR/out")
+  [ "$out" = WS-101 ] || fail "the shared container should resolve from its printed ref despite list lag, got '$out'"
+  assert_contains "$err" "no longer live" "a stale own-workspace marker should be reported before falling back"
+  assert_contains "$(cat "$SDIR/workspaces.tsv")" "$(printf 'WS-101\tworkspace:101\t%s\t/tmp/proj' "$title")" \
+    "the shared container should be titled fm-<home> and created in the given cwd"
+  out2=$(FM_CMUX_CONTAINER=tab cmux_state_run 'fm_backend_cmux_container_ensure /tmp/proj')
+  [ "$out2" = WS-101 ] || fail "a second ensure should reuse the shared container, got '$out2'"
+  [ "$(grep -c . "$SDIR/workspaces.tsv")" = 1 ] || fail "a second ensure must not create another container"
+  pass "cmux container_ensure: outside a live cmux workspace, tab mode finds or creates one shared per-home container"
+}
+
+# cmux_state_tab_container: the captain's workspace with one pre-existing tab.
+cmux_state_tab_container() {
+  cmux_state_add_workspace "$SDIR" WS-CAP workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-CAP SF-CAP surface:7 MATE ttys000
+  printf 'user@host %% \n' > "$SDIR/screen.txt"
+}
+
+test_state_tab_create_titles_and_moves_new_tab() {
+  local out title
+  cmux_state_case tab-create
+  cmux_state_tab_container
+  title=$(cmux_expected_scoped_title fm-tab1)
+  out=$(cmux_state_run 'fm_backend_cmux_create_task fm-tab1 "/tmp/my proj" WS-CAP') \
+    || fail "tab-mode create_task failed"
+  [ "$out" = "WS-CAP SF-101" ] || fail "tab-mode create should return the container and the new surface, got '$out'"
+  assert_contains "$(cat "$SDIR/surfaces.tsv")" "$(printf 'WS-CAP\tSF-101\tsurface:101\t%s' "$title")" \
+    "the new tab should carry the scoped task title"
+  assert_contains "$(cat "$SDIR/surfaces.tsv")" "$(printf 'WS-CAP\tSF-CAP\tsurface:7\tMATE')" \
+    "the captain's existing tab must be untouched"
+  assert_contains "$(cat "$SLOG")" $'\x1f''new-surface'$'\x1f''--type'$'\x1f''terminal'$'\x1f''--workspace'$'\x1f''WS-CAP'$'\x1f''--focus'$'\x1f''false' \
+    "the tab should be created unfocused in the container"
+  assert_contains "$(cat "$SLOG")" $'\x1f''send'$'\x1f''--workspace'$'\x1f''WS-CAP'$'\x1f''--surface'$'\x1f''SF-101'$'\x1f''--'$'\x1f''cd /tmp/my\ proj' \
+    "the new tab should be moved to the task cwd"
+  pass "cmux tab mode: create adds one unfocused tab, titles it, and moves it to the task cwd"
+}
+
+test_state_tab_create_refuses_duplicate_title_anywhere() {
+  local out status title
+  cmux_state_case tab-dup
+  cmux_state_tab_container
+  title=$(cmux_expected_scoped_title fm-dup)
+  cmux_state_add_workspace "$SDIR" WS-OTHER workspace:3 other /tmp
+  cmux_state_add_surface "$SDIR" WS-OTHER SF-X surface:9 "$title"
+  out=$(cmux_state_run 'fm_backend_cmux_create_task fm-dup /tmp/proj WS-CAP' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "tab-mode create should refuse a duplicate task tab in another workspace"
+  assert_contains "$out" "already exists" "the refusal should name the duplicate"
+  assert_not_contains "$(cat "$SLOG")" $'\x1f''new-surface' "a refused duplicate must create nothing"
+  pass "cmux tab mode: create refuses a task tab title that already exists in any workspace"
+}
+
+test_state_tab_create_picks_own_tab_by_ref_when_concurrent() {
+  local out
+  cmux_state_case tab-concurrent
+  cmux_state_tab_container
+  out=$(FM_CMUX_FAKE_NEW_SURFACE_EXTRA=1 cmux_state_run 'fm_backend_cmux_create_task fm-c1 /tmp/proj WS-CAP') \
+    || fail "tab-mode create should disambiguate concurrent new tabs by the printed ref"
+  [ "$out" = "WS-CAP SF-101" ] || fail "create should pick the tab its own printed ref names, got '$out'"
+  assert_contains "$(cat "$SDIR/surfaces.tsv")" "$(printf 'WS-CAP\tSF-102\tsurface:102\tTerminal')" \
+    "the concurrent spawn's tab must not be renamed"
+  pass "cmux tab mode: when a concurrent spawn adds a tab too, the printed ref picks this call's own"
+}
+
+test_state_tab_create_ambiguous_without_ref_closes_nothing() {
+  local out status
+  cmux_state_case tab-ambiguous
+  cmux_state_tab_container
+  out=$(FM_CMUX_FAKE_NEW_SURFACE_EXTRA=1 FM_CMUX_FAKE_NO_REF=1 cmux_state_run 'fm_backend_cmux_create_task fm-c2 /tmp/proj WS-CAP' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unresolvable new tab should fail the create"
+  assert_contains "$out" "by hand" "the error should ask for a manual close"
+  assert_not_contains "$(cat "$SLOG")" $'\x1f''close-surface' "nothing may be closed without knowing which tab is ours"
+  assert_not_contains "$(cat "$SLOG")" $'\x1f''rename-tab' "an unresolved tab must not be renamed"
+  pass "cmux tab mode: an ambiguous diff with no printed ref fails without closing or renaming any tab"
+}
+
+test_state_tab_create_rename_failure_closes_only_new_tab() {
+  local out status
+  cmux_state_case tab-rename
+  cmux_state_tab_container
+  out=$(FM_CMUX_FAKE_RENAME_EXIT=1 cmux_state_run 'fm_backend_cmux_create_task fm-r1 /tmp/proj WS-CAP' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a failed rename should fail the create"
+  assert_contains "$(cat "$SLOG")" $'\x1f''close-surface'$'\x1f''--workspace'$'\x1f''WS-CAP'$'\x1f''--surface'$'\x1f''SF-101' \
+    "a failed rename should close the new tab"
+  [ "$(cut -f2 "$SDIR/surfaces.tsv")" = SF-CAP ] || fail "only the captain's tab should remain: $(cat "$SDIR/surfaces.tsv")"
+  pass "cmux tab mode: a failed rename closes only the new tab"
+}
+
+test_state_tab_target_ready_routes_by_surface_title() {
+  local out title
+  cmux_state_case tab-target
+  cmux_state_tab_container
+  title=$(cmux_expected_scoped_title fm-t1)
+  cmux_state_add_surface "$SDIR" WS-CAP SF-T1 surface:20 "$title"
+  # shellcheck disable=SC2016  # expanded by the inner shell
+  out=$(cmux_state_run 'fm_backend_cmux_target_ready WS-CAP:SF-STALE fm-t1 && printf "%s:%s" "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE"') \
+    || fail "target_ready should re-find a tab-mode task by its surface title"
+  [ "$out" = WS-CAP:SF-T1 ] || fail "target_ready should route to the titled tab, got '$out'"
+  # A relaunch-stale container id: the task is re-found in whatever workspace holds it.
+  # shellcheck disable=SC2016  # expanded by the inner shell
+  out=$(cmux_state_run 'fm_backend_cmux_target_ready WS-GONE:SF-T1 fm-t1 && printf "%s:%s" "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE"') \
+    || fail "target_ready should re-find a tab-mode task when its container id went stale"
+  [ "$out" = WS-CAP:SF-T1 ] || fail "target_ready should re-find the tab anywhere, got '$out'"
+  cmux_state_run 'fm_backend_cmux_target_ready WS-CAP:SF-CAP fm-other' \
+    && fail "target_ready must refuse a live tab whose title is another task's"
+  pass "cmux tab mode: target_ready routes by scoped tab title, survives a stale container id, and refuses a mismatch"
+}
+
+test_state_kill_tab_closes_only_task_tab() {
+  local title
+  cmux_state_case kill-tab
+  cmux_state_tab_container
+  title=$(cmux_expected_scoped_title fm-k1)
+  cmux_state_add_surface "$SDIR" WS-CAP SF-K1 surface:21 "$title"
+  cmux_state_run 'fm_backend_cmux_kill WS-CAP:SF-K1 "" fm-k1' || fail "kill should succeed"
+  [ "$(cut -f2 "$SDIR/surfaces.tsv")" = SF-CAP ] || fail "kill should close only the task tab: $(cat "$SDIR/surfaces.tsv")"
+  grep -q WS-CAP "$SDIR/workspaces.tsv" || fail "kill must never close the captain's container workspace"
+  pass "cmux tab mode: kill closes only the task tab and keeps the container"
+}
+
+test_state_kill_tab_last_surface_in_captain_workspace() {
+  local title
+  cmux_state_case kill-last
+  title=$(cmux_expected_scoped_title fm-k2)
+  cmux_state_add_workspace "$SDIR" WS-CAP workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-CAP SF-K2 surface:22 "$title"
+  cmux_state_run 'fm_backend_cmux_kill WS-CAP:SF-K2 "" fm-k2' || fail "kill should succeed"
+  grep -q WS-CAP "$SDIR/workspaces.tsv" || fail "the captain's workspace must survive"
+  ! grep -q SF-K2 "$SDIR/surfaces.tsv" || fail "the task tab should be closed even when it was the last one"
+  [ "$(grep -c . "$SDIR/surfaces.tsv")" = 1 ] || fail "a throwaway tab should remain in the captain's workspace"
+  pass "cmux tab mode: the last tab in the captain's workspace is replaced by a throwaway tab, never closing the workspace"
+}
+
+test_state_kill_tab_last_surface_reclaims_shared_container() {
+  local title shared
+  cmux_state_case kill-shared
+  title=$(cmux_expected_scoped_title fm-k3)
+  shared="fm-$(cmux_expected_home_label)"
+  cmux_state_add_workspace "$SDIR" WS-KEEP workspace:1 other /tmp
+  cmux_state_add_surface "$SDIR" WS-KEEP SF-KEEP surface:1 zsh
+  cmux_state_add_workspace "$SDIR" WS-SH workspace:5 "$shared" /tmp
+  cmux_state_add_surface "$SDIR" WS-SH SF-K3 surface:23 "$title"
+  cmux_state_run 'fm_backend_cmux_kill WS-SH:SF-K3 "" fm-k3' || fail "kill should succeed"
+  ! grep -q WS-SH "$SDIR/workspaces.tsv" || fail "the task-free shared container should be reclaimed"
+  grep -q WS-KEEP "$SDIR/workspaces.tsv" || fail "unrelated workspaces must survive"
+  pass "cmux tab mode: the last task tab in this home's shared container reclaims the container"
+}
+
+test_state_kill_workspace_mode_closes_task_workspace() {
+  local title
+  cmux_state_case kill-ws
+  title=$(cmux_expected_scoped_title fm-k4)
+  cmux_state_add_workspace "$SDIR" WS-KEEP workspace:1 other /tmp
+  cmux_state_add_surface "$SDIR" WS-KEEP SF-KEEP surface:1 zsh
+  cmux_state_add_workspace "$SDIR" WS-T workspace:6 "$title" /tmp
+  cmux_state_add_surface "$SDIR" WS-T SF-T surface:24 Terminal
+  cmux_state_run 'fm_backend_cmux_kill WS-T:SF-T "" fm-k4' || fail "kill should succeed"
+  ! grep -q WS-T "$SDIR/workspaces.tsv" || fail "a task-owned workspace should be closed whole"
+  grep -q WS-KEEP "$SDIR/workspaces.tsv" || fail "unrelated workspaces must survive"
+  pass "cmux workspace mode: kill closes the task-owned workspace"
+}
+
+test_state_list_live_covers_both_shapes() {
+  local out t1 t2 home
+  cmux_state_case list-live
+  home=$(cmux_expected_home_label)
+  t1=$(cmux_expected_scoped_title fm-ws1)
+  t2=$(cmux_expected_scoped_title fm-tab2)
+  cmux_state_add_workspace "$SDIR" WS-T workspace:6 "$t1" /tmp
+  cmux_state_add_surface "$SDIR" WS-T SF-T surface:24 Terminal
+  cmux_state_add_workspace "$SDIR" WS-CAP workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-CAP SF-CAP surface:7 MATE
+  cmux_state_add_surface "$SDIR" WS-CAP SF-TAB surface:25 "$t2"
+  cmux_state_add_workspace "$SDIR" WS-SH workspace:5 "fm-$home" /tmp
+  cmux_state_add_surface "$SDIR" WS-SH SF-SH surface:26 zsh
+  out=$(cmux_state_run 'fm_backend_cmux_list_live')
+  [ "$out" = "$(printf 'WS-T:SF-T\tfm-ws1\nWS-CAP:SF-TAB\tfm-tab2')" ] \
+    || fail "list_live should list the task workspace and the task tab only, got: $out"
+  pass "cmux list_live: lists workspace-mode and tab-mode tasks, never the shared container or foreign tabs"
+}
+
+test_state_current_path_prefers_passive_tty_tier() {
+  local out title
+  cmux_state_case cwd-tty
+  title=$(cmux_expected_scoped_title fm-p1)
+  cmux_state_add_workspace "$SDIR" WS-CAP workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-CAP SF-P1 surface:30 "$title" ttys044
+  out=$(FM_FAKE_PS_TTY_PIDSTAT='999901 Ss\n999902 S+' FM_FAKE_LSOF_CWD=/wt/fake-worktree \
+    cmux_state_run 'fm_backend_cmux_current_path WS-CAP:SF-P1 fm-p1')
+  [ "$out" = /wt/fake-worktree ] || fail "current_path should read the foreground process cwd, got '$out'"
+  assert_not_contains "$(cat "$SLOG")" $'\x1f''send'$'\x1f' "a passive hit must type nothing into the task terminal"
+  pass "cmux current_path: the tty/ps/lsof tier answers without typing into the terminal"
+}
+
+test_state_current_path_screen_tier() {
+  local out title
+  cmux_state_case cwd-screen
+  title=$(cmux_expected_scoped_title fm-p2)
+  cmux_state_add_workspace "$SDIR" WS-CAP workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-CAP SF-P2 surface:31 "$title"
+  printf '| [1] /tmp/proj @ host (me) \n$ treehouse get\n| [2] /wt/from-screen @ host (me) \n$ \n' > "$SDIR/screen.txt"
+  out=$(cmux_state_run 'fm_backend_cmux_current_path WS-CAP:SF-P2 fm-p2')
+  [ "$out" = /wt/from-screen ] || fail "current_path should read the last on-screen block header, got '$out'"
+  assert_not_contains "$(cat "$SLOG")" $'\x1f''send'$'\x1f' "a passive hit must type nothing into the task terminal"
+  pass "cmux current_path: the on-screen block-header tier answers when no tty is reported"
+}
+
+test_state_current_path_falls_back_to_marker_probe() {
+  local out title
+  cmux_state_case cwd-marker
+  title=$(cmux_expected_scoped_title fm-p3)
+  cmux_state_add_workspace "$SDIR" WS-CAP workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-CAP SF-P3 surface:32 "$title"
+  printf '/tmp/proj\n❯ printf marker\n__FM_CMUX_CWD_BEGIN__\n/home/fixture/.treehouse/fake-worktree\n__FM_CMUX_CWD_END__\n❯\n' > "$SDIR/screen.txt"
+  out=$(cmux_state_run 'fm_backend_cmux_current_path WS-CAP:SF-P3 fm-p3')
+  [ "$out" = /home/fixture/.treehouse/fake-worktree ] || fail "current_path should read only the marked cwd line, got '$out'"
+  assert_contains "$(cat "$SLOG")" "__FM_CMUX_CWD_BEGIN__" "current_path did not send the cwd begin marker"
+  assert_contains "$(cat "$SLOG")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''WS-CAP'$'\x1f''--surface'$'\x1f''SF-P3'$'\x1f''enter' \
+    "current_path did not submit the cwd probe with Enter"
+  pass "cmux current_path: with no passive answer, probes with marked begin/end lines (frozen-cwd workaround)"
+}
+
+# cmux_state_agent_case: one live task tab on ttys050 for agent_state tests.
+cmux_state_agent_case() {
+  cmux_state_case "agent-$1"
+  cmux_state_add_workspace "$SDIR" WS-CAP workspace:2 AIR-MATE /tmp
+  cmux_state_add_surface "$SDIR" WS-CAP SF-A surface:40 "$(cmux_expected_scoped_title fm-a1)" "${2-ttys050}"
+}
+
+test_state_agent_state_classifies_tty_processes() {
+  local out
+  cmux_state_agent_case alive
+  out=$(FM_FAKE_PS_TTY_PROCS='999911 login\n999912 -zsh\n999913 zsh\n999914 claude\n999915 bash' \
+    cmux_state_run 'fm_backend_cmux_agent_state WS-CAP:SF-A')
+  [ "$out" = alive ] || fail "a harness process anywhere on the tty should read alive, got '$out'"
+  out=$(FM_FAKE_PS_TTY_PROCS='999911 /usr/bin/login\n999912 -zsh\n999913 zsh' \
+    cmux_state_run 'fm_backend_cmux_agent_state WS-CAP:SF-A')
+  [ "$out" = dead ] || fail "login plus shells only should read dead, got '$out'"
+  out=$(FM_FAKE_PS_TTY_PROCS='999911 login\n999912 -zsh\n999916 vim' \
+    cmux_state_run 'fm_backend_cmux_agent_state WS-CAP:SF-A')
+  [ "$out" = ambiguous ] || fail "an unattributable process should read ambiguous, got '$out'"
+  out=$(cmux_state_run 'fm_backend_cmux_agent_state WS-CAP:SF-A')
+  [ "$out" = unreadable ] || fail "an empty tty process read should read unreadable, got '$out'"
+  pass "cmux agent_state: classifies every tty process (login counts as a shell) into alive, dead, ambiguous, unreadable"
+}
+
+test_state_agent_state_endpoint_and_socket_rungs() {
+  local out
+  cmux_state_agent_case rungs ""
+  out=$(cmux_state_run 'fm_backend_cmux_agent_state WS-CAP:SF-A')
+  [ "$out" = ambiguous ] || fail "a never-started terminal (no tty) should read ambiguous, got '$out'"
+  out=$(cmux_state_run 'fm_backend_cmux_agent_state WS-CAP:SF-GONE')
+  [ "$out" = missing ] || fail "a target absent from a readable inventory should read missing, got '$out'"
+  out=$(FM_CMUX_FAKE_PING='Error: Socket not found at /tmp/x' FM_CMUX_FAKE_PING_EXIT=1 \
+    cmux_state_run 'fm_backend_cmux_agent_state WS-CAP:SF-A')
+  [ "$out" = missing ] || fail "a down cmux socket should read missing, got '$out'"
+  out=$(FM_CMUX_FAKE_PING='Access denied - only processes started inside cmux can connect' FM_CMUX_FAKE_PING_EXIT=1 \
+    cmux_state_run 'fm_backend_cmux_agent_state WS-CAP:SF-A')
+  [ "$out" = unreadable ] || fail "a denied socket should read unreadable, got '$out'"
+  out=$(PATH="$SFB:$PATH" FM_CMUX_STATE="$SDIR" FM_CMUX_LOG="$SLOG" FM_FAKE_PS_TTY_PROCS='999912 -zsh' \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state cmux WS-CAP:SF-A' "$ROOT")
+  [ "$out" = ambiguous ] || fail "fm_backend_agent_state should dispatch cmux to its classifier (no tty here), got '$out'"
+  pass "cmux agent_state: no tty is ambiguous, an absent target or down socket is missing, auth failures are unreadable, and the shared dispatch routes cmux"
+}
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
@@ -1130,6 +1566,10 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_retries_printed_ref_lookup_after_creation
+test_create_task_closes_unresolved_workspace_by_printed_ref
+test_create_task_names_leftover_title_when_ref_close_fails
+test_create_task_names_leftover_title_without_ref
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
@@ -1141,7 +1581,6 @@ test_send_key_recovers_stale_target_by_label
 test_send_literal_uses_separator_for_option_shaped_text
 test_send_text_line_clears_partial_input_when_enter_fails
 test_send_text_line_reports_unsafe_input_when_cleanup_fails
-test_current_path_probes_with_marker
 test_composer_state_bare_prompt_is_empty
 test_composer_state_borderless_claude_prompt_is_empty
 test_composer_state_borderless_claude_prompt_outranks_stale_bordered_row
@@ -1158,9 +1597,31 @@ test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_send_failed_when_target_absent
 test_window_of_workspace_finds_window_and_count
 test_window_of_workspace_empty_when_not_found
-test_kill_closes_workspace_directly_when_not_last
-test_kill_adds_sibling_when_last_in_window
-test_kill_is_best_effort_when_close_workspace_fails
+test_close_workspace_closes_directly_when_not_last
+test_close_workspace_adds_sibling_when_last_in_window
+test_close_workspace_is_best_effort_when_close_fails
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend
+test_state_workspace_create_survives_lagging_workspace_list
+test_state_container_mode_precedence
+test_state_container_ensure_workspace_mode_token
+test_state_container_ensure_tab_uses_live_own_workspace
+test_state_container_ensure_tab_refinds_stale_own_workspace_by_surface
+test_state_container_ensure_tab_shared_container_find_or_create
+test_state_tab_create_titles_and_moves_new_tab
+test_state_tab_create_refuses_duplicate_title_anywhere
+test_state_tab_create_picks_own_tab_by_ref_when_concurrent
+test_state_tab_create_ambiguous_without_ref_closes_nothing
+test_state_tab_create_rename_failure_closes_only_new_tab
+test_state_tab_target_ready_routes_by_surface_title
+test_state_kill_tab_closes_only_task_tab
+test_state_kill_tab_last_surface_in_captain_workspace
+test_state_kill_tab_last_surface_reclaims_shared_container
+test_state_kill_workspace_mode_closes_task_workspace
+test_state_list_live_covers_both_shapes
+test_state_current_path_prefers_passive_tty_tier
+test_state_current_path_screen_tier
+test_state_current_path_falls_back_to_marker_probe
+test_state_agent_state_classifies_tty_processes
+test_state_agent_state_endpoint_and_socket_rungs

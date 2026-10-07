@@ -36,11 +36,19 @@ PING_STATE=$(fm_backend_cmux_ping_state)
 # shellcheck source=tests/cmux-test-safety.sh
 . "$ROOT/tests/cmux-test-safety.sh"
 
+# A run from inside cmux must not route the tab legs into the operator's own
+# workspace: every tab this smoke creates lives in a workspace it created.
+unset CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID FM_CMUX_CONTAINER
+
 WS1=""
 WS2=""
+WS3=""
+SHARED_WS=""
 cleanup_all() {
   [ -z "$WS1" ] || cmux_safe_close_workspace "$WS1" "fm-test-smoke1"
   [ -z "$WS2" ] || cmux_safe_close_workspace "$WS2" "fm-test-smoke2"
+  [ -z "$WS3" ] || cmux_safe_close_workspace "$WS3" "fm-test-smoke-tabhost"
+  [ -z "$SHARED_WS" ] || cmux_safe_close_shared_container "$SHARED_WS"
 }
 trap cleanup_all EXIT
 
@@ -183,6 +191,96 @@ case "$live" in
   *) fail "list_live did not report the freshly created task workspace by title"$'\n'"--- got ---"$'\n'"$live" ;;
 esac
 pass "real cmux: list_live discovers a live task workspace by fm-<id> title"
+
+# --- tab mode: one tab per task inside a container workspace -----------------
+# The container is a workspace this smoke created, never the operator's own.
+
+HOST_IDS=$(fm_backend_cmux_create_task fm-test-smoke-tabhost /tmp) || fail "tab host workspace create failed"
+read -r WS3 HOST_SF <<EOF
+$HOST_IDS
+EOF
+[ -n "$WS3" ] && [ -n "$HOST_SF" ] || fail "tab host workspace ids missing"
+TLABEL="fm-test-smoke-tab"
+TAB_IDS=$(fm_backend_cmux_create_task "$TLABEL" /private/tmp "$WS3") || fail "tab-mode create_task failed"
+read -r TWS TSF <<EOF
+$TAB_IDS
+EOF
+[ "$TWS" = "$WS3" ] || fail "tab-mode create should return the container workspace, got '$TWS'"
+[ -n "$TSF" ] && [ "$TSF" != "$HOST_SF" ] || fail "tab-mode create should return a new surface, got '$TSF'"
+TTITLE=$(fm_backend_cmux_scoped_title "$TLABEL")
+[ "$(fm_backend_cmux_surface_by_title "$WS3" "$TTITLE")" = "$TSF" ] || fail "the new tab does not carry its scoped title"
+if fm_backend_cmux_create_task "$TLABEL" /tmp "$WS3" >/dev/null 2>&1; then
+  fail "tab-mode create should refuse a duplicate tab title"
+fi
+pass "real cmux: tab-mode create adds a titled tab in the container and refuses a duplicate"
+
+fm_backend_cmux_target_ready "$WS3:$HOST_SF" "$TLABEL" || fail "target_ready should re-find the tab by its title"
+[ "$FM_BACKEND_CMUX_SURFACE" = "$TSF" ] || fail "target_ready routed to '$FM_BACKEND_CMUX_SURFACE', not the task tab"
+fm_backend_cmux_send_text_line "$WS3:$TSF" "echo tab-mode-captain" "$TLABEL" || fail "send_text_line to the tab failed"
+sleep 0.5
+out=$(fm_backend_cmux_capture "$WS3:$TSF" 20 "$TLABEL") || fail "capture of the tab failed"
+case "$out" in
+  *tab-mode-captain*) : ;;
+  *) fail "real cmux: a line sent to the task tab did not echo"$'\n'"$out" ;;
+esac
+p=$(fm_backend_cmux_current_path "$WS3:$TSF" "$TLABEL")
+case "$p" in
+  */private/tmp|*/tmp) : ;;
+  *) fail "real cmux: tab current_path did not report the cwd create_task moved it to, got '$p'" ;;
+esac
+pass "real cmux: tab-mode routing by title, send, capture, and the task cwd all work"
+
+st=$(fm_backend_cmux_agent_state "$WS3:$TSF" "$TLABEL")
+[ "$st" = dead ] || fail "a tab holding only its shell should classify dead, got '$st'"
+fm_backend_cmux_send_text_line "$WS3:$TSF" "bash -c 'exec -a claude sleep 30'" "$TLABEL" || fail "could not start the stand-in agent"
+sleep 1
+st=$(fm_backend_cmux_agent_state "$WS3:$TSF" "$TLABEL")
+[ "$st" = alive ] || fail "a tab running a process whose argv0 is a harness name should classify alive, got '$st'"
+fm_backend_cmux_send_key "$WS3:$TSF" C-c "$TLABEL" || true
+sleep 0.5
+st=$(fm_backend_cmux_agent_state "$WS3:$TSF" "$TLABEL")
+[ "$st" = dead ] || fail "the tab should classify dead again once the stand-in agent exits, got '$st'"
+pass "real cmux: agent_state reads the tab's tty processes (login and shells dead, a harness-named process alive)"
+
+fm_backend_cmux_kill "$WS3:$TSF" "" "$TLABEL"
+sleep 0.3
+[ -z "$(fm_backend_cmux_surface_by_title "$WS3" "$TTITLE")" ] || fail "kill did not close the task tab"
+fm_backend_cmux_surface_ids "$WS3" | grep -qxF "$HOST_SF" || fail "kill must leave the container's own tab alone"
+pass "real cmux: tab-mode kill closes only the task tab and keeps the container"
+
+# Last tab in a container that is not this home's shared container: kill
+# adds a throwaway tab so the close lands and the container survives.
+HOST_IDS2=$(fm_backend_cmux_create_task fm-test-smoke-tab2 /tmp "$WS3") || fail "second tab create failed"
+TSF2=${HOST_IDS2#* }
+fm_backend_cmux_cli close-surface --workspace "$WS3" --surface "$HOST_SF" >/dev/null 2>&1 || fail "could not close the host tab to make the task tab last"
+fm_backend_cmux_kill "$WS3:$TSF2" "" fm-test-smoke-tab2
+sleep 0.3
+fm_backend_cmux_surface_ids "$WS3" | grep -qxF "$TSF2" && fail "kill did not close the last task tab"
+[ -n "$(fm_backend_cmux_surface_ids "$WS3")" ] || fail "the container should keep a throwaway tab"
+pass "real cmux: killing the last task tab in a foreign container leaves a throwaway tab instead of closing the container"
+
+# --- tab mode outside a live cmux workspace: the shared per-home container ---
+
+SHARED_TITLE=$(fm_backend_cmux_shared_container_title)
+if [ -n "$(fm_backend_cmux_tree_surfaces | awk -F'\t' -v t="$SHARED_TITLE" '$2 == t { print $1; exit }')" ]; then
+  echo "skip: shared container '$SHARED_TITLE' already exists; not touching it"
+else
+  SHARED_WS=$(FM_CMUX_CONTAINER=tab fm_backend_cmux_container_ensure /tmp) || fail "shared container ensure failed"
+  again=$(FM_CMUX_CONTAINER=tab fm_backend_cmux_container_ensure /tmp) || fail "second shared container ensure failed"
+  [ "$again" = "$SHARED_WS" ] || fail "a second ensure should reuse the shared container, got '$again' vs '$SHARED_WS'"
+  SIDS=$(fm_backend_cmux_create_task fm-test-smoke-shared /tmp "$SHARED_WS") || fail "tab create in the shared container failed"
+  SSF=${SIDS#* }
+  # Make the task tab the container's only surface, then kill it: the
+  # task-free shared container is reclaimed whole.
+  for sf in $(fm_backend_cmux_surface_ids "$SHARED_WS"); do
+    [ "$sf" = "$SSF" ] || fm_backend_cmux_cli close-surface --workspace "$SHARED_WS" --surface "$sf" >/dev/null 2>&1
+  done
+  fm_backend_cmux_kill "$SHARED_WS:$SSF" "" fm-test-smoke-shared
+  sleep 0.5
+  [ -z "$(fm_backend_cmux_pane_ids_for_workspace "$SHARED_WS")" ] || fail "the task-free shared container was not reclaimed"
+  SHARED_WS=""
+  pass "real cmux: tab mode finds or creates one shared container and reclaims it with its last task tab"
+fi
 
 cleanup_all
 trap - EXIT

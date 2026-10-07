@@ -1815,8 +1815,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
+  # one into the same endpoint, and only a backend with a recovery-grade
+  # classifier can (bin/fm-control-lib.sh owns that capability table).
   fm_control_backend_state_verified "$BACKEND" || {
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
@@ -1920,6 +1920,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+  fi
+  if [ "$BACKEND" = cmux ]; then
+    # A relaunch adopts the validated recorded endpoint, so the published
+    # record keeps that endpoint's ids rather than any ambient cmux marker.
+    CMUX_TASK_WORKSPACE_ID=${RELAUNCH_TARGET%%:*}
+    CMUX_TASK_SURFACE_ID=${RELAUNCH_TARGET#*:}
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -4014,16 +4020,20 @@ EOF
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
-    fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
-    read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
+    # The container token is "workspace" (one workspace per task) or, in tab
+    # mode, the container workspace's uuid (bin/backends/cmux.sh). The task's
+    # ids go into _TASK-suffixed variables so the ambient CMUX_WORKSPACE_ID
+    # marker that container_ensure reads is never overwritten.
+    CMUX_CONTAINER=$(fm_backend_cmux_container_ensure "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS" "$CMUX_CONTAINER") || exit 1
+    read -r CMUX_TASK_WORKSPACE_ID CMUX_TASK_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
-    if [ -z "$CMUX_WORKSPACE_ID" ] || [ -z "$CMUX_SURFACE_ID" ]; then
+    if [ -z "$CMUX_TASK_WORKSPACE_ID" ] || [ -z "$CMUX_TASK_SURFACE_ID" ]; then
       echo "error: cmux did not return a workspace/surface id for $W" >&2
       exit 1
     fi
-    T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    T="$CMUX_TASK_WORKSPACE_ID:$CMUX_TASK_SURFACE_ID"
     ;;
   orca)
     set +e
@@ -5173,8 +5183,8 @@ preserve_relaunch_meta() {
     echo "terminal=$ORCA_TERMINAL"
   fi
   if [ "$BACKEND" = cmux ]; then
-    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
-    echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    echo "cmux_workspace_id=$CMUX_TASK_WORKSPACE_ID"
+    echo "cmux_surface_id=$CMUX_TASK_SURFACE_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

@@ -49,3 +49,20 @@ cmux_safe_close_workspace() {  # <workspace_id> <want_label>
   cmux_refuse_if_unsafe "$1" "$2" || return 1
   fm_backend_cmux_cli close-workspace --workspace "$1" >/dev/null 2>&1 || true
 }
+
+# cmux_safe_close_shared_container: tear down the tab-mode shared container a
+# test created through fm_backend_cmux_container_ensure. Refuses unless
+# <workspace_id> is non-empty and currently titled exactly with this home's
+# shared container title; the caller only ever passes an id its own ensure
+# created after proving no such container existed beforehand.
+cmux_safe_close_shared_container() {  # <workspace_id>
+  local wsid=$1 want title
+  [ -n "$wsid" ] || { echo "cmux safety guard: refusing - empty workspace id" >&2; return 1; }
+  want=$(fm_backend_cmux_shared_container_title)
+  title=$(fm_backend_cmux_tree_surfaces | awk -F'\t' -v w="$wsid" '$1 == w { print $2; exit }')
+  if [ "$title" != "$want" ]; then
+    echo "cmux safety guard: refusing - workspace $wsid title '${title:-<not found>}' does not match '$want'" >&2
+    return 1
+  fi
+  fm_backend_cmux_close_workspace "$wsid"
+}

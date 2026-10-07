@@ -1973,7 +1973,33 @@ tests/fm-backend-cmux.test.sh
 tests/fm-backend-cmux-smoke.test.sh
 ```
 
-The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
+The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, tab mode, liveness, and guarded exact cleanup.
+
+### Creation identity, tab mode, and liveness on 0.64.25
+
+Verified on 2026-10-07 with cmux 0.64.25 build 106 and Claude Code 2.1.292 on macOS aarch64, in Automation mode.
+
+```text
+cmux 0.64.25 (106) [b685a275c]
+```
+
+- `new-workspace` printed only `OK workspace:<n>` whatever `--id-format` said, and `new-surface` printed `OK surface:<n> pane:<m> workspace:<k>`.
+- For tens to about 115 ms after `new-workspace`, `workspace list` could omit the new workspace entirely, so a title lookup right after creation failed (4 of 4 unmodified spawns).
+- `list-panes --workspace <ref> --json --id-format uuids` answered at once (17 of 17) with `workspace_id`, `window_id`, and pane `surface_ids`, and is not scoped to the current window.
+- `tree --all --json --id-format both` listed every window, workspace, pane, and surface with `ref`, `title`, `tty`, and `render_health`, including a just-created workspace.
+- `list-pane-surfaces` covers only the focused pane, so tab scans read the tree instead.
+- `rename-tab --workspace <id> --surface <id> -- <title>` set a title the shell's own retitling did not overwrite.
+- An unfocused new tab or workspace started at 99x35 with a 0x0 `pixel_frame` and `render_health` `not_started`; on first view it resized to the pane (153x50 here), reported `rendering`, and a running Claude Code redrew at full width with no black or mis-sized paint.
+  This is cmux PR 8540 (fixing issue 8526, first released in 0.64.21), so creation stays `--focus false`.
+- Every tab's tty carried `/usr/bin/login` and `-/bin/zsh`; a running Claude Code showed a 16-byte truncated `comm` and argv0 `/Users/<user>/.local/bin/claude`, so `fm_backend_cmux_agent_state` read `dead`, then `alive` with Claude running, then `dead` after `/exit`.
+
+The real smoke covers the workspace and tab legs, the shared container, and a stand-in agent whose argv0 is a harness name:
+
+```sh
+bash tests/fm-backend-cmux-smoke.test.sh
+```
+
+All 18 legs passed on that date and left no workspace or tab behind.
 
 ### Claude composer confirmation
 
