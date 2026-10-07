@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Backend-neutral harness-process identity.
-# Sourced by bin/backends/tmux.sh and bin/backends/herdr.sh. This file is
+# Sourced by bin/backends/tmux.sh, bin/backends/herdr.sh, and
+# bin/backends/cmux.sh. This file is
 # sourced by scripts and has no side effects on source.
 #
 # Why one owner: every runtime backend that proves an agent is alive does it by

@@ -641,7 +641,7 @@ fm_backend_source() {  # <name>
       set -- fm-composer-lib.sh
       ;;
     cmux)
-      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
+      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh
       ;;
     *)
       return 1
@@ -1008,15 +1008,18 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # which verifies a registered agent against `pane process-info` and the real
 # process table, so a registration Herdr kept over a shell-only pane reads
 # `dead` here (issue #4115) - then maps a positively stopped session server to
-# `missing` only in this recovery-grade view. Zellij remains unverified because
-# its secondmate ghost-tab and agent-process recovery path has not been
-# empirically validated. Orca and cmux do not support secondmate spawns.
+# `missing` only in this recovery-grade view. The cmux adapter classifies every
+# process on the surface's tty and reads a down control socket as `missing`
+# (fm_backend_cmux_agent_state). Zellij remains unverified because its
+# secondmate ghost-tab and agent-process recovery path has not been
+# empirically validated. Orca does not support secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    cmux) fm_backend_cmux_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }

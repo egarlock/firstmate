@@ -294,14 +294,14 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
+# Whether <backend> has a recovery-grade agent-state classifier. Only tmux,
+# herdr, and cmux implement fm_backend_agent_state; zellij and orca report
 # `unverified`, so no reading of theirs can prove an agent stopped. The control
 # plane refuses a stop-proving verb there instead of reporting an unprovable
 # transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr) return 0 ;;
+    tmux|herdr|cmux) return 0 ;;
   esac
   return 1
 }
@@ -364,6 +364,9 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe recorded herdr session'"'"'s server could not be started, or its pane could not be classified once it was running' ;;
       esac
+      ;;
+    cmux)
+      printf 'unproven\tcmux absence cannot be proven from a task record: cmux re-mints workspace ids when the app relaunches, so a recorded endpoint missing from the inventory may still be live under a new id'
       ;;
     *)
       printf 'unproven\tbackend %s has no recovery-grade classifier, so absence cannot be proven on it at all' "'$backend'"
